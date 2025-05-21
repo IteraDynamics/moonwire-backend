@@ -1,79 +1,98 @@
-# MoonWire Signal Engine v3 (Discovery Edition + Auto Loop)
+# MoonWire Signal Engine – Backend
+
+This is the backend engine for **MoonWire** — a real-time crypto signal platform that blends social sentiment, news narratives, and market behavior into actionable indicators.
+
+The current backend supports both **live market discovery** and **mock-mode sentiment APIs** as we prepare for model-based scoring and signal blending.
 
 ---
 
 ## Overview
 
-MoonWire is a real-time, autonomous crypto signal discovery engine.  
-It scans the live crypto markets, detects price and volume anomalies (sleepers), and dispatches actionable signals automatically.
+MoonWire's backend is designed to ingest, analyze, and return signal-ready data for frontend display and future ML training. This includes:
 
-Built for real crypto-native traders who want speed, precision, and early mover advantage.
+- Real-time sleeper signal scanning (market-based)
+- Twitter + news sentiment APIs (mock or cached)
+- Autonomous scoring loop (10-minute interval)
+- API endpoints used by the MoonWire frontend
+- Internal-only experimental modules for scoring logic
 
 ---
 
 ## Key Features
 
-- **Fully live backend** — hosted cloud server (Render) scanning 24/7.
-- **Real-time market discovery** — top 250 coins pulled live from CoinGecko.
-- **Sleeper detection engine** — automatic identification of unexpected price/volume spikes.
-- **Auto-run engine loop** — ingestion, analysis, and alerting every 10 minutes.
-- **No manual inputs needed** — MoonWire runs autonomously once deployed.
-- **Local cache memory (mock Redis)** — simplified and optimized for MVP.
-- **Mobile-controllable** — test, trigger, and monitor via HTTPBot or Postman apps.
+- **FastAPI server** — lightweight, async, auto-launch on deploy
+- **Live CoinGecko ingestion** — top 250 coins pulled for signal analysis
+- **Sleeper detection engine** — identifies unexpected price/volume anomalies
+- **Mock sentiment endpoints** — support frontend beta with fallback data
+- **Auto-loop analysis engine** — ingestion → analysis → dispatch every 10 minutes
+- **Lightweight local cache** — Redis simulated via in-memory storage
+- **Modular design** — core logic isolated in `src/` for easy upgrades
 
 ---
 
-## Technology Stack 
+## Tech Stack
 
-- **FastAPI** — blazing-fast Python API server.
-- **Uvicorn** — ASGI web server.
-- **Requests** — for real-time API pulls from CoinGecko.
-- **Python threading** — for background auto-run loops.
-- **Render.com** — cloud deployment for API + automation.
-- **GitHub** — version control and CI/CD for Render deployment.
+- **Python + FastAPI** — modern async API framework
+- **Uvicorn** — ASGI production-ready server
+- **Requests** — live market data ingestion
+- **Render** — serverless backend hosting
+- **GitHub** — version control + CI/CD triggers
 
 ---
 
-## System Components
+## Core Modules
 
 | Module | Purpose |
-|:---|:---|
-| `main.py` | FastAPI app entrypoint + background thread launcher |
-| `src/ingest_discovery.py` | Pulls live top 250 crypto coins from CoinGecko |
-| `src/signal_generator.py` | Analyzes assets for price/volume anomalies |
-| `src/dispatcher.py` | Dispatches and logs sleeper signal alerts |
-| `src/auto_loop.py` | Autonomous runner: ingestion → analysis → dispatch loop every 10 min |
-| `src/cache.py` | Lightweight Python dictionary cache (no Redis server needed) |
-| `src/logger.py` | Timestamped event logging for monitoring activity |
+|--------|---------|
+| `main.py` | FastAPI app entrypoint, includes sentiment/news routers |
+| `src/auto_loop.py` | Background thread running signal scan every 10 minutes |
+| `src/ingest_discovery.py` | Pulls top 250 assets from CoinGecko |
+| `src/signal_generator.py` | Detects sleeper signals via price/volume anomalies |
+| `src/news_router.py` | News sentiment score API (mock or cached) |
+| `src/sentiment_news.py` | Sentiment analysis logic for headlines |
+| `src/cache.py` | Lightweight dict-based cache (MVP-safe) |
+| `src/logger.py` | Structured log entries for tracking system activity |
+
+---
+
+## API Endpoints
+
+| Route | Purpose |
+|-------|---------|
+| `/sentiment/twitter` | Returns mock sentiment data for selected asset |
+| `/news-sentiment` | Returns mock or cached news sentiment scores |
+| `/signals/sleepers` | Internal route (future public dashboard feed) |
 
 ---
 
 ## How It Works
 
-1. **Server Start:** FastAPI boots → Auto-loop thread launches.
-2. **Every 10 minutes:**
-   - Fetch live top 250 crypto coins.
-   - Analyze each asset for sleepers.
-   - Dispatch any matching sleeper signals to logs (future: to Email/SMS).
-3. **Server Auto-Sleeps** (Render free plan) and Auto-Wakes as needed.
+1. Server boots via Render → launches FastAPI app
+2. Background loop runs every 10 minutes:
+   - Pulls top assets from CoinGecko
+   - Evaluates for price/volume spikes
+   - Logs matched signals
+3. Frontend queries mock API endpoints for now
+4. Ready for swap to real scoring model as backend evolves
 
 ---
 
 ## Deployment Notes
 
-- Hosted on **Render.com** (free/low-cost backend server).
-- Redis is **mocked by local memory cache** for simplicity during MVP stage.
-- Rate limiting protected by adjusting loop intervals (CoinGecko free API friendly).
+- Hosted on **Render.com** with auto-loop enabled
+- No DB or Redis required — runs on local memory and simple caching
+- Rate-limit aware — all ingestion paced for free API tiers
+- Logs print to console for early-stage monitoring
 
 ---
 
-## Next Upgrades
+## In Progress
 
-- Integrate **real Email/SMS alerting** (SendGrid, Twilio).
-- Build **user-facing signal dashboard** (web frontend).
-- Add **dynamic sentiment analysis** (Twitter/X or LunarCrush).
-- Upgrade to managed Redis cloud when scaling past MVP.
-- Offer **tiered access** (Free/Pro/Elite) with different signal privileges.
+- Model-based sentiment scoring (social + news)
+- Composite signal engine (score, label, drivers, trend)
+- Event tracking and confidence metadata
+- Feedback and training data export
+- Private signal testing dashboard
 
 ---
 
@@ -84,5 +103,3 @@ Built for real crypto-native traders who want speed, precision, and early mover 
 > Built for signal hunters.**
 
 ---
-
-# End of Doc
