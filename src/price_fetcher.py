@@ -22,7 +22,6 @@ def get_price_usd(asset: str):
         print(f"[Price Fetcher] Unsupported asset: {asset}")
         return None
 
-    # Check cache
     now = time.time()
     if asset in _price_cache:
         cached_price, timestamp = _price_cache[asset]
@@ -35,8 +34,6 @@ def get_price_usd(asset: str):
         response.raise_for_status()
         data = response.json()
         price = data[coingecko_id]["usd"]
-
-        # Update cache
         _price_cache[asset] = (price, now)
         return price
 
@@ -44,5 +41,43 @@ def get_price_usd(asset: str):
         print(f"[Price Fetcher] Error fetching price for {asset}: {e}")
         return None
 
-# Example use:
-# print(get_price_usd("BTC"))
+def bulk_price_fetch(assets):
+    now = time.time()
+    ids_to_fetch = []
+    asset_to_id = {}
+    result = {}
+
+    for asset in assets:
+        asset = asset.upper()
+        if asset in _price_cache:
+            cached_price, timestamp = _price_cache[asset]
+            if now - timestamp < CACHE_TTL:
+                result[asset] = cached_price
+                continue
+
+        coingecko_id = COINGECKO_IDS.get(asset)
+        if coingecko_id:
+            ids_to_fetch.append(coingecko_id)
+            asset_to_id[coingecko_id] = asset
+
+    if not ids_to_fetch:
+        return result
+
+    try:
+        ids_param = ",".join(ids_to_fetch)
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_param}&vs_currencies=usd"
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+
+        for cg_id, cg_data in data.items():
+            asset = asset_to_id[cg_id]
+            price = cg_data.get("usd")
+            if price is not None:
+                _price_cache[asset] = (price, now)
+                result[asset] = price
+
+    except Exception as e:
+        print(f"[Price Fetcher] Bulk fetch error: {e}")
+
+    return result
