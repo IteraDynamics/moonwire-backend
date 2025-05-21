@@ -1,3 +1,4 @@
+import time
 from fastapi import APIRouter
 from src.sentiment_news import fetch_news_sentiment_scores
 from src.signal_log import log_signal
@@ -11,6 +12,7 @@ def get_news_sentiment_scores():
 
     for asset, score in scores.items():
         price = get_price_usd(asset)
+        time.sleep(1.25)  # Prevent CoinGecko 429 rate limiting
 
         log_signal(
             asset=asset,
