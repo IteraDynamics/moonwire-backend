@@ -15,6 +15,10 @@ COINGECKO_IDS = {
     # Add more as needed
 }
 
+HEADERS = {
+    "User-Agent": "moonwire-signal-engine/1.0"
+}
+
 def get_price_usd(asset: str):
     asset = asset.upper()
     coingecko_id = COINGECKO_IDS.get(asset)
@@ -30,7 +34,7 @@ def get_price_usd(asset: str):
 
     try:
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, headers=HEADERS, timeout=5)
         response.raise_for_status()
         data = response.json()
         price = data[coingecko_id]["usd"]
@@ -67,7 +71,7 @@ def bulk_price_fetch(assets):
         ids_param = ",".join(ids_to_fetch)
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_param}&vs_currencies=usd"
         time.sleep(1.5)  # Prevent rate limit (429)
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, headers=HEADERS, timeout=5)
         response.raise_for_status()
         data = response.json()
 
