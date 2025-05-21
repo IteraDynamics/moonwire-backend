@@ -1,48 +1,47 @@
-from datetime import datetime
 import json
 import os
+from datetime import datetime
+from pathlib import Path
 
-# Optional: Path for local logging during development
-LOG_PATH = "signal_logs.json"
+LOG_DIR = Path("logs")
+LOG_FILE = LOG_DIR / "signal_history.jsonl"
+IS_LOCAL = os.environ.get("RENDER") is None
 
-class SignalLog:
-    def __init__(self, asset, source, score, fallback_type=None, price_at_score=None):
-        self.asset = asset
-        self.source = source
-        self.score = score
-        self.fallback_type = fallback_type
-        self.price_at_score = price_at_score
-        self.timestamp = datetime.utcnow().isoformat()
+# Only attempt to create logs directory if local
+if IS_LOCAL:
+    LOG_DIR.mkdir(exist_ok=True)
 
-    def to_dict(self):
-        return {
-            "asset": self.asset,
-            "timestamp": self.timestamp,
-            "source": self.source,
-            "score": self.score,
-            "fallback_type": self.fallback_type,
-            "price_at_score": self.price_at_score
+def log_signal(
+    asset,
+    source,
+    score,
+    confidence=None,
+    fallback_type=None,
+    price_at_score=None,
+    movement=None,
+    volume=None,
+    timestamp=None
+):
+    try:
+        entry = {
+            "timestamp": (timestamp or datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%S"),
+            "asset": asset,
+            "source": source,
+            "score": round(score, 4) if score is not None else None,
+            "confidence": round(confidence, 4) if confidence is not None else None,
+            "fallback_type": fallback_type,
+            "price_at_score": round(price_at_score, 2) if price_at_score is not None else None,
+            "movement_percent": round(movement, 4) if movement is not None else None,
+            "volume_usd": round(volume, 2) if volume is not None else None
         }
 
+        # Always print to console
+        print("[Signal Logged]", json.dumps(entry, indent=2))
 
-def log_signal(signal: SignalLog):
-    entry = signal.to_dict()
-    
-    # Console log for quick feedback
-    print("[SignalLog]", json.dumps(entry, indent=2))
+        # Only write to file locally
+        if IS_LOCAL:
+            with open(LOG_FILE, "a") as f:
+                f.write(json.dumps(entry) + "\n")
 
-    # Optional: append to local JSON file for persistent logs
-    if os.path.exists(LOG_PATH):
-        with open(LOG_PATH, "r") as f:
-            logs = json.load(f)
-    else:
-        logs = []
-
-    logs.append(entry)
-
-    with open(LOG_PATH, "w") as f:
-        json.dump(logs, f, indent=2)
-
-
-# Example usage:
-# log_signal(SignalLog(asset="BTC", source="twitter", score=0.42, fallback_type="mock", price_at_score=67420.00))
+    except Exception as e:
+        print(f"[Log Error] Could not log signal for {asset}: {e}")
