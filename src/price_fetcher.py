@@ -66,6 +66,7 @@ def bulk_price_fetch(assets):
     try:
         ids_param = ",".join(ids_to_fetch)
         url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids_param}&vs_currencies=usd"
+        time.sleep(1.5)  # Prevent rate limit (429)
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
