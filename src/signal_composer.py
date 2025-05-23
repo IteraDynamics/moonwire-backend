@@ -1,33 +1,42 @@
-from datetime import datetime
 import uuid
+from datetime import datetime
 
-def generate_signal(asset, sentiment_score, price_at_score=None, fallback_type="mock"):
-    """
-    Generate a structured signal object from sentiment and market context.
-    This function is rules-based for now and can be swapped with model logic later.
-    """
-    # Rule-based logic
-    if sentiment_score > 0.6:
-        label = "Bullish Momentum Spike"
+def generate_signal(
+    asset: str,
+    sentiment_score: float,
+    fallback_type: str,
+    top_drivers: list
+) -> dict:
+    # Normalize score
+    score = round(sentiment_score, 2)
+
+    # Confidence logic
+    if score >= 0.7:
         confidence = "high"
-        trend = "upward"
-    elif sentiment_score < -0.4:
-        label = "Bearish Sentiment Breakdown"
+    elif score >= 0.4:
         confidence = "medium"
-        trend = "downward"
     else:
-        label = "Neutral Market Noise"
         confidence = "low"
-        trend = "flat"
+
+    # Trend logic
+    trend = "upward" if score >= 0.5 else "downward"
+
+    # Labeling logic
+    if score >= 0.75:
+        label = "Bullish Momentum Spike"
+    elif score <= 0.25:
+        label = "Bearish Reversal"
+    else:
+        label = "Neutral Drift"
 
     return {
         "id": f"sig_{uuid.uuid4().hex[:8]}",
         "asset": asset,
-        "score": round(sentiment_score, 4),
+        "score": score,
         "confidence": confidence,
         "label": label,
         "trend": trend,
-        "top_drivers": ["social sentiment", "volume shift"],  # Placeholder
+        "top_drivers": top_drivers,
         "timestamp": datetime.utcnow().isoformat(),
         "fallback_type": fallback_type
     }
