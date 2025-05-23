@@ -1,3 +1,5 @@
+# src/signal_log.py
+
 import json
 from datetime import datetime
 from pathlib import Path
@@ -8,26 +10,31 @@ LOG_FILE = LOG_DIR / "signal_history.jsonl"
 # Ensure logs directory exists
 LOG_DIR.mkdir(exist_ok=True)
 
-def log_signal(asset, movement, volume, sentiment, confidence, timestamp):
+def log_signal(
+    id: str,
+    asset: str,
+    score: float,
+    confidence: str,
+    label: str,
+    trend: str,
+    top_drivers: list,
+    timestamp: str,
+    fallback_type: str
+):
     try:
         entry = {
-            "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            "id": id,
+            "timestamp": timestamp,
             "asset": asset,
-            "movement_percent": movement,
-            "volume_usd": volume,
-            "sentiment_score": round(sentiment, 4),
-            "confidence_score": round(confidence, 4)
+            "score": score,
+            "confidence": confidence,
+            "label": label,
+            "trend": trend,
+            "top_drivers": top_drivers,
+            "fallback_type": fallback_type
         }
         with open(LOG_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
         print(f"[Signal Logged] {entry}")
     except Exception as e:
         print(f"[Log Error] Could not log signal for {asset}: {e}")
-
-def log_composite_signal(signal: dict):
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(json.dumps(signal) + "\n")
-        print(f"[Composite Signal Logged] {signal}")
-    except Exception as e:
-        print(f"[Composite Log Error] {e}")
