@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query
 from src.twitter_ingestor import fetch_tweets_and_analyze
 from src.signal_log import log_signal
+from src.signal_composer import generate_signal
 from src.price_fetcher import get_price_usd
 
 router = APIRouter()
@@ -13,17 +14,28 @@ def get_twitter_sentiment(
 ):
     result = fetch_tweets_and_analyze(asset, method=method, limit=limit)
 
-    score = result.get("average_sentiment")
+    sentiment_score = result.get("average_sentiment", 0)
     fallback_type = result.get("source_type", "mock")
-    price = get_price_usd(asset)
 
-    log_signal(
+    # Generate full signal
+    signal = generate_signal(
         asset=asset,
-        source="twitter",
-        score=score,
+        sentiment_score=sentiment_score,
         fallback_type=fallback_type,
-        confidence=None,
-        price_at_score=price
+        top_drivers=["twitter sentiment"]
     )
 
-    return result
+    # Log to signal history
+    log_signal(**signal)
+
+    # Return frontend-friendly fields
+    return {
+        "sentiment_scores": [
+            {
+                "asset": signal["asset"],
+                "sentiment_score": signal["score"],
+                "confidence": signal["confidence"],
+                "timestamp": signal["timestamp"]
+            }
+        ]
+    }
