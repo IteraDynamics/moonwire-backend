@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from src.cache_instance import cache
+from src.signal_utils import generate_signal  # ✅ Make sure this import exists
 from fastapi import APIRouter, Query
 import ssl
 import tweepy
@@ -82,7 +83,6 @@ def score_tweets(tweets: list[str]):
     return round(sum(scores) / len(scores), 4) if scores else 0.0
 
 def fetch_tweets_and_analyze(asset: str, method="api", limit=10):
-    yesterday = (datetime.utcnow() - timedelta(days=1)).date()
     query = f"{asset} OR #{asset}"  # Cashtag (${asset}) removed to avoid unsupported operator
 
     tweets = []
@@ -91,6 +91,7 @@ def fetch_tweets_and_analyze(asset: str, method="api", limit=10):
     elif method == "api":
         tweets = fetch_from_twitter_api(query, limit)
 
+    fallback_type = None
     if not tweets:
         logging.warning({
             "event": "twitter_fallback_used",
@@ -98,6 +99,7 @@ def fetch_tweets_and_analyze(asset: str, method="api", limit=10):
             "timestamp": datetime.utcnow().isoformat()
         })
         tweets = MOCK_TWEETS
+        fallback_type = "mock"
 
     avg_sentiment = score_tweets(tweets)
     timestamp = datetime.utcnow().isoformat()
@@ -108,12 +110,17 @@ def fetch_tweets_and_analyze(asset: str, method="api", limit=10):
         "timestamp": timestamp
     })
 
+    signal = generate_signal(
+        asset=asset,
+        score=avg_sentiment,
+        source="twitter",
+        fallback_type=fallback_type,
+        top_drivers=["twitter sentiment"],
+        timestamp=timestamp
+    )
+
     return {
-        "asset": asset,
-        "average_sentiment": avg_sentiment,
-        "timestamp": timestamp,
-        "source": "twitter",
-        "sample_tweets": tweets
+        "signals": [signal]
     }
 
 @router.get("/test-twitter")
