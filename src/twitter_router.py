@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Query
 from src.twitter_ingestor import fetch_tweets_and_analyze
 from src.signal_log import log_signal
-from src.signal_composer import generate_signal
 from src.price_fetcher import get_price_usd
+from src.signal_utils import generate_signal  # ✅ for structured signal output
 
 router = APIRouter()
 
@@ -14,28 +14,40 @@ def get_twitter_sentiment(
 ):
     result = fetch_tweets_and_analyze(asset, method=method, limit=limit)
 
-    sentiment_score = result.get("average_sentiment", 0)
-    fallback_type = result.get("source_type", "mock")
+    score = result.get("average_sentiment")
+    fallback_type = result.get("source", "mock")
+    price = get_price_usd(asset)
 
-    # Generate full signal
+    log_signal(
+        asset=asset,
+        source="twitter",
+        score=score,
+        fallback_type=fallback_type,
+        confidence=None,
+        price_at_score=price
+    )
+
+    return result
+
+@router.get("/signals/twitter")
+def get_twitter_signals(
+    asset: str = Query("BTC"),
+    method: str = Query("snscrape", enum=["snscrape", "api"]),
+    limit: int = Query(10, ge=10, le=100)
+):
+    tweets_result = fetch_tweets_and_analyze(asset, method=method, limit=limit)
+
+    score = tweets_result.get("average_sentiment", 0)
+    fallback_type = tweets_result.get("source", "mock")
+
     signal = generate_signal(
         asset=asset,
-        sentiment_score=sentiment_score,
+        source="twitter",
+        score=score,
         fallback_type=fallback_type,
+        confidence=None,
+        price_at_score=None,
         top_drivers=["twitter sentiment"]
     )
 
-    # Log to signal history
-    log_signal(**signal)
-
-    # Return frontend-friendly fields
-    return {
-        "sentiment_scores": [
-            {
-                "asset": signal["asset"],
-                "sentiment_score": signal["score"],
-                "confidence": signal["confidence"],
-                "timestamp": signal["timestamp"]
-            }
-        ]
-    }
+    return {"signals": [signal]}
