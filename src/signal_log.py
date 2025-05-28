@@ -10,31 +10,21 @@ LOG_FILE = LOG_DIR / "signal_history.jsonl"
 # Ensure logs directory exists
 LOG_DIR.mkdir(exist_ok=True)
 
-def log_signal(
-    id: str,
-    asset: str,
-    score: float,
-    confidence: str,
-    label: str,
-    trend: str,
-    top_drivers: list,
-    timestamp: str,
-    fallback_type: str
-):
+def log_signal(signal_data: dict = None, **kwargs):
     try:
-        entry = {
-            "id": id,
-            "timestamp": timestamp,
-            "asset": asset,
-            "score": score,
-            "confidence": confidence,
-            "label": label,
-            "trend": trend,
-            "top_drivers": top_drivers,
-            "fallback_type": fallback_type
+        entry = signal_data or {
+            "id": kwargs["id"],
+            "timestamp": kwargs["timestamp"],
+            "asset": kwargs["asset"],
+            "score": kwargs["score"],
+            "confidence": kwargs["confidence"],
+            "label": kwargs["label"],
+            "trend": kwargs["trend"],
+            "top_drivers": kwargs["top_drivers"],
+            "fallback_type": kwargs["fallback_type"]
         }
         with open(LOG_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
         print(f"[Signal Logged] {entry}")
     except Exception as e:
-        print(f"[Log Error] Could not log signal for {asset}: {e}")
+        print(f"[Log Error] Could not log signal: {e}")
