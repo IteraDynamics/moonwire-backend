@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+from datetime import datetime
 from src.sentiment_news import fetch_news_sentiment_scores
 from src.signal_log import log_signal
 from src.price_fetcher import bulk_price_fetch
@@ -13,6 +14,8 @@ def get_news_sentiment_scores():
     # Fetch all prices at once
     price_map = bulk_price_fetch(asset_list)
 
+    formatted_scores = []
+
     for asset, score in scores.items():
         price = price_map.get(asset)
 
@@ -25,4 +28,12 @@ def get_news_sentiment_scores():
             price_at_score=price
         )
 
-    return {"sentiment_scores": scores}
+        # Append structured object for frontend
+        formatted_scores.append({
+            "asset": asset,
+            "sentiment_score": score,
+            "confidence": 0.85,  # Static mock confidence
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
+    return {"sentiment_scores": formatted_scores}
