@@ -2,7 +2,7 @@ from fastapi import APIRouter, Query
 from src.twitter_ingestor import fetch_tweets_and_analyze
 from src.signal_log import log_signal
 from src.price_fetcher import get_price_usd
-from src.signal_utils import generate_signal  # ✅ for structured signal output
+from src.signal_utils import generate_signal  # ✅ structured signal formatter
 
 router = APIRouter()
 
@@ -42,11 +42,9 @@ def get_twitter_signals(
 
     signal = generate_signal(
         asset=asset,
-        source="twitter",
         score=score,
+        source="twitter",
         fallback_type=fallback_type,
-        confidence=None,
-        price_at_score=None,
         top_drivers=["twitter sentiment"]
     )
 
