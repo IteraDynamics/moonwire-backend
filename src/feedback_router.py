@@ -1,28 +1,27 @@
-from fastapi import APIRouter, Body
+# src/feedback_router.py
+
+from fastapi import APIRouter, Request
+from pydantic import BaseModel
 from datetime import datetime
+import logging
 
 router = APIRouter()
 
-# Temporary in-memory store
-feedback_store = []
+logging.basicConfig(level=logging.INFO)
+
+class Feedback(BaseModel):
+    asset: str
+    sentiment: float
+    user_feedback: str
+    timestamp: str  # Expecting ISO string from frontend
+    context: str | None = None  # Optional field
 
 @router.post("/feedback")
-def submit_feedback(
-    signal_id: str = Body(...),
-    asset: str = Body(...),
-    score: float = Body(...),
-    user_confidence: str = Body(...),
-    user_agrees: bool = Body(...),
-    comments: str = Body(""),
-):
-    feedback_entry = {
-        "signal_id": signal_id,
-        "asset": asset,
-        "score": score,
-        "user_confidence": user_confidence,
-        "user_agrees": user_agrees,
-        "comments": comments,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    feedback_store.append(feedback_entry)
-    return {"status": "received", "entry": feedback_entry}
+async def receive_feedback(feedback: Feedback):
+    logging.info({
+        "event": "user_feedback_received",
+        "timestamp": datetime.utcnow().isoformat(),
+        "data": feedback.dict()
+    })
+
+    return {"status": "received", "received_at": datetime.utcnow().isoformat()}
