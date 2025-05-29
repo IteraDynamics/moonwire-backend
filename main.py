@@ -1,25 +1,23 @@
+# main.py
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from src.news_router import router as news_router
 from src.twitter_router import router as twitter_router
-from src.signal_router import router as signal_router
+from src.news_router import router as news_router
+from src.composite_router import router as composite_router  # ✅ New router import
 
 app = FastAPI()
 
-# Enable CORS if needed for frontend testing
+# CORS settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Register all routers
-app.include_router(news_router)
+# Register routers
 app.include_router(twitter_router)
-app.include_router(signal_router)
-
-@app.get("/")
-def read_root():
-    return {"message": "MoonWire Signal Engine API is live."}
+app.include_router(news_router)
+app.include_router(composite_router)  # ✅ Add composite router
