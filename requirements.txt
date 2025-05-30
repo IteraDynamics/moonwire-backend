@@ -1,8 +1,12 @@
 fastapi
-redis
 uvicorn
+redis
+httpx
 requests
 vaderSentiment
 snscrape
 tweepy
 certifi>=2024.2.2
+python-dotenv
+schedule
+pydantic
