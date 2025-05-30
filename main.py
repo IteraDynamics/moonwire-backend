@@ -26,3 +26,8 @@ app.include_router(news_router)
 app.include_router(composite_router)
 app.include_router(feedback_router)
 app.include_router(health_router)  # ✅ Added health check route
+
+# UptimeRobot compatibility: support HEAD on /ping
+@app.head("/ping", include_in_schema=False)
+async def ping_head():
+    return {"status": "ok"}
