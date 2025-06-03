@@ -11,10 +11,13 @@ from src.health_router import router as health_router  # ✅ Health check
 
 app = FastAPI()
 
-# CORS setup
+# CORS setup for Vercel frontend + local dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://clean-6r11xj59h-andrews-projects-3d597529.vercel.app"],
+    allow_origins=[
+        "https://drews-projects-3d597529.vercel.app",
+        "http://localhost:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
