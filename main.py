@@ -7,19 +7,16 @@ from src.twitter_router import router as twitter_router
 from src.news_router import router as news_router
 from src.composite_router import router as composite_router
 from src.feedback_router import router as feedback_router
-from src.health_router import router as health_router  # ✅ Health check
+from src.health_router import router as health_router
 
 app = FastAPI()
 
-# CORS setup for Vercel frontend + local dev
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://drews-projects-3d597529.vercel.app",
-        "http://localhost:5173"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS", "HEAD"],  # ✅ Explicitly allow OPTIONS
     allow_headers=["*"],
 )
 
@@ -28,7 +25,7 @@ app.include_router(twitter_router)
 app.include_router(news_router)
 app.include_router(composite_router)
 app.include_router(feedback_router)
-app.include_router(health_router)  # ✅ Added health check route
+app.include_router(health_router)
 
 # UptimeRobot compatibility: support HEAD on /ping
 @app.head("/ping", include_in_schema=False)
