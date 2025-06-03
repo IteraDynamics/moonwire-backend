@@ -7,16 +7,16 @@ from src.twitter_router import router as twitter_router
 from src.news_router import router as news_router
 from src.composite_router import router as composite_router
 from src.feedback_router import router as feedback_router
-from src.health_router import router as health_router  # ✅ Health check
+from src.health_router import router as health_router
 
 app = FastAPI()
 
-# ✅ Corrected CORS middleware
+# ✅ Correct CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # You can replace "*" with your frontend URL for tighter security
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly set methods
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -27,7 +27,7 @@ app.include_router(composite_router)
 app.include_router(feedback_router)
 app.include_router(health_router)
 
-# ✅ UptimeRobot compatibility: support HEAD on /ping
+# ✅ Uptime check endpoint
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
     return {"status": "ok"}
