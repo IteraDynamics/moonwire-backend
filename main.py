@@ -11,10 +11,16 @@ from src.health_router import router as health_router
 
 app = FastAPI()
 
-# ✅ Correct CORS configuration
+# ✅ CORS Configuration – Whitelist known frontend URLs
+allowed_origins = [
+    "https://moonwire-frontend-clean.vercel.app",  # Vercel production alias
+    "https://moonwire-frontend-clean-6ng2npom5-andrews-projects-3d597529.vercel.app",  # Example preview deploy
+    "http://localhost:3000",  # Local development
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can replace "*" with your frontend URL for tighter security
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
