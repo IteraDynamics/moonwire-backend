@@ -11,23 +11,23 @@ from src.health_router import router as health_router  # ✅ Health check
 
 app = FastAPI()
 
-# ✅ Correct placement of CORS middleware
+# ✅ Corrected CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can replace "*" with your Vercel URL for tighter security
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly set methods
     allow_headers=["*"],
 )
 
-# ✅ Router includes after CORS middleware
+# ✅ Include all routers
 app.include_router(twitter_router)
 app.include_router(news_router)
 app.include_router(composite_router)
 app.include_router(feedback_router)
 app.include_router(health_router)
 
-# ✅ UptimeRobot HEAD support
+# ✅ UptimeRobot compatibility: support HEAD on /ping
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
     return {"status": "ok"}
