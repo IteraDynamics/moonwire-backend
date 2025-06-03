@@ -14,7 +14,7 @@ app = FastAPI()
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://clean-6r11xj59h-andrews-projects-3d597529.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
