@@ -11,27 +11,28 @@ from src.health_router import router as health_router
 
 app = FastAPI()
 
-# ✅ CORS configuration for frontend deployment URLs
+# ✅ Locked-down CORS settings
+origins = [
+    "https://moonwire-frontend-clean.vercel.app",  # your Vercel frontend URL
+    "http://localhost:3000",  # optional: local development
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://moonwire-frontend-clean.vercel.app",
-        "https://moonwire-frontend-clean-6ng2npom5-andrews-projects-3d597529.vercel.app",
-        "http://localhost:3000"
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ✅ Include all routers
+# ✅ Routers
 app.include_router(twitter_router)
 app.include_router(news_router)
 app.include_router(composite_router)
 app.include_router(feedback_router)
 app.include_router(health_router)
 
-# ✅ Health check endpoint for uptime monitoring
+# ✅ UptimeRobot HEAD route
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
     return {"status": "ok"}
