@@ -8,6 +8,7 @@ from src.news_router import router as news_router
 from src.composite_router import router as composite_router
 from src.feedback_router import router as feedback_router
 from src.health_router import router as health_router
+from src.admin_router import router as admin_router  # ✅ NEW
 
 app = FastAPI()
 
@@ -26,6 +27,7 @@ app.include_router(news_router)
 app.include_router(composite_router)
 app.include_router(feedback_router)
 app.include_router(health_router)
+app.include_router(admin_router)  # ✅ NEW
 
 # ✅ HEAD route for uptime checks
 @app.head("/ping", include_in_schema=False)
