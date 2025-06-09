@@ -1,10 +1,10 @@
-# src/feedback_router.py
-
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime
 import logging
+
+from src.signal_log import log_signal  # ✅ NEW
 
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
@@ -29,9 +29,23 @@ async def options_feedback():
 
 @router.post("/feedback")
 async def receive_feedback(feedback: Feedback):
+    log_data = {
+        "type": "user_feedback",
+        "timestamp": datetime.utcnow().isoformat(),
+        "asset": feedback.asset,
+        "sentiment": feedback.sentiment,
+        "user_feedback": feedback.user_feedback,
+        "context": feedback.context,
+        "source": "frontend"
+    }
+
     logging.info({
         "event": "user_feedback_received",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": log_data["timestamp"],
         "data": feedback.dict()
     })
-    return {"status": "received", "received_at": datetime.utcnow().isoformat()}
+
+    # ✅ Log feedback to signal_history.jsonl
+    log_signal(log_data)
+
+    return {"status": "received", "received_at": log_data["timestamp"]}
