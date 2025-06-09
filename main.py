@@ -6,8 +6,10 @@ from src.news_router import router as news_router
 from src.composite_router import router as composite_router
 from src.feedback_router import router as feedback_router
 from src.health_router import router as health_router
-from src.admin_router import router as admin_router  # ✅ Existing
-from src.trend_router import router as trend_router  # ✅ NEW
+from src.admin_router import router as admin_router
+from src.trend_router import router as trend_router
+from src.leaderboard import router as leaderboard_router
+from src.mock_loader import load_mock_cache_data  # ✅ NEW
 
 app = FastAPI()
 
@@ -20,6 +22,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ✅ Load mock signal data into cache on startup
+load_mock_cache_data()  # ✅ Inject BTC + ETH into cache for testing
+
 # ✅ Include all routers
 app.include_router(twitter_router)
 app.include_router(news_router)
@@ -27,7 +32,8 @@ app.include_router(composite_router)
 app.include_router(feedback_router)
 app.include_router(health_router)
 app.include_router(admin_router)
-app.include_router(trend_router)  # ✅ NEW
+app.include_router(trend_router)
+app.include_router(leaderboard_router)
 
 # ✅ HEAD route for uptime checks
 @app.head("/ping", include_in_schema=False)
