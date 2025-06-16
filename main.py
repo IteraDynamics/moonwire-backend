@@ -10,7 +10,8 @@ from src.admin_router import router as admin_router
 from src.trend_router import router as trend_router
 from src.leaderboard import router as leaderboard_router
 from src.mock_loader import load_mock_cache_data
-from src.feedback_analysis_router import router as feedback_analysis_router  # ✅ NEW
+from src.feedback_analysis_router import router as feedback_analysis_router
+from src.label_export_router import router as label_export_router  # ✅ NEW
 
 app = FastAPI()
 
@@ -35,7 +36,8 @@ app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(trend_router)
 app.include_router(leaderboard_router)
-app.include_router(feedback_analysis_router)  # ✅ NEW
+app.include_router(feedback_analysis_router)
+app.include_router(label_export_router)  # ✅ NEW
 
 # ✅ HEAD route for uptime checks
 @app.head("/ping", include_in_schema=False)
