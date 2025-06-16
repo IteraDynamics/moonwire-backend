@@ -1,6 +1,7 @@
 # src/internal_log_router.py
 
 from fastapi import APIRouter
+from datetime import datetime  # ✅ Required for timestamp
 from src.auto_log_signals import run_signal_logger
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
