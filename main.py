@@ -14,23 +14,24 @@ from src.feedback_analysis_router import router as feedback_analysis_router
 from src.label_export_router import router as label_export_router
 from src.internal_log_router import router as internal_log_router
 from src.threshold_simulator_router import router as threshold_simulator_router
-from src.feedback_volatility_router import router as feedback_volatility_router  # ✅ NEW
+from src.feedback_volatility_router import router as feedback_volatility_router
+from src.training_pair_router import router as training_pair_router  # ✅ NEW
 
 app = FastAPI()
 
-# ✅ CORS middleware added before routers
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For dev, restrict in prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ✅ Preload mock signal cache
+# Cache boot
 load_mock_cache_data()
 
-# ✅ Register routers
+# Routers
 app.include_router(twitter_router)
 app.include_router(news_router)
 app.include_router(composite_router)
@@ -43,9 +44,9 @@ app.include_router(feedback_analysis_router)
 app.include_router(label_export_router)
 app.include_router(internal_log_router)
 app.include_router(threshold_simulator_router)
-app.include_router(feedback_volatility_router)  # ✅ NEW
+app.include_router(feedback_volatility_router)
+app.include_router(training_pair_router)  # ✅ NEW
 
-# ✅ HEAD ping for uptime checks
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
     return {"status": "ok"}
