@@ -15,6 +15,7 @@ API_URL = "https://moonwire-signal-engine-1.onrender.com/internal/generate-train
 
 @router.post("/train-feedback-model")
 def train_feedback_model():
+    # === Fetch training data from internal route ===
     resp = requests.get(API_URL)
     if resp.status_code != 200:
         return {"error": "Failed to fetch training data"}
@@ -23,6 +24,7 @@ def train_feedback_model():
     if not data:
         return {"status": "no training data"}
 
+    # === Prepare data frame ===
     rows = []
     for item in data:
         X = item["X"]
@@ -35,6 +37,10 @@ def train_feedback_model():
         })
 
     df = pd.DataFrame(rows)
+    if len(df) < 2:
+        return {"status": "not enough data to train", "samples": len(df)}
+
+    # === Encode features and labels ===
     df["y_encoded"] = LabelEncoder().fit_transform(df["y"])
     df["label_encoded"] = LabelEncoder().fit_transform(df["label"])
 
@@ -42,16 +48,17 @@ def train_feedback_model():
     y_data = df["y_encoded"]
     weights = df["weight"]
 
+    # === Train/test split ===
     X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
         X_data, y_data, weights, test_size=0.3, random_state=42
     )
 
+    # === Train classifier ===
     clf = RandomForestClassifier(n_estimators=100, random_state=42)
     clf.fit(X_train, y_train, sample_weight=w_train)
 
     y_pred = clf.predict(X_test)
     f1 = round(f1_score(y_test, y_pred, average="macro"), 3)
-
     class_counts = Counter(df["y"])
 
     return {
