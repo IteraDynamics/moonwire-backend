@@ -10,3 +10,7 @@ certifi>=2024.2.2
 python-dotenv
 schedule
 pydantic
+pandas
+scikit-learn
+requests
+numpy
