@@ -1,5 +1,3 @@
-# src/composite_router.py
-
 from fastapi import APIRouter, Query
 from datetime import datetime
 from src.twitter_ingestor import fetch_tweets_and_analyze
@@ -24,6 +22,15 @@ def get_composite_signal(asset: str = Query("BTC")):
         timestamp=datetime.utcnow().isoformat()
     )
 
-    log_signal(**signal)
+    signal["label"] = (
+        "Positive" if signal["score"] > 0.3 else
+        "Negative" if signal["score"] < -0.3 else
+        "Neutral"
+    )
+    signal["fallback_type"] = twitter_result.get("source", "mock")
+    signal["source"] = "composite"
+    signal["price_at_score"] = None  # Optional: populate if needed
+
+    log_signal(signal)
 
     return {"signals": [signal]}
