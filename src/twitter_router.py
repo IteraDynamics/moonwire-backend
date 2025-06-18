@@ -2,6 +2,7 @@ from fastapi import APIRouter, Query
 from src.twitter_ingestor import fetch_tweets_and_analyze
 from src.signal_log import log_signal
 from src.price_fetcher import get_price_usd
+from datetime import datetime
 
 router = APIRouter()
 
@@ -17,13 +18,19 @@ def get_twitter_sentiment(
     fallback_type = result.get("source", "mock")
     price = get_price_usd(asset)
 
-    log_signal(
-        asset=asset,
-        source="twitter",
-        score=score,
-        fallback_type=fallback_type,
-        confidence=None,
-        price_at_score=price
-    )
+    log_signal({
+        "timestamp": datetime.utcnow().isoformat(),
+        "asset": asset,
+        "score": score,
+        "label": (
+            "Positive" if score > 0.3 else
+            "Negative" if score < -0.3 else
+            "Neutral"
+        ),
+        "confidence": None,
+        "fallback_type": fallback_type,
+        "source": "twitter",
+        "price_at_score": price
+    })
 
     return result
