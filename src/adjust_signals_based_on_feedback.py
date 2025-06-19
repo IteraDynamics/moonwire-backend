@@ -7,7 +7,7 @@ import requests
 from src.signal_log import log_signal
 
 LOG_FILE = Path("logs/signal_history.jsonl")
-PREDICT_API = "http://localhost:8000/internal/predict-feedback-risk"  # Change for deployment
+PREDICT_API = "https://moonwire-signal-engine-1.onrender.com/internal/predict-feedback-risk" # change for deployment
 
 def load_signals():
     if not LOG_FILE.exists():
