@@ -1,0 +1,3 @@
+{"asset": "BTC", "score": 0.75, "label": "Positive", "confidence": 0.9, "user_feedback": "Too bullish", "reliability_score": 0.88, "timestamp": "2025-06-19T15:00:00Z"}
+{"asset": "ETH", "score": 0.4, "label": "Neutral", "confidence": 0.65, "user_feedback": "Seems accurate", "reliability_score": 0.72, "timestamp": "2025-06-19T15:10:00Z"}
+{"asset": "SOL", "score": 0.2, "label": "Negative", "confidence": 0.5, "user_feedback": "Too bearish", "reliability_score": 0.6, "timestamp": "2025-06-19T15:20:00Z"}
