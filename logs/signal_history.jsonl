@@ -3,7 +3,7 @@
   "timestamp": "2025-06-19T16:00:00Z",
   "asset": "BTC",
   "score": 0.15,
-  "confidence": 0.2,
+  "confidence": 0.1,
   "label": "Positive",
   "trend": "upward",
   "top_drivers": ["twitter sentiment"],
