@@ -1,5 +1,3 @@
-# src/adjust_signals_based_on_feedback.py
-
 import json
 from pathlib import Path
 from datetime import datetime
@@ -7,7 +5,7 @@ import requests
 from src.signal_log import log_signal
 
 LOG_FILE = Path("logs/signal_history.jsonl")
-PREDICT_API = "https://moonwire-signal-engine-1.onrender.com/internal/predict-feedback-risk"  # Use live URL
+PREDICT_API = "https://moonwire-signal-engine-1.onrender.com/internal/predict-feedback-risk"  # Live model endpoint
 
 def load_signals():
     if not LOG_FILE.exists():
@@ -21,7 +19,6 @@ def get_disagreement_prediction(signal):
         score = float(signal.get("score", 0.5))
         confidence = float(signal.get("confidence", 0.5))
         label = str(signal.get("label") or "Neutral")
-        fallback = str(signal.get("fallback_type", "unknown"))
     except Exception as e:
         print(f"[SKIP] Invalid field types in signal: {e}")
         return None
@@ -29,8 +26,7 @@ def get_disagreement_prediction(signal):
     payload = {
         "score": score,
         "confidence": confidence,
-        "label": label,
-        "fallback_type": fallback
+        "label": label
     }
 
     print("[Debug] Payload being sent:", payload)
