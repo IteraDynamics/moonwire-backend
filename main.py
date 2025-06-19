@@ -22,6 +22,7 @@ from src.model_training_router import router as model_training_router
 from src.feedback_prediction_router import router as feedback_prediction_router
 from src.model_disagreement_router import router as model_disagreement_router
 from src.model_signal_adjust_router import router as model_signal_adjust_router
+from src.export_training_router import router as export_training_router
 
 app = FastAPI()
 
@@ -56,6 +57,7 @@ app.include_router(model_training_router)
 app.include_router(feedback_prediction_router)
 app.include_router(model_disagreement_router)
 app.include_router(model_signal_adjust_router)
+app.include_router(export_training_router)
 
 
 @app.head("/ping", include_in_schema=False)
