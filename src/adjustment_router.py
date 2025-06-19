@@ -1,3 +1,5 @@
+# src/adjustment_router.py
+
 from fastapi import APIRouter
 from datetime import datetime
 import json
@@ -6,19 +8,19 @@ import requests
 import uuid
 
 LOG_FILE = Path("logs/signal_history.jsonl")
-PREDICT_URL = "http://localhost:8000/internal/predict-feedback-risk"  # ✅ Swap with Render URL if needed
+PREDICT_URL = "https://moonwire-signal-engine-1.onrender.com/internal/predict-feedback-risk"
 
 router = APIRouter()
 
 @router.post("/internal/adjust-signals-based-on-feedback")
 def adjust_signals():
     if not LOG_FILE.exists():
+        print("[DEBUG] Log file not found.")
         return {"summary": []}
 
     adjustments = []
     new_entries = []
 
-    # Load signals
     with open(LOG_FILE, "r") as f:
         entries = [json.loads(line) for line in f if line.strip()]
 
@@ -34,7 +36,9 @@ def adjust_signals():
         }
 
         try:
+            print(f"[DEBUG] Predicting for {row.get('asset')} with input: {model_input}")
             r = requests.post(PREDICT_URL, json=model_input)
+            print(f"[DEBUG] Model response: {r.status_code} - {r.text}")
             r.raise_for_status()
             result = r.json()
         except Exception as e:
