@@ -1,5 +1,3 @@
-# src/adjust_signals_based_on_feedback.py
-
 import json
 from pathlib import Path
 from datetime import datetime
@@ -7,7 +5,7 @@ import requests
 from src.signal_log import log_signal
 
 LOG_FILE = Path("logs/signal_history.jsonl")
-PREDICT_API = "https://moonwire-signal-engine-1.onrender.com/internal/predict-feedback-risk" # change for deployment
+PREDICT_API = "https://moonwire-signal-engine-1.onrender.com/internal/predict-feedback-risk"  # ✅ Deployed URL
 
 def load_signals():
     if not LOG_FILE.exists():
@@ -17,12 +15,22 @@ def load_signals():
         return [json.loads(line.strip()) for line in f if line.strip()]
 
 def get_disagreement_prediction(signal):
+    try:
+        score = float(signal.get("score", 0.5))
+        confidence = float(signal.get("confidence", 0.5))
+        label = str(signal.get("label") or "Neutral")
+        fallback = str(signal.get("fallback_type") or "unknown")
+    except Exception as e:
+        print(f"[SKIP] Invalid field types in signal: {signal} — {e}")
+        return None
+
     payload = {
-        "score": signal.get("score", 0),
-        "confidence": signal.get("confidence", 0.5),
-        "label": signal.get("label", "Neutral"),
-        "fallback_type": signal.get("fallback_type", "unknown")
+        "score": score,
+        "confidence": confidence,
+        "label": label,
+        "fallback_type": fallback
     }
+
     try:
         response = requests.post(PREDICT_API, json=payload)
         if response.status_code == 200:
