@@ -1,17 +1,23 @@
+# src/model_signal_adjust_router.py
+
 from fastapi import APIRouter
-import requests
 from datetime import datetime
 from src.signal_log import log_signal
 from src.cache_instance import cache
+from src.feedback_prediction_router import predict_disagreement
+from pydantic import BaseModel
 
 router = APIRouter()
 
-# 🔧 Model API to predict disagreement risk
-DISAGREEMENT_MODEL_URL = "https://moonwire-signal-engine-1.onrender.com/internal/predict-feedback-risk"
-
-# 🔧 Score/Confidence adjustment cap
+# Adjustment rules
 ADJUSTMENT_FACTOR = 0.9
 RISK_THRESHOLD = 0.7
+
+# Snapshot model to match disagreement model
+class SignalSnapshot(BaseModel):
+    score: float
+    confidence: float
+    label: str
 
 @router.post("/internal/adjust-signals-based-on-feedback")
 def adjust_signals_from_feedback():
@@ -26,29 +32,26 @@ def adjust_signals_from_feedback():
 
             latest = history[-1]
             if latest.get("adjustment_applied"):
-                continue  # Skip already-adjusted signals
+                continue  # Skip already-adjusted
 
-            score = latest.get("score")
-            confidence = latest.get("confidence", 0.5)
-            label = latest.get("label", "Neutral")
-            fallback_type = latest.get("fallback_type", "mock")
-
-            payload = {
-                "score": score,
-                "confidence": confidence,
-                "label": label,
-                "fallback_type": fallback_type
-            }
+            # Construct model input
+            try:
+                snapshot = SignalSnapshot(
+                    score=float(latest.get("score", 0.5)),
+                    confidence=float(latest.get("confidence", 0.5)),
+                    label=str(latest.get("label", "Neutral"))
+                )
+            except Exception as e:
+                results.append({"asset": key, "status": "invalid_snapshot", "error": str(e)})
+                continue
 
             try:
-                model_resp = requests.post(DISAGREEMENT_MODEL_URL, json=payload)
-                model_data = model_resp.json()
-                disagreement_prob = model_data.get("probability", 0)
+                model_result = predict_disagreement(snapshot)
+                disagreement_prob = model_result.get("probability", 0)
 
                 if disagreement_prob > RISK_THRESHOLD:
-                    # Soft-adjust score and/or confidence
-                    adjusted_score = round(score * ADJUSTMENT_FACTOR, 4) if score is not None else None
-                    adjusted_confidence = round(confidence * ADJUSTMENT_FACTOR, 4) if confidence is not None else None
+                    adjusted_score = round(snapshot.score * ADJUSTMENT_FACTOR, 4)
+                    adjusted_confidence = round(snapshot.confidence * ADJUSTMENT_FACTOR, 4)
 
                     adjusted_signal = {
                         **latest,
@@ -61,11 +64,23 @@ def adjust_signals_from_feedback():
                     }
 
                     log_signal(adjusted_signal)
-                    results.append({"asset": key, "status": "adjusted", "probability": disagreement_prob})
+                    results.append({
+                        "asset": key,
+                        "status": "adjusted",
+                        "probability": disagreement_prob
+                    })
                 else:
-                    results.append({"asset": key, "status": "ok", "probability": disagreement_prob})
+                    results.append({
+                        "asset": key,
+                        "status": "ok",
+                        "probability": disagreement_prob
+                    })
 
             except Exception as e:
-                results.append({"asset": key, "status": "error", "error": str(e)})
+                results.append({
+                    "asset": key,
+                    "status": "model_error",
+                    "error": str(e)
+                })
 
     return {"summary": results}
