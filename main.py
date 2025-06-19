@@ -24,6 +24,7 @@ from src.model_disagreement_router import router as model_disagreement_router
 from src.model_signal_adjust_router import router as model_signal_adjust_router
 from src.export_training_router import router as export_training_router
 from src.adjustment_router import router as adjustment_router
+from src.adjustment_trigger_router import router as adjustment_trigger_router
 
 app = FastAPI()
 
@@ -60,7 +61,7 @@ app.include_router(model_disagreement_router)
 app.include_router(model_signal_adjust_router)
 app.include_router(export_training_router)
 app.include_router(adjustment_router)
-
+app.include_router(adjustment_trigger_router)
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
