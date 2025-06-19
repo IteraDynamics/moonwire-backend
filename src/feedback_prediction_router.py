@@ -77,6 +77,7 @@ def load_and_train_model():
 
 @router.post("/predict-feedback-risk")
 def predict_disagreement(snapshot: SignalSnapshot):
+    print("[Debug] Using SignalSnapshot model")  # 🔍 Key debug line
     model, label_encoder = load_and_train_model()
 
     encoded_label = label_encoder.transform([snapshot.label])[0]
