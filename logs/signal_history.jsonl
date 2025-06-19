@@ -1,3 +1,14 @@
-{"asset": "BTC", "score": 0.9, "confidence": 0.2, "label": "Positive", "fallback_type": "mock", "timestamp": "2025-06-19T14:30:00Z"}
-{"asset": "ETH", "score": 0.4, "confidence": 0.8, "label": "Neutral", "fallback_type": "mock", "timestamp": "2025-06-19T14:31:00Z"}
-{"asset": "BTC", "score": 0.25, "confidence": 0.6, "label": "Negative", "fallback_type": "mock", "timestamp": "2025-06-19T14:32:00Z"}
+{
+  "id": "sig_highrisk_test1",
+  "timestamp": "2025-06-19T16:00:00Z",
+  "asset": "BTC",
+  "score": 0.15,
+  "confidence": 0.2,
+  "label": "Positive",
+  "trend": "upward",
+  "top_drivers": ["twitter sentiment"],
+  "fallback_type": "mock",
+  "source": "twitter",
+  "price_at_score": 67000,
+  "type": "raw"
+}
