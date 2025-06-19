@@ -5,8 +5,6 @@
   "score": 0.15,
   "confidence": 0.1,
   "label": "Positive",
-  "trend": "upward",
-  "top_drivers": ["twitter sentiment"],
   "fallback_type": "mock",
   "source": "twitter",
   "price_at_score": 67000,
