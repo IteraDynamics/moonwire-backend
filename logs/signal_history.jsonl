@@ -1,14 +1,9 @@
 {
-  "id": "sig_highrisk_demo",
-  "timestamp": "2025-06-19T21:00:00Z",
-  "asset": "DOGE",
-  "score": 0.1,
-  "confidence": 0.1,
+  "signal_id": "DOGE-2025-06-18-14:22",
+  "score": 0.4,
+  "confidence": 0.6,
   "label": "Positive",
-  "trend": "upward",
-  "top_drivers": ["twitter sentiment"],
   "fallback_type": "mock",
-  "source": "twitter",
-  "price_at_score": 0.072,
+  "timestamp": "2025-06-18T14:22:00Z",
   "type": "raw"
 }
