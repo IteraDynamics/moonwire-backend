@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.twitter_router import router as twitter_router
 from src.news_router import router as news_router
 from src.composite_router import router as composite_router
-from src.feedback_router import router as feedback_router
+# from src.feedback_router import router as feedback_router
 from src.health_router import router as health_router
 from src.admin_router import router as admin_router
 from src.trend_router import router as trend_router
@@ -25,7 +25,7 @@ from src.export_training_router import router as export_training_router
 from src.adjustment_router import router as adjustment_router
 from src.adjustment_trigger_router import router as adjustment_trigger_router
 from src.internal_router import router as internal_router
-from src.cache_adjust_router import router as cache_adjust_router
+from src.feedback_ingestion_router import router as feedback_ingestion_router  # ✅ NEW
 
 app = FastAPI()
 
@@ -45,7 +45,7 @@ load_mock_cache_data()
 app.include_router(twitter_router)
 app.include_router(news_router)
 app.include_router(composite_router)
-app.include_router(feedback_router)
+# app.include_router(feedback_router)
 app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(trend_router)
@@ -63,7 +63,7 @@ app.include_router(export_training_router)
 app.include_router(adjustment_router)
 app.include_router(adjustment_trigger_router)
 app.include_router(internal_router)
-app.include_router(cache_adjust_router)
+app.include_router(feedback_ingestion_router)  # ✅ NEW
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
