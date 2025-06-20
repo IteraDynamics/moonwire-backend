@@ -16,27 +16,51 @@ class SignalSnapshot(BaseModel):
     confidence: float
     label: str
 
-# === Mock fallback data ===
+# === Enhanced mock training data ===
 mock_training_pairs = [
+    # 👍 Safe predictions (high agreement)
     {
-        "X": {"score": 0.4, "confidence": 0.8, "label": "Positive"},
-        "y": "Too bearish",
-        "weight": 0.7
-    },
-    {
-        "X": {"score": 0.7, "confidence": 0.9, "label": "Positive"},
+        "X": {"score": 0.8, "confidence": 0.9, "label": "Positive"},
         "y": "Accurate",
         "weight": 0.9
     },
     {
-        "X": {"score": 0.2, "confidence": 0.6, "label": "Negative"},
-        "y": "Too bullish",
-        "weight": 0.6
+        "X": {"score": 0.2, "confidence": 0.8, "label": "Negative"},
+        "y": "Accurate",
+        "weight": 0.9
     },
     {
         "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral"},
+        "y": "Accurate",
+        "weight": 0.8
+    },
+
+    # ⚠️ Risky: low confidence, low score, "Positive" label
+    {
+        "X": {"score": 0.1, "confidence": 0.2, "label": "Positive"},
+        "y": "Too bullish",
+        "weight": 0.95
+    },
+
+    # ⚠️ Risky: high score, low confidence, "Negative" label
+    {
+        "X": {"score": 0.85, "confidence": 0.3, "label": "Negative"},
         "y": "Too bearish",
-        "weight": 0.75
+        "weight": 0.9
+    },
+
+    # ⚠️ Risky: mid-range uncertainty
+    {
+        "X": {"score": 0.4, "confidence": 0.5, "label": "Positive"},
+        "y": "Too bullish",
+        "weight": 0.8
+    },
+
+    # Safe: strong signal, confident
+    {
+        "X": {"score": 0.9, "confidence": 0.95, "label": "Positive"},
+        "y": "Accurate",
+        "weight": 0.9
     }
 ]
 

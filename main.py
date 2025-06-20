@@ -20,8 +20,12 @@ from src.feedback_volatility_router import router as feedback_volatility_router
 from src.training_pair_router import router as training_pair_router
 from src.model_training_router import router as model_training_router
 from src.feedback_prediction_router import router as feedback_prediction_router
-from src.model_disagreement_router import router as model_disagreement_router
 from src.model_signal_adjust_router import router as model_signal_adjust_router
+from src.export_training_router import router as export_training_router
+from src.adjustment_router import router as adjustment_router
+from src.adjustment_trigger_router import router as adjustment_trigger_router
+from src.internal_router import router as internal_router
+from src.cache_adjust_router import router as cache_adjust_router
 
 app = FastAPI()
 
@@ -54,9 +58,12 @@ app.include_router(feedback_volatility_router)
 app.include_router(training_pair_router)
 app.include_router(model_training_router)
 app.include_router(feedback_prediction_router)
-app.include_router(model_disagreement_router)
 app.include_router(model_signal_adjust_router)
-
+app.include_router(export_training_router)
+app.include_router(adjustment_router)
+app.include_router(adjustment_trigger_router)
+app.include_router(internal_router)
+app.include_router(cache_adjust_router)
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
