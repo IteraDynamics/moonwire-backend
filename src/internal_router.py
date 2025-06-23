@@ -1,66 +1,58 @@
+# src/internal_router.py
+
 from fastapi import APIRouter
 from pydantic import BaseModel
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import List
 import json
 import os
 
-from src.cache_instance import cache
-
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
-FEEDBACK_LOG_PATH = "data/feedback.jsonl"
+FEEDBACK_LOG_PATH = "data/feedback.jsonl"  # Location of feedback data
 
-# === GET: Feedback clusters
-@router.get("/feedback-clusters")
-def get_feedback_clusters():
+# === Feedback Summary Route ===
+@router.get("/feedback-summary")
+def get_feedback_summary():
     if not os.path.exists(FEEDBACK_LOG_PATH):
-        return {"clusters": []}
+        return {
+            "total_feedback": 0,
+            "agree_percentage": 0.0,
+            "disagree_count": 0,
+            "most_disagreed_signals": []
+        }
 
-    clusters = defaultdict(list)
+    total = 0
+    agree = 0
+    disagree_signals = defaultdict(list)
 
     with open(FEEDBACK_LOG_PATH, "r") as f:
         for line in f:
             try:
-                feedback = json.loads(line)
-                asset = feedback.get("asset", "unknown")
-                clusters[asset].append(feedback)
+                fb = json.loads(line)
+                total += 1
+                if fb.get("agree") is True:
+                    agree += 1
+                else:
+                    sid = fb.get("signal_id", "unknown")
+                    disagree_signals[sid].append(fb.get("note", ""))
             except json.JSONDecodeError:
                 continue
 
-    result = [{"asset": asset, "count": len(feeds), "samples": feeds[:3]} for asset, feeds in clusters.items()]
-    return {"clusters": result}
+    # Get top 3 most disagreed signals
+    top_signals = sorted(disagree_signals.items(), key=lambda x: len(x[1]), reverse=True)[:3]
+    most_disagreed = [
+        {
+            "signal_id": sid,
+            "count": len(notes),
+            "notes": [n for n in notes if n]
+        }
+        for sid, notes in top_signals
+    ]
 
-# === POST: Inject a mock signal into the in-memory cache
-class SignalEntry(BaseModel):
-    score: float
-    confidence: float
-    label: str
-    fallback_type: str = "mock"
-    source: str = "twitter"
-    trend: str = "upward"
-    top_drivers: List[str] = ["mock"]
-    price_at_score: float = 0.0
-    type: str = "raw"
-
-@router.post("/inject-test-signal/{asset}")
-def inject_test_signal(asset: str, signal: SignalEntry):
-    key = f"{asset.upper()}_history"
-    existing = cache.get_signal(key) or []
-    updated = existing + [signal.dict()]
-    cache.set_signal(key, updated)
     return {
-        "message": f"Injected test signal for {asset.upper()}",
-        "total_signals": len(updated)
-    }
-
-# === GET: Dump signal cache for inspection
-@router.get("/dump-signal-cache/{asset}")
-def dump_signal_cache(asset: str):
-    key = f"{asset.upper()}_history"
-    data = cache.get_signal(key)
-    return {
-        "key": key,
-        "count": len(data) if data else 0,
-        "data": data or []
+        "total_feedback": total,
+        "agree_percentage": round((agree / total) * 100, 2) if total > 0 else 0.0,
+        "disagree_count": total - agree,
+        "most_disagreed_signals": most_disagreed
     }
