@@ -1,18 +1,14 @@
-# src/adjustment_trigger_router.py
-
 from fastapi import APIRouter
-from scripts.predict_disagreement import predict_disagreement
+import sys
+from pathlib import Path
+
+# Add project root to sys.path so "scripts" folder is importable
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+from scripts.predict_disagreement import predict_disagreement  # ✅ Updated import
 
 router = APIRouter()
 
 @router.post("/internal/adjust-signals-based-on-feedback")
 def trigger_adjust_signals():
-    # ✅ Load data and run disagreement prediction
-    result = predict_disagreement()
-
-    # ✅ Return structured response for logging/debug
-    return {
-        "message": "Adjustment process complete",
-        "adjusted_signals_count": result.get("adjusted_signals_count", 0),
-        "details": result.get("details", [])
-    }
+    return predict_disagreement()
