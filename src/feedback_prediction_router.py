@@ -2,80 +2,49 @@
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-import requests
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
+import joblib
+from pathlib import Path
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
-TRAINING_DATA_URL = "https://moonwire-signal-engine-1.onrender.com/internal/generate-training-pairs"
+MODEL_PATH = Path("models/feedback_disagreement_model.pkl")
 
 class SignalSnapshot(BaseModel):
     score: float
     confidence: float
     label: str
 
-# === Enhanced mock training data ===
+# === Fallback mock training data ===
 mock_training_pairs = [
-    # 👍 Safe predictions (high agreement)
     {
-        "X": {"score": 0.8, "confidence": 0.9, "label": "Positive"},
+        "X": {"score": 0.4, "confidence": 0.8, "label": "Positive"},
+        "y": "Too bearish",
+        "weight": 0.7
+    },
+    {
+        "X": {"score": 0.7, "confidence": 0.9, "label": "Positive"},
         "y": "Accurate",
         "weight": 0.9
     },
     {
-        "X": {"score": 0.2, "confidence": 0.8, "label": "Negative"},
-        "y": "Accurate",
-        "weight": 0.9
+        "X": {"score": 0.2, "confidence": 0.6, "label": "Negative"},
+        "y": "Too bullish",
+        "weight": 0.6
     },
     {
         "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral"},
-        "y": "Accurate",
-        "weight": 0.8
-    },
-
-    # ⚠️ Risky: low confidence, low score, "Positive" label
-    {
-        "X": {"score": 0.1, "confidence": 0.2, "label": "Positive"},
-        "y": "Too bullish",
-        "weight": 0.95
-    },
-
-    # ⚠️ Risky: high score, low confidence, "Negative" label
-    {
-        "X": {"score": 0.85, "confidence": 0.3, "label": "Negative"},
         "y": "Too bearish",
-        "weight": 0.9
-    },
-
-    # ⚠️ Risky: mid-range uncertainty
-    {
-        "X": {"score": 0.4, "confidence": 0.5, "label": "Positive"},
-        "y": "Too bullish",
-        "weight": 0.8
-    },
-
-    # Safe: strong signal, confident
-    {
-        "X": {"score": 0.9, "confidence": 0.95, "label": "Positive"},
-        "y": "Accurate",
-        "weight": 0.9
+        "weight": 0.75
     }
 ]
 
-def load_and_train_model():
-    try:
-        resp = requests.get(TRAINING_DATA_URL)
-        data = resp.json() if resp.status_code == 200 else []
-    except Exception:
-        data = []
-
-    if len(data) < 3:
-        data = mock_training_pairs
-
+# === Fallback training function if model not found ===
+def train_fallback_model():
     rows = []
-    for item in data:
+    for item in mock_training_pairs:
         X = item["X"]
         rows.append({
             "score": X["score"],
@@ -86,23 +55,28 @@ def load_and_train_model():
         })
 
     df = pd.DataFrame(rows)
+    label_encoder = LabelEncoder().fit(df["label"])
+    df["label_encoded"] = label_encoder.transform(df["label"])
     df["y_encoded"] = LabelEncoder().fit_transform(df["y"])
-    df["label_encoded"] = LabelEncoder().fit_transform(df["label"])
-
-    X_data = df[["score", "confidence", "label_encoded"]]
-    y_data = df["y_encoded"]
-    weights = df["weight"]
 
     model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_data, y_data, sample_weight=weights)
+    model.fit(df[["score", "confidence", "label_encoded"]], df["y_encoded"], sample_weight=df["weight"])
 
-    label_encoder = LabelEncoder().fit(df["label"])
     return model, label_encoder
+
+# === Model loader ===
+def load_model():
+    if MODEL_PATH.exists():
+        model = joblib.load(MODEL_PATH)
+        label_encoder = LabelEncoder().fit(["Positive", "Negative", "Neutral"])  # Must match training
+        return model, label_encoder
+    else:
+        print("[WARN] No trained model found. Using fallback mock model.")
+        return train_fallback_model()
 
 @router.post("/predict-feedback-risk")
 def predict_disagreement(snapshot: SignalSnapshot):
-    model, label_encoder = load_and_train_model()
-
+    model, label_encoder = load_model()
     encoded_label = label_encoder.transform([snapshot.label])[0]
     features = pd.DataFrame([{
         "score": snapshot.score,
