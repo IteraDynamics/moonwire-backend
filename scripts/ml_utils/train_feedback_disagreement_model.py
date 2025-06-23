@@ -1,7 +1,3 @@
-
-
-# scripts/train_feedback_disagreement_model.py
-
 import json
 import pandas as pd
 from pathlib import Path
@@ -29,38 +25,58 @@ def load_training_data():
 
     return pd.DataFrame(rows)
 
-def preprocess_data(df):
-    if df.empty:
-        return None, None
-
-    df = df.dropna(subset=["score", "confidence", "label", "agree"])
-    df["label_encoded"] = LabelEncoder().fit_transform(df["label"])
-    X = df[["score", "confidence", "label_encoded"]]
-    y = (~df["agree"]).astype(int)  # 1 = disagreement, 0 = agreement
-    return X, y
-
-def train_model(X, y):
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X, y)
-    return model
-
-def save_model(model):
-    MODEL_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model, MODEL_OUTPUT_PATH)
-    print(f"✅ Model saved to {MODEL_OUTPUT_PATH}")
-
-def main():
-    print("🚀 Training feedback disagreement model...")
+def train_and_save_model():
     df = load_training_data()
-    X, y = preprocess_data(df)
 
-    if X is None or y is None or len(X) < 5:
-        print("❌ Not enough valid data to train.")
+    if df.empty or 'note' not in df.columns or 'asset' not in df.columns:
+        print("⚠️ Not enough data to train.")
         return
 
-    model = train_model(X, y)
-    save_model(model)
-    print("🏁 Done.")
+    df["label"] = df["agree"].apply(lambda x: "agree" if x else "disagree")
+    df = df[["asset", "note", "label"]].dropna()
 
-if __name__ == "__main__":
-    main()
+    X = df[["asset", "note"]]
+    y = df["label"]
+
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y)
+
+    vectorizer = lambda row: f"{row['asset']} {row['note']}".lower()
+    X_vectorized = X.apply(vectorizer, axis=1)
+
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    tfidf = TfidfVectorizer()
+    X_tfidf = tfidf.fit_transform(X_vectorized)
+
+    model = RandomForestClassifier()
+    model.fit(X_tfidf, y_encoded)
+
+    MODEL_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump({
+        "model": model,
+        "tfidf": tfidf,
+        "label_encoder": label_encoder
+    }, MODEL_OUTPUT_PATH)
+
+    print("✅ Model trained and saved to", MODEL_OUTPUT_PATH)
+
+def predict_disagreement(payload):
+    if not MODEL_OUTPUT_PATH.exists():
+        raise FileNotFoundError("Trained model file not found.")
+
+    data = joblib.load(MODEL_OUTPUT_PATH)
+    model = data["model"]
+    tfidf = data["tfidf"]
+    label_encoder = data["label_encoder"]
+
+    text = f"{payload['asset']} {payload.get('note', '')}".lower()
+    X_input = tfidf.transform([text])
+
+    probas = model.predict_proba(X_input)[0]
+    disagree_index = list(label_encoder.classes_).index("disagree")
+    disagree_prob = probas[disagree_index]
+
+    return {
+        "likely_disagreed": disagree_prob >= 0.5,
+        "probability": round(disagree_prob, 2)
+    }
