@@ -1,6 +1,6 @@
 from datetime import datetime
 import uuid
-from src.feedback_utils import get_feedback_summary_for_signal, fetch_disagreement_prediction
+from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
 
 def same_sign(a, b):
     return (a >= 0 and b >= 0) or (a < 0 and b < 0)
@@ -47,7 +47,16 @@ def compute_trust_scores(signal, trust_insights):
         return
 
     agreement = insight.get("historical_agreement_rate")
-    disagreement_prob = insight.get("predicted_disagreement_prob")
+
+    try:
+        disagreement_prob = run_disagreement_prediction(
+            score=signal["score"],
+            confidence=signal.get("confidence", 0.5),
+            label=signal.get("label", "Neutral")
+        )
+    except Exception as e:
+        print(f"[WARN] Failed to run disagreement prediction: {e}")
+        disagreement_prob = 0.5
 
     if agreement is None or disagreement_prob is None:
         signal["trust_score"] = 0.5
