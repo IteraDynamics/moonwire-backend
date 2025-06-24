@@ -1,36 +1,47 @@
 import json
-from collections import defaultdict
-from pathlib import Path
+import os
+import joblib
 
-FEEDBACK_PATH = Path("data/feedback.jsonl")
+FEEDBACK_FILE = "data/feedback.jsonl"
 
-def load_feedback_data():
-    feedback_entries = []
-    if FEEDBACK_PATH.exists():
-        with open(FEEDBACK_PATH, "r") as f:
-            for line in f:
-                try:
-                    feedback_entries.append(json.loads(line.strip()))
-                except json.JSONDecodeError:
-                    continue  # skip malformed lines
-    return feedback_entries
+def get_feedback_summary_for_signal(signal_id: str):
+    if not os.path.exists(FEEDBACK_FILE):
+        return {
+            "num_feedback": 0,
+            "num_agree": 0,
+            "num_disagree": 0,
+            "historical_agreement_rate": None
+        }
 
-def get_feedback_summary_for_signal(signal_id):
-    feedback_data = load_feedback_data()
-    summary = defaultdict(int)
+    with open(FEEDBACK_FILE, "r") as f:
+        lines = f.readlines()
 
-    for entry in feedback_data:
-        if entry.get("signal_id") == signal_id:
-            vote = entry.get("vote")
-            if vote == "agree":
-                summary["agree"] += 1
-            elif vote == "disagree":
-                summary["disagree"] += 1
+    signal_feedback = [json.loads(line) for line in lines if json.loads(line).get("signal_id") == signal_id]
+    if not signal_feedback:
+        return {
+            "num_feedback": 0,
+            "num_agree": 0,
+            "num_disagree": 0,
+            "historical_agreement_rate": None
+        }
 
-    return dict(summary)
+    num_agree = sum(1 for f in signal_feedback if f.get("agree") is True)
+    num_disagree = sum(1 for f in signal_feedback if f.get("agree") is False)
+    num_feedback = num_agree + num_disagree
 
-def compute_agreement_rate(summary):
-    agree = summary.get("agree", 0)
-    disagree = summary.get("disagree", 0)
-    total = agree + disagree
-    return round(agree / total, 3) if total > 0 else None
+    historical_agreement_rate = num_agree / num_feedback if num_feedback > 0 else None
+
+    return {
+        "num_feedback": num_feedback,
+        "num_agree": num_agree,
+        "num_disagree": num_disagree,
+        "historical_agreement_rate": historical_agreement_rate
+    }
+
+# Disagreement prediction model loader
+_model = None
+def fetch_disagreement_prediction(signal_text: str) -> float:
+    global _model
+    if _model is None:
+        _model = joblib.load("models/disagreement_model.pkl")
+    return _model.predict_proba([signal_text])[0][1]
