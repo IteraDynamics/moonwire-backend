@@ -36,7 +36,7 @@ def get_trend(score):
     else:
         return "flat"
 
-def compute_trust_score(signal, trust_insights):
+def compute_trust_scores(signal, trust_insights):
     historical_agreement_weight = 0.7
     predicted_disagreement_weight = 0.3
 
