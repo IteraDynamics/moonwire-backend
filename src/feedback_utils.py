@@ -1,9 +1,15 @@
 import json
 import os
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder
 import joblib
+from pathlib import Path
 
 FEEDBACK_FILE = "data/feedback.jsonl"
+MODEL_PATH = Path("models/feedback_disagreement_model.pkl")
 
+# === Feedback Summary for Trust Score ===
 def get_feedback_summary_for_signal(signal_id: str):
     if not os.path.exists(FEEDBACK_FILE):
         return {
@@ -38,10 +44,71 @@ def get_feedback_summary_for_signal(signal_id: str):
         "historical_agreement_rate": historical_agreement_rate
     }
 
-# Disagreement prediction model loader
-_model = None
-def fetch_disagreement_prediction(signal_text: str) -> float:
-    global _model
-    if _model is None:
-        _model = joblib.load("models/disagreement_model.pkl")
-    return _model.predict_proba([signal_text])[0][1]
+# === Trust Score Prediction Model (Structured) ===
+def run_disagreement_prediction(score: float, confidence: float, label: str) -> float:
+    model, label_encoder = load_model()
+    encoded_label = label_encoder.transform([label])[0]
+
+    features = pd.DataFrame([{
+        "score": score,
+        "confidence": confidence,
+        "label_encoded": encoded_label
+    }])
+
+    proba = model.predict_proba(features)[0]
+    return max(proba)
+
+# === Fallback Model Logic ===
+def train_fallback_model():
+    mock_training_pairs = [
+        {
+            "X": {"score": 0.4, "confidence": 0.8, "label": "Positive"},
+            "y": "Too bearish",
+            "weight": 0.7
+        },
+        {
+            "X": {"score": 0.7, "confidence": 0.9, "label": "Positive"},
+            "y": "Accurate",
+            "weight": 0.9
+        },
+        {
+            "X": {"score": 0.2, "confidence": 0.6, "label": "Negative"},
+            "y": "Too bullish",
+            "weight": 0.6
+        },
+        {
+            "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral"},
+            "y": "Too bearish",
+            "weight": 0.75
+        }
+    ]
+
+    rows = []
+    for item in mock_training_pairs:
+        X = item["X"]
+        rows.append({
+            "score": X["score"],
+            "confidence": X["confidence"],
+            "label": X["label"],
+            "y": item["y"],
+            "weight": item["weight"]
+        })
+
+    df = pd.DataFrame(rows)
+    label_encoder = LabelEncoder().fit(df["label"])
+    df["label_encoded"] = label_encoder.transform(df["label"])
+    df["y_encoded"] = LabelEncoder().fit_transform(df["y"])
+
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(df[["score", "confidence", "label_encoded"]], df["y_encoded"], sample_weight=df["weight"])
+
+    return model, label_encoder
+
+def load_model():
+    if MODEL_PATH.exists():
+        model = joblib.load(MODEL_PATH)
+        label_encoder = LabelEncoder().fit(["Positive", "Negative", "Neutral"])
+        return model, label_encoder
+    else:
+        print("[WARN] No trained model found. Using fallback mock model.")
+        return train_fallback_model()
