@@ -1,36 +1,31 @@
 from fastapi import APIRouter, Query
-from datetime import datetime
-from src.twitter_ingestor import fetch_tweets_and_analyze
-from src.sentiment_news import fetch_news_sentiment_scores
-from src.signal_utils import generate_composite_signal
-from src.signal_log import log_signal
+from src.signal_utils import generate_composite_signal, compute_trust_scores
+from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
 
 router = APIRouter()
 
-@router.get("/signals/composite")
-def get_composite_signal(asset: str = Query("BTC")):
-    twitter_result = fetch_tweets_and_analyze(asset, method="snscrape", limit=10)
-    news_scores = fetch_news_sentiment_scores()
-    news_score = news_scores.get(asset, 0.0)
+@router.get("/composite")
+def get_composite_signal(asset: str = Query(...), twitter_score: float = Query(...), news_score: float = Query(...)):
+    """
+    Generate a composite signal based on sentiment scores and trust insights.
+    """
+    signal = generate_composite_signal(asset, twitter_score, news_score)
+    
+    # Fetch trust data
+    trust_insights = {}
+    feedback_summary = get_feedback_summary_for_signal(signal["id"])
 
-    score = round((twitter_result["average_sentiment"] * 0.6 + news_score * 0.4), 4)
-
-    signal = generate_composite_signal(
-        asset=asset,
-        twitter_score=twitter_result["average_sentiment"],
-        news_score=news_score,
-        timestamp=datetime.utcnow().isoformat()
+    confidence_map = {"low": 0.3, "medium": 0.6, "high": 0.9}
+    predicted_disagreement_prob = run_disagreement_prediction(
+        score=signal["score"],
+        confidence=confidence_map[signal["confidence"]],
+        label=signal["label"]
     )
 
-    signal["label"] = (
-        "Positive" if signal["score"] > 0.3 else
-        "Negative" if signal["score"] < -0.3 else
-        "Neutral"
-    )
-    signal["fallback_type"] = twitter_result.get("source", "mock")
-    signal["source"] = "composite"
-    signal["price_at_score"] = None  # Optional: populate if needed
+    trust_insights[signal["id"]] = {
+        "historical_agreement_rate": feedback_summary.get("historical_agreement_rate"),
+        "predicted_disagreement_prob": predicted_disagreement_prob
+    }
 
-    log_signal(signal)
-
-    return {"signals": [signal]}
+    compute_trust_scores(signal, trust_insights)
+    return signal

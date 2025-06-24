@@ -1,11 +1,11 @@
-# src/internal_router.py
-
 from fastapi import APIRouter
 from pydantic import BaseModel
 from collections import defaultdict, Counter
 from typing import List
 import json
 import os
+import requests
+from src.signal_utils import compute_trust_scores
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
@@ -56,3 +56,18 @@ def get_feedback_summary():
         "disagree_count": total - agree,
         "most_disagreed_signals": most_disagreed
     }
+
+
+# === Signal Trust Score Route ===
+@router.get("/signal-trust-insights")
+def signal_trust_insights():
+    def fetch_disagreement_prediction(payload):
+        response = requests.post(
+            "http://localhost:8000/internal/predict-feedback-risk",
+            json=payload
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {"probability": 0.5}
+
+    return compute_trust_scores(fetch_disagreement_prediction)

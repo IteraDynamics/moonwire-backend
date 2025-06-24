@@ -1,5 +1,6 @@
 from datetime import datetime
 import uuid
+from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
 
 def same_sign(a, b):
     return (a >= 0 and b >= 0) or (a < 0 and b < 0)
@@ -34,6 +35,45 @@ def get_trend(score):
         return "downward"
     else:
         return "flat"
+
+def compute_trust_scores(signal, trust_insights):
+    historical_agreement_weight = 0.7
+    predicted_disagreement_weight = 0.3
+
+    insight = trust_insights.get(signal["id"])
+    if not insight:
+        signal["trust_score"] = 0.5
+        signal["trust_label"] = "Unknown"
+        return
+
+    agreement = insight.get("historical_agreement_rate")
+
+    try:
+        disagreement_prob = run_disagreement_prediction(
+            score=signal["score"],
+            confidence=signal.get("confidence", 0.5),
+            label=signal.get("label", "Neutral")
+        )
+    except Exception as e:
+        print(f"[WARN] Failed to run disagreement prediction: {e}")
+        disagreement_prob = 0.5
+
+    if agreement is None or disagreement_prob is None:
+        signal["trust_score"] = 0.5
+        signal["trust_label"] = "Unknown"
+        return
+
+    trust_score = (
+        historical_agreement_weight * agreement +
+        predicted_disagreement_weight * (1 - disagreement_prob)
+    )
+    signal["trust_score"] = round(trust_score, 3)
+    if trust_score >= 0.7:
+        signal["trust_label"] = "Trusted"
+    elif trust_score < 0.3:
+        signal["trust_label"] = "Untrusted"
+    else:
+        signal["trust_label"] = "Unknown"
 
 def generate_composite_signal(asset, twitter_score, news_score, timestamp=None):
     score = blend_scores(twitter_score, news_score)
