@@ -2,7 +2,6 @@
 
 from fastapi import APIRouter, Query
 from src.signal_utils import generate_composite_signal, compute_trust_scores
-from src.signal_cache import get_cached_signal
 from src.feedback_utils import get_feedback_summary_for_signal, fetch_disagreement_prediction
 
 router = APIRouter()
