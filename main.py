@@ -28,6 +28,8 @@ from src.internal_router import router as internal_router
 from src.feedback_ingestion_router import router as feedback_ingestion_router  # ✅ NEW
 from src.high_disagreement_router import router as high_disagreement_router
 from src.feedback_insights_router import router as feedback_insights_router
+from src.feedback_prediction_router import router as feedback_prediction_router
+
 
 app = FastAPI()
 
@@ -68,6 +70,7 @@ app.include_router(internal_router)
 app.include_router(feedback_ingestion_router)  # ✅ NEW
 app.include_router(high_disagreement_router)
 app.include_router(feedback_insights_router)
+app.include_router(feedback_prediction_router, prefix="/internal")
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
