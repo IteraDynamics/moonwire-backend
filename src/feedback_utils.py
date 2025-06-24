@@ -70,22 +70,22 @@ def get_disagreement_probability(label: str, score: float = 0.5, confidence: flo
 def train_fallback_model():
     mock_training_pairs = [
         {
-            "X": {"score": 0.4, "confidence": 0.8, "label": "Positive"},
+            "X": {"score": 0.4, "confidence": 0.8, "label": "Bullish Momentum"},
             "y": "Too bearish",
             "weight": 0.7
         },
         {
-            "X": {"score": 0.7, "confidence": 0.9, "label": "Positive"},
+            "X": {"score": 0.7, "confidence": 0.9, "label": "Bullish Momentum"},
             "y": "Accurate",
             "weight": 0.9
         },
         {
-            "X": {"score": 0.2, "confidence": 0.6, "label": "Negative"},
+            "X": {"score": 0.2, "confidence": 0.6, "label": "Bearish Reversal"},
             "y": "Too bullish",
             "weight": 0.6
         },
         {
-            "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral"},
+            "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral Drift"},
             "y": "Too bearish",
             "weight": 0.75
         }
@@ -115,7 +115,12 @@ def train_fallback_model():
 def load_model():
     if MODEL_PATH.exists():
         model = joblib.load(MODEL_PATH)
-        label_encoder = LabelEncoder().fit(["Positive", "Negative", "Neutral"])
+        # Updated to include production labels
+        label_encoder = LabelEncoder().fit([
+            "Bullish Momentum",
+            "Bearish Reversal",
+            "Neutral Drift"
+        ])
         return model, label_encoder
     else:
         print("[WARN] No trained model found. Using fallback mock model.")
