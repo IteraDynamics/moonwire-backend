@@ -1,11 +1,10 @@
 from datetime import datetime
 import uuid
-import json
 from collections import defaultdict
-from pathlib import Path
+import json
+import os
 
-# === Existing Signal Utility Logic ===
-
+# === Utility Functions ===
 def same_sign(a, b):
     return (a >= 0 and b >= 0) or (a < 0 and b < 0)
 
@@ -54,85 +53,79 @@ def generate_composite_signal(asset, twitter_score, news_score, timestamp=None):
         "fallback_type": None
     }
 
-# === NEW: Trust Score Logic ===
+# === Trust Score Logic ===
+def confidence_to_float(conf):
+    mapping = {"low": 0.3, "medium": 0.6, "high": 0.9}
+    if isinstance(conf, (int, float)):
+        return float(conf)
+    return mapping.get(str(conf).lower(), 0.5)
 
-FEEDBACK_PATH = Path("data/feedback.jsonl")
-SIGNAL_HISTORY_PATH = Path("logs/signal_history.jsonl")
+def compute_trust_scores(disagreement_predict_fn):
+    signal_log_path = "logs/signal_history.jsonl"
+    feedback_path = "data/feedback.jsonl"
 
+    if not os.path.exists(signal_log_path):
+        return []
 
-def load_feedback_summary():
-    summary = defaultdict(lambda: {"agree": 0, "disagree": 0})
-    if FEEDBACK_PATH.exists():
-        with FEEDBACK_PATH.open() as f:
+    signal_map = {}
+    with open(signal_log_path, "r") as f:
+        for line in f:
+            try:
+                s = json.loads(line)
+                signal_map[s["signal_id"]] = s
+            except json.JSONDecodeError:
+                continue
+
+    # Load feedback counts
+    feedback_counts = defaultdict(lambda: {"agree": 0, "disagree": 0})
+    if os.path.exists(feedback_path):
+        with open(feedback_path, "r") as f:
             for line in f:
-                entry = json.loads(line)
-                signal_id = entry.get("signal_id")
-                feedback = entry.get("user_feedback")
-                if signal_id and feedback:
-                    summary[signal_id][feedback] += 1
-    return summary
+                try:
+                    fb = json.loads(line)
+                    sid = fb.get("signal_id")
+                    if sid:
+                        if fb.get("agree") is True:
+                            feedback_counts[sid]["agree"] += 1
+                        else:
+                            feedback_counts[sid]["disagree"] += 1
+                except json.JSONDecodeError:
+                    continue
 
+    results = []
+    for sid, signal in signal_map.items():
+        score = signal.get("score", 0)
+        confidence = signal.get("confidence", 0.5)
+        label = signal.get("label", "Neutral")
 
-def calculate_agreement_rate(feedback_summary):
-    rates = {}
-    for signal_id, counts in feedback_summary.items():
-        agree = counts["agree"]
-        disagree = counts["disagree"]
-        total = agree + disagree
-        if total > 0:
-            rates[signal_id] = agree / total
+        disagreement = disagreement_predict_fn({
+            "score": score,
+            "confidence": confidence,
+            "label": label
+        })
+        disagreement_prob = disagreement.get("probability", 0.5)
+
+        counts = feedback_counts.get(sid, {"agree": 0, "disagree": 0})
+        total = counts["agree"] + counts["disagree"]
+        agreement_rate = counts["agree"] / total if total > 0 else 0.5
+
+        conf = confidence_to_float(confidence)
+        trust_score = conf * (1 - disagreement_prob) * agreement_rate
+
+        if trust_score > 0.7:
+            trust_label = "High Trust"
+        elif trust_score > 0.4:
+            trust_label = "Moderate Trust"
         else:
-            rates[signal_id] = 0.5  # Default neutral value
-    return rates
+            trust_label = "Low Trust"
 
+        results.append({
+            "signal_id": sid,
+            "trust_score": round(trust_score, 3),
+            "trust_label": trust_label,
+            "predicted_disagreement_prob": disagreement_prob,
+            "agreement_rate": round(agreement_rate, 3),
+            "feedback_summary": counts
+        })
 
-def normalize_score(score):
-    return max(0.0, min(1.0, round(score, 3)))
-
-
-def compute_trust_scores(disagreement_predictor):
-    feedback_summary = load_feedback_summary()
-    agreement_rates = calculate_agreement_rate(feedback_summary)
-
-    trust_insights = []
-
-    if SIGNAL_HISTORY_PATH.exists():
-        with SIGNAL_HISTORY_PATH.open() as f:
-            for line in f:
-                entry = json.loads(line)
-                signal_id = entry.get("signal_id")
-                confidence = entry.get("confidence", 0.5)
-                score = entry.get("score", 0.5)
-                label = entry.get("label", "Neutral")
-
-                agreement_weight = agreement_rates.get(signal_id, 0.5)
-
-                payload = {
-                    "score": score,
-                    "confidence": confidence,
-                    "label": label
-                }
-                prediction = disagreement_predictor(payload)
-                disagreement_prob = prediction.get("probability", 0.5)
-
-                trust_score = normalize_score(
-                    confidence * (1 - disagreement_prob) * agreement_weight
-                )
-
-                if trust_score < 0.4:
-                    trust_label = "Low Trust"
-                elif trust_score < 0.75:
-                    trust_label = "Moderate"
-                else:
-                    trust_label = "High"
-
-                trust_insights.append({
-                    "signal_id": signal_id,
-                    "trust_score": trust_score,
-                    "trust_label": trust_label,
-                    "predicted_disagreement_prob": disagreement_prob,
-                    "agreement_rate": round(agreement_weight, 3),
-                    "feedback_summary": feedback_summary.get(signal_id, {"agree": 0, "disagree": 0})
-                })
-
-    return trust_insights
+    return results
