@@ -16,9 +16,6 @@ CONFIDENCE_MAP = {
     "high": 0.9
 }
 
-# All expected labels the model might see
-ALL_SIGNAL_LABELS = ["Positive", "Negative", "Neutral", "Bullish Momentum", "Bearish Momentum"]
-
 # === Feedback Summary for Trust Score ===
 def get_feedback_summary_for_signal(signal_id: str):
     if not os.path.exists(FEEDBACK_FILE):
@@ -82,34 +79,24 @@ def get_disagreement_probability(label: str, score: float = 0.5, confidence="med
 def train_fallback_model():
     mock_training_pairs = [
         {
-            "X": {"score": 0.4, "confidence": 0.8, "label": "Positive"},
+            "X": {"score": 0.4, "confidence": 0.8, "label": "Bullish Momentum"},
             "y": "Too bearish",
             "weight": 0.7
         },
         {
-            "X": {"score": 0.7, "confidence": 0.9, "label": "Positive"},
+            "X": {"score": 0.7, "confidence": 0.9, "label": "Bullish Momentum"},
             "y": "Accurate",
             "weight": 0.9
         },
         {
-            "X": {"score": 0.2, "confidence": 0.6, "label": "Negative"},
+            "X": {"score": 0.2, "confidence": 0.6, "label": "Bearish Momentum"},
             "y": "Too bullish",
             "weight": 0.6
         },
         {
-            "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral"},
+            "X": {"score": 0.5, "confidence": 0.7, "label": "Choppy"},
             "y": "Too bearish",
             "weight": 0.75
-        },
-        {
-            "X": {"score": 0.6, "confidence": 0.85, "label": "Bullish Momentum"},
-            "y": "Accurate",
-            "weight": 0.8
-        },
-        {
-            "X": {"score": 0.3, "confidence": 0.5, "label": "Bearish Momentum"},
-            "y": "Too bullish",
-            "weight": 0.65
         }
     ]
 
@@ -125,7 +112,7 @@ def train_fallback_model():
         })
 
     df = pd.DataFrame(rows)
-    label_encoder = LabelEncoder().fit(ALL_SIGNAL_LABELS)
+    label_encoder = LabelEncoder().fit(df["label"])
     df["label_encoded"] = label_encoder.transform(df["label"])
     df["y_encoded"] = LabelEncoder().fit_transform(df["y"])
 
@@ -137,7 +124,7 @@ def train_fallback_model():
 def load_model():
     if MODEL_PATH.exists():
         model = joblib.load(MODEL_PATH)
-        label_encoder = LabelEncoder().fit(ALL_SIGNAL_LABELS)
+        label_encoder = LabelEncoder().fit(["Bullish Momentum", "Bearish Momentum", "Choppy"])
         return model, label_encoder
     else:
         print("[WARN] No trained model found. Using fallback mock model.")
