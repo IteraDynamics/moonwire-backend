@@ -1,10 +1,9 @@
 from datetime import datetime
 import uuid
-
+from src.feedback_utils import get_feedback_summary_for_signal, fetch_disagreement_prediction
 
 def same_sign(a, b):
     return (a >= 0 and b >= 0) or (a < 0 and b < 0)
-
 
 def blend_scores(twitter_score, news_score, twitter_weight=0.6, news_weight=0.4):
     raw_score = (twitter_score * twitter_weight) + (news_score * news_weight)
@@ -12,7 +11,6 @@ def blend_scores(twitter_score, news_score, twitter_weight=0.6, news_weight=0.4)
         return raw_score
     else:
         return raw_score * 0.5  # dampens disagreement
-
 
 def determine_confidence(score, twitter_score, news_score):
     if abs(score) >= 0.6 and same_sign(twitter_score, news_score):
@@ -22,7 +20,6 @@ def determine_confidence(score, twitter_score, news_score):
     else:
         return "low"
 
-
 def label_signal(score):
     if score >= 0.6:
         return "Bullish Momentum"
@@ -30,7 +27,6 @@ def label_signal(score):
         return "Bearish Reversal"
     else:
         return "Neutral Drift"
-
 
 def get_trend(score):
     if score > 0:
@@ -40,6 +36,35 @@ def get_trend(score):
     else:
         return "flat"
 
+def compute_trust_score(signal, trust_insights):
+    historical_agreement_weight = 0.7
+    predicted_disagreement_weight = 0.3
+
+    insight = trust_insights.get(signal["id"])
+    if not insight:
+        signal["trust_score"] = 0.5
+        signal["trust_label"] = "Unknown"
+        return
+
+    agreement = insight.get("historical_agreement_rate")
+    disagreement_prob = insight.get("predicted_disagreement_prob")
+
+    if agreement is None or disagreement_prob is None:
+        signal["trust_score"] = 0.5
+        signal["trust_label"] = "Unknown"
+        return
+
+    trust_score = (
+        historical_agreement_weight * agreement +
+        predicted_disagreement_weight * (1 - disagreement_prob)
+    )
+    signal["trust_score"] = round(trust_score, 3)
+    if trust_score >= 0.7:
+        signal["trust_label"] = "Trusted"
+    elif trust_score < 0.3:
+        signal["trust_label"] = "Untrusted"
+    else:
+        signal["trust_label"] = "Unknown"
 
 def generate_composite_signal(asset, twitter_score, news_score, timestamp=None):
     score = blend_scores(twitter_score, news_score)
@@ -54,56 +79,3 @@ def generate_composite_signal(asset, twitter_score, news_score, timestamp=None):
         "top_drivers": ["twitter sentiment", "news sentiment"],
         "fallback_type": None
     }
-
-
-# === Trust Score Computation Utilities ===
-import json
-import os
-from src.feedback_utils import get_feedback_summary_for_signal
-
-def compute_trust_scores(prediction_fn):
-    def inner(signals):
-        results = []
-        for sig in signals:
-            score = sig.get("score")
-            signal_id = sig.get("id") or sig.get("signal_id")
-
-            disagreement_prob = prediction_fn(signal_id)
-            confidence = sig.get("confidence", "low")
-            confidence_val = 1.0 if confidence == "high" else 0.6 if confidence == "medium" else 0.3
-
-            feedback = get_feedback_summary_for_signal(signal_id)
-            agree = feedback.get("agree", 0)
-            disagree = feedback.get("disagree", 0)
-            total = agree + disagree
-            agreement_rate = agree / total if total else 0.5
-
-            agreement_weight = 0.5
-            confidence_weight = 0.3
-            disagreement_weight = 0.2
-
-            trust_score = (
-                confidence_val * confidence_weight +
-                (1 - disagreement_prob) * disagreement_weight +
-                agreement_rate * agreement_weight
-            )
-
-            # 🛠️ Trust label classification logic
-            if trust_score >= 0.75:
-                trust_label = "High Trust"
-            elif trust_score >= 0.4:
-                trust_label = "Medium Trust"
-            else:
-                trust_label = "Low Trust"
-
-            results.append({
-                "signal_id": signal_id,
-                "trust_score": round(trust_score, 3),
-                "trust_label": trust_label,
-                "predicted_disagreement_prob": round(disagreement_prob, 2),
-                "agreement_rate": round(agreement_rate, 3),
-                "feedback_summary": feedback
-            })
-
-        return results
-    return inner
