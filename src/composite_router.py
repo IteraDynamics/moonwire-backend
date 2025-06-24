@@ -1,26 +1,28 @@
-from fastapi import APIRouter
+# src/composite_router.py
+
+from fastapi import APIRouter, Query
 from src.signal_utils import generate_composite_signal, compute_trust_scores
-from src.feedback_utils import get_feedback_summary_for_signal
-from src.twitter_signal import fetch_disagreement_prediction
+from src.signal_cache import get_cached_signal
+from src.feedback_utils import get_feedback_summary_for_signal, fetch_disagreement_prediction
 
 router = APIRouter()
 
+@router.get("/composite")
+def get_composite_signal(asset: str = Query(...), twitter_score: float = Query(...), news_score: float = Query(...)):
+    """
+    Generate a composite signal based on sentiment scores and trust insights.
+    """
+    signal = generate_composite_signal(asset, twitter_score, news_score)
+    
+    # Fetch trust data
+    trust_insights = {}
+    feedback_summary = get_feedback_summary_for_signal(signal["id"])
+    predicted_disagreement_prob = fetch_disagreement_prediction(signal["label"])
 
-@router.get("/composite-signal")
-async def get_composite_signal():
-    composite_signal = generate_composite_signal()
-    trust_insights = compute_trust_scores(fetch_disagreement_prediction())
+    trust_insights[signal["id"]] = {
+        "historical_agreement_rate": feedback_summary.get("historical_agreement_rate"),
+        "predicted_disagreement_prob": predicted_disagreement_prob
+    }
 
-    trust_lookup = {entry["signal_id"]: entry for entry in trust_insights}
-    for signal in composite_signal["signals"]:
-        trust_info = trust_lookup.get(signal["id"])
-        if trust_info:
-            signal["trust_score"] = trust_info["trust_score"]
-            signal["trust_label"] = trust_info["trust_label"]
-
-    return composite_signal
-
-
-@router.get("/composite-signal/feedback-summary")
-async def get_feedback_summary():
-    return get_feedback_summary_for_signal()
+    compute_trust_scores(signal, trust_insights)
+    return signal
