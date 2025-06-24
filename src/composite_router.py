@@ -1,8 +1,6 @@
-# src/composite_router.py
-
 from fastapi import APIRouter, Query
 from src.signal_utils import generate_composite_signal, compute_trust_scores
-from src.feedback_utils import get_feedback_summary_for_signal, fetch_disagreement_prediction
+from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
 
 router = APIRouter()
 
@@ -16,7 +14,13 @@ def get_composite_signal(asset: str = Query(...), twitter_score: float = Query(.
     # Fetch trust data
     trust_insights = {}
     feedback_summary = get_feedback_summary_for_signal(signal["id"])
-    predicted_disagreement_prob = fetch_disagreement_prediction(signal["label"])
+
+    confidence_map = {"low": 0.3, "medium": 0.6, "high": 0.9}
+    predicted_disagreement_prob = run_disagreement_prediction(
+        score=signal["score"],
+        confidence=confidence_map[signal["confidence"]],
+        label=signal["label"]
+    )
 
     trust_insights[signal["id"]] = {
         "historical_agreement_rate": feedback_summary.get("historical_agreement_rate"),
