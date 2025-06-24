@@ -58,6 +58,14 @@ def run_disagreement_prediction(score: float, confidence: float, label: str) -> 
     proba = model.predict_proba(features)[0]
     return max(proba)
 
+# === Wrapper for compatibility ===
+def get_disagreement_probability(label: str, score: float = 0.5, confidence: float = 0.5) -> float:
+    """
+    Wrapper to call disagreement prediction with minimal params.
+    Meant for use with compute_trust_scores.
+    """
+    return run_disagreement_prediction(score=score, confidence=confidence, label=label)
+
 # === Fallback Model Logic ===
 def train_fallback_model():
     mock_training_pairs = [
