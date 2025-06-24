@@ -9,6 +9,13 @@ from pathlib import Path
 FEEDBACK_FILE = "data/feedback.jsonl"
 MODEL_PATH = Path("models/feedback_disagreement_model.pkl")
 
+# Confidence level mapping for fallback compatibility
+CONFIDENCE_MAP = {
+    "low": 0.3,
+    "medium": 0.6,
+    "high": 0.9
+}
+
 # === Feedback Summary for Trust Score ===
 def get_feedback_summary_for_signal(signal_id: str):
     if not os.path.exists(FEEDBACK_FILE):
@@ -59,33 +66,35 @@ def run_disagreement_prediction(score: float, confidence: float, label: str) -> 
     return max(proba)
 
 # === Wrapper for compatibility ===
-def get_disagreement_probability(label: str, score: float = 0.5, confidence: float = 0.5) -> float:
+def get_disagreement_probability(label: str, score: float = 0.5, confidence="medium") -> float:
     """
     Wrapper to call disagreement prediction with minimal params.
-    Meant for use with compute_trust_scores.
+    Handles string confidence levels by converting to float.
     """
+    if isinstance(confidence, str):
+        confidence = CONFIDENCE_MAP.get(confidence.lower(), 0.5)
     return run_disagreement_prediction(score=score, confidence=confidence, label=label)
 
 # === Fallback Model Logic ===
 def train_fallback_model():
     mock_training_pairs = [
         {
-            "X": {"score": 0.4, "confidence": 0.8, "label": "Bullish Momentum"},
+            "X": {"score": 0.4, "confidence": 0.8, "label": "Positive"},
             "y": "Too bearish",
             "weight": 0.7
         },
         {
-            "X": {"score": 0.7, "confidence": 0.9, "label": "Bullish Momentum"},
+            "X": {"score": 0.7, "confidence": 0.9, "label": "Positive"},
             "y": "Accurate",
             "weight": 0.9
         },
         {
-            "X": {"score": 0.2, "confidence": 0.6, "label": "Bearish Reversal"},
+            "X": {"score": 0.2, "confidence": 0.6, "label": "Negative"},
             "y": "Too bullish",
             "weight": 0.6
         },
         {
-            "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral Drift"},
+            "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral"},
             "y": "Too bearish",
             "weight": 0.75
         }
@@ -115,12 +124,7 @@ def train_fallback_model():
 def load_model():
     if MODEL_PATH.exists():
         model = joblib.load(MODEL_PATH)
-        # Updated to include production labels
-        label_encoder = LabelEncoder().fit([
-            "Bullish Momentum",
-            "Bearish Reversal",
-            "Neutral Drift"
-        ])
+        label_encoder = LabelEncoder().fit(["Positive", "Negative", "Neutral"])
         return model, label_encoder
     else:
         print("[WARN] No trained model found. Using fallback mock model.")
