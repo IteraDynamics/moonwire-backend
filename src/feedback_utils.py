@@ -54,6 +54,10 @@ def get_feedback_summary_for_signal(signal_id: str):
 # === Trust Score Prediction Model (Structured) ===
 def run_disagreement_prediction(score: float, confidence: float, label: str) -> float:
     model, label_encoder = load_model()
+
+    if label not in label_encoder.classes_:
+        raise ValueError(f"Unrecognized label: {label}")
+
     encoded_label = label_encoder.transform([label])[0]
 
     features = pd.DataFrame([{
@@ -79,24 +83,29 @@ def get_disagreement_probability(label: str, score: float = 0.5, confidence="med
 def train_fallback_model():
     mock_training_pairs = [
         {
-            "X": {"score": 0.4, "confidence": 0.8, "label": "Bullish Momentum"},
+            "X": {"score": 0.4, "confidence": 0.8, "label": "Positive"},
             "y": "Too bearish",
             "weight": 0.7
         },
         {
-            "X": {"score": 0.7, "confidence": 0.9, "label": "Bullish Momentum"},
+            "X": {"score": 0.7, "confidence": 0.9, "label": "Positive"},
             "y": "Accurate",
             "weight": 0.9
         },
         {
-            "X": {"score": 0.2, "confidence": 0.6, "label": "Bearish Momentum"},
+            "X": {"score": 0.2, "confidence": 0.6, "label": "Negative"},
             "y": "Too bullish",
             "weight": 0.6
         },
         {
-            "X": {"score": 0.5, "confidence": 0.7, "label": "Choppy"},
+            "X": {"score": 0.5, "confidence": 0.7, "label": "Neutral"},
             "y": "Too bearish",
             "weight": 0.75
+        },
+        {
+            "X": {"score": 0.65, "confidence": 0.9, "label": "Bullish Momentum"},
+            "y": "Accurate",
+            "weight": 0.8
         }
     ]
 
@@ -124,7 +133,8 @@ def train_fallback_model():
 def load_model():
     if MODEL_PATH.exists():
         model = joblib.load(MODEL_PATH)
-        label_encoder = LabelEncoder().fit(["Bullish Momentum", "Bearish Momentum", "Choppy"])
+        # Safe hardcoded fallback for known labels including 'Bullish Momentum'
+        label_encoder = LabelEncoder().fit(["Positive", "Negative", "Neutral", "Bullish Momentum"])
         return model, label_encoder
     else:
         print("[WARN] No trained model found. Using fallback mock model.")
