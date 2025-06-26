@@ -3,7 +3,8 @@
 from fastapi import APIRouter
 from src.signal_cache import get_latest_signal, save_latest_signal
 from src.feedback_utils import get_feedback_summary_for_signal
-from src.signal_utils import compute_trust_scores, get_disagreement_probability
+from src.signal_utils import compute_trust_scores
+from src.disagreement_utils import get_disagreement_probability  # ✅ FIXED IMPORT
 
 router = APIRouter(prefix="/internal")
 
