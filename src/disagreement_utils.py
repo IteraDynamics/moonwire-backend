@@ -16,7 +16,6 @@ class SignalSnapshot(BaseModel):
 
 CONFIDENCE_THRESHOLD = 0.5
 
-
 def predict_disagreement(snapshot: SignalSnapshot):
     model, label_encoder = load_model()
     encoded_label = label_encoder.transform([snapshot.label])[0]
@@ -36,7 +35,6 @@ def predict_disagreement(snapshot: SignalSnapshot):
         "probability": predicted_prob
     }
 
-
 def train_fallback_model():
     fallback_data = [
         {"score": 0.3, "confidence": 0.9, "label": "Positive", "y": "Too bearish", "weight": 0.8},
@@ -54,7 +52,6 @@ def train_fallback_model():
 
     return model, label_encoder
 
-
 def load_model():
     if MODEL_PATH.exists():
         model = joblib.load(MODEL_PATH)
@@ -63,3 +60,14 @@ def load_model():
     else:
         print("[WARN] No trained model found. Using fallback model.")
         return train_fallback_model()
+
+# ✅ ADD THIS WRAPPER FOR EXTERNAL CALLERS
+
+def get_disagreement_probability(label: str, score: float, confidence: float) -> float:
+    """
+    Wrapper function that builds a snapshot and extracts the predicted
+    disagreement probability.
+    """
+    snapshot = SignalSnapshot(label=label, score=score, confidence=confidence)
+    result = predict_disagreement(snapshot)
+    return result.get("probability", 0.5)
