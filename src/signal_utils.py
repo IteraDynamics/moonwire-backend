@@ -44,7 +44,7 @@ def compute_trust_scores(signal, trust_insights):
     if not insight:
         signal["trust_score"] = 0.5
         signal["trust_label"] = "Unknown"
-        return
+        return signal  # ✅ Ensure return even on fallback
 
     agreement = insight.get("historical_agreement_rate")
 
@@ -61,7 +61,7 @@ def compute_trust_scores(signal, trust_insights):
     if agreement is None or disagreement_prob is None:
         signal["trust_score"] = 0.5
         signal["trust_label"] = "Unknown"
-        return
+        return signal  # ✅ Ensure return on missing data
 
     trust_score = (
         historical_agreement_weight * agreement +
@@ -74,6 +74,8 @@ def compute_trust_scores(signal, trust_insights):
         signal["trust_label"] = "Untrusted"
     else:
         signal["trust_label"] = "Unknown"
+
+    return signal  # ✅ Fixed: return enriched signal
 
 def generate_composite_signal(asset, twitter_score, news_score, timestamp=None):
     score = blend_scores(twitter_score, news_score)
