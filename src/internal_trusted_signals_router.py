@@ -47,3 +47,22 @@ def get_signals_with_trust():
     }
 
     return enriched
+    
+@router.post("/inject-mock-signal")
+def inject_mock_signal():
+    """
+    TEMPORARY:
+    Injects a mock signal into the in-memory cache for testing.
+    """
+    from src.signal_cache import signal_cache
+
+    mock_signal = {
+        "id": "mock-signal-001",
+        "label": "Positive",
+        "score": 0.85,
+        "confidence": 0.6,
+        "timestamp": "2025-06-26T09:30:00Z"
+    }
+
+    signal_cache["latest"] = mock_signal
+    return {"status": "mock signal injected", "signal": mock_signal}
