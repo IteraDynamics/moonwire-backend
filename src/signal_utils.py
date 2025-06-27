@@ -1,3 +1,5 @@
+# src/signal_utils.py
+
 from datetime import datetime
 import uuid
 from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
@@ -22,11 +24,11 @@ def determine_confidence(score, twitter_score, news_score):
 
 def label_signal(score):
     if score >= 0.6:
-        return "Bullish Momentum"
+        return "Positive"
     elif score <= -0.6:
-        return "Bearish Reversal"
+        return "Negative"
     else:
-        return "Neutral Drift"
+        return "Neutral"
 
 def get_trend(score):
     if score > 0:
