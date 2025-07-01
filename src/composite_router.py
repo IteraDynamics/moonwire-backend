@@ -1,35 +1,38 @@
-from fastapi import APIRouter, Query
-from typing import Optional
-from backend.schemas import CompositeSignal
-from backend.data_store import composite_signal_store
-from backend.logic.trust_logic import apply_trust_filtering
+# src/composite_router.py
 
-router = APIRouter()
+from fastapi import APIRouter, Query
+from src.signal_utils import generate_composite_signal, compute_trust_scores
+from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
+from src.schemas import CompositeSignal  # ✅ Fixed the incorrect import path
+
+router = APIRouter(prefix="/signals")
 
 @router.get("/composite")
-def get_composite_signals(
-    asset: str,
-    twitter_score: Optional[float] = None,
-    news_score: Optional[float] = None,
-    filter: bool = False,
+def get_composite_signal(
+    asset: str = Query(...),
+    twitter_score: float = Query(...),
+    news_score: float = Query(...)
 ):
-    signals = composite_signal_store.get_signals_for_asset(asset)
+    """
+    Generate a composite signal based on sentiment scores and trust insights.
+    Suppresses low-trust signals and flags likely disagreement.
+    """
+    signal = generate_composite_signal(asset, twitter_score, news_score)
 
-    # If disagreement prediction scores are available, annotate likely_disagreed
-    if twitter_score is not None and news_score is not None:
-        for sig in signals:
-            if sig.confidence is not None:
-                try:
-                    from backend.logic.disagreement import predict_disagreement
-                    likely_disagreed = predict_disagreement(
-                        twitter_score, news_score, sig.confidence
-                    )
-                    sig.likely_disagreed = likely_disagreed
-                except Exception as e:
-                    print(f"WARNING: Failed to run disagreement prediction: {e}")
+    feedback_summary = get_feedback_summary_for_signal(signal["id"])
+    confidence_map = {"low": 0.3, "medium": 0.6, "high": 0.9}
+    predicted_disagreement_prob = run_disagreement_prediction(
+        score=signal["score"],
+        confidence=confidence_map[signal["confidence"]],
+        label=signal["label"]
+    )
 
-    # Apply trust filtering if enabled
-    if filter:
-        signals = apply_trust_filtering(signals)
+    trust_insights = {
+        signal["id"]: {
+            "historical_agreement_rate": feedback_summary.get("historical_agreement_rate"),
+            "predicted_disagreement_prob": predicted_disagreement_prob
+        }
+    }
 
-    return {"signals": [s.dict() for s in signals]}
+    compute_trust_scores(signal, trust_insights)
+    return signal
