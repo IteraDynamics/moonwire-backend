@@ -1,9 +1,12 @@
-
 # src/signal_utils.py
 
 from datetime import datetime
 import uuid
+import json
+import os
 from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
+
+SUPPRESSION_REVIEW_PATH = "data/suppression_review_queue.jsonl"
 
 def same_sign(a, b):
     return (a >= 0 and b >= 0) or (a < 0 and b < 0)
@@ -77,6 +80,23 @@ def compute_trust_scores(signal, trust_insights):
         signal["trust_label"] = "Untrusted"
     else:
         signal["trust_label"] = "Unknown"
+
+def log_to_review_queue(signal, reason):
+    entry = {
+        "id": signal["id"],
+        "asset": signal["asset"],
+        "timestamp": signal["timestamp"],
+        "score": signal["score"],
+        "confidence": signal["confidence"],
+        "label": signal["label"],
+        "trust_score": signal.get("trust_score", 0.5),
+        "trust_label": signal.get("trust_label", "Unknown"),
+        "reason": reason,
+        "status": "pending"
+    }
+    os.makedirs(os.path.dirname(SUPPRESSION_REVIEW_PATH), exist_ok=True)
+    with open(SUPPRESSION_REVIEW_PATH, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 def generate_composite_signal(asset, twitter_score, news_score, timestamp=None):
     score = blend_scores(twitter_score, news_score)
