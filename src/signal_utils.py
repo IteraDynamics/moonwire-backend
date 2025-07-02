@@ -64,8 +64,7 @@ def compute_trust_scores(signal, trust_insights):
         historical_agreement_weight * agreement +
         predicted_disagreement_weight * (1 - disagreement_prob)
     )
-    trust_score = round(trust_score, 3)
-    signal["trust_score"] = trust_score
+    signal["trust_score"] = round(trust_score, 3)
 
     if trust_score >= 0.7:
         signal["trust_label"] = "Trusted"
