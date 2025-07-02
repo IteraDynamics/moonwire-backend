@@ -1,10 +1,26 @@
-# src/composite_router.py
-
 from fastapi import APIRouter, Query
 from src.signal_utils import generate_composite_signal, compute_trust_scores
 from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
+import os
+import json
 
 router = APIRouter(prefix="/signals")
+
+SUPPRESSION_LOG_PATH = "data/suppression_log.jsonl"
+SUPPRESSION_THRESHOLD = 0.4  # trust_score below this = suppressed
+
+def log_suppressed_signal(signal, reason):
+    log_entry = {
+        "id": signal["id"],
+        "asset": signal.get("asset"),
+        "timestamp": signal.get("timestamp"),
+        "trust_score": signal.get("trust_score"),
+        "trust_label": signal.get("trust_label"),
+        "reason": reason
+    }
+    os.makedirs(os.path.dirname(SUPPRESSION_LOG_PATH), exist_ok=True)
+    with open(SUPPRESSION_LOG_PATH, "a") as f:
+        f.write(json.dumps(log_entry) + "\n")
 
 @router.get("/composite")
 def get_composite_signal(
@@ -34,4 +50,8 @@ def get_composite_signal(
     }
 
     compute_trust_scores(signal, trust_insights)
+
+    if signal.get("trust_score", 0.5) < SUPPRESSION_THRESHOLD:
+        log_suppressed_signal(signal, reason="trust_score_below_threshold")
+
     return signal
