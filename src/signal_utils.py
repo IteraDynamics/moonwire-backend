@@ -53,16 +53,7 @@ def compute_trust_scores(signal, trust_insights):
         return
 
     agreement = insight.get("historical_agreement_rate")
-
-    try:
-        disagreement_prob = run_disagreement_prediction(
-            score=signal["score"],
-            confidence=signal.get("confidence", 0.5),
-            label=signal.get("label", "Neutral")
-        )
-    except Exception as e:
-        print(f"[WARN] Failed to run disagreement prediction: {e}")
-        disagreement_prob = 0.5
+    disagreement_prob = insight.get("predicted_disagreement_prob")
 
     if agreement is None or disagreement_prob is None:
         signal["trust_score"] = 0.5
@@ -73,7 +64,9 @@ def compute_trust_scores(signal, trust_insights):
         historical_agreement_weight * agreement +
         predicted_disagreement_weight * (1 - disagreement_prob)
     )
-    signal["trust_score"] = round(trust_score, 3)
+    trust_score = round(trust_score, 3)
+    signal["trust_score"] = trust_score
+
     if trust_score >= 0.7:
         signal["trust_label"] = "Trusted"
     elif trust_score < 0.3:
