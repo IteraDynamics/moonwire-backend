@@ -10,6 +10,7 @@ from src.signal_utils import compute_trust_scores
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
 FEEDBACK_LOG_PATH = "data/feedback.jsonl"  # Location of feedback data
+SUPPRESSION_LOG_PATH = "data/suppression_log.jsonl"
 
 # === Feedback Summary Route ===
 @router.get("/feedback-summary")
@@ -71,3 +72,42 @@ def signal_trust_insights():
         return {"probability": 0.5}
 
     return compute_trust_scores(fetch_disagreement_prediction)
+
+
+# === Suppression Summary Route ===
+@router.get("/suppression-summary")
+def suppression_summary():
+    if not os.path.exists(SUPPRESSION_LOG_PATH):
+        return {"total_suppressed": 0, "by_asset": {}, "by_trust_band": {}}
+
+    asset_counts = defaultdict(int)
+    trust_band_counts = defaultdict(int)
+    total = 0
+
+    with open(SUPPRESSION_LOG_PATH, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                total += 1
+                asset = entry.get("asset", "Unknown")
+                trust_score = entry.get("trust_score", 0.5)
+
+                asset_counts[asset] += 1
+
+                if trust_score < 0.2:
+                    band = "< 0.2"
+                elif trust_score < 0.4:
+                    band = "0.2–0.4"
+                else:
+                    band = "0.4+"
+
+                trust_band_counts[band] += 1
+
+            except json.JSONDecodeError:
+                continue
+
+    return {
+        "total_suppressed": total,
+        "by_asset": dict(asset_counts),
+        "by_trust_band": dict(trust_band_counts)
+    }
