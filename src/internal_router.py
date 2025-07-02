@@ -1,7 +1,6 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
-from collections import defaultdict, Counter
-from typing import List
+from collections import defaultdict
 import json
 import os
 import requests
@@ -9,7 +8,8 @@ from src.signal_utils import compute_trust_scores
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
-FEEDBACK_LOG_PATH = "data/feedback.jsonl"  # Location of feedback data
+FEEDBACK_LOG_PATH = "data/feedback.jsonl"
+SUPPRESSION_LOG_PATH = "logs/suppression_log.jsonl"
 
 # === Feedback Summary Route ===
 @router.get("/feedback-summary")
@@ -39,7 +39,6 @@ def get_feedback_summary():
             except json.JSONDecodeError:
                 continue
 
-    # Get top 3 most disagreed signals
     top_signals = sorted(disagree_signals.items(), key=lambda x: len(x[1]), reverse=True)[:3]
     most_disagreed = [
         {
@@ -58,7 +57,7 @@ def get_feedback_summary():
     }
 
 
-# === Signal Trust Score Route ===
+# === Signal Trust Score Proxy Route ===
 @router.get("/signal-trust-insights")
 def signal_trust_insights():
     def fetch_disagreement_prediction(payload):
@@ -71,3 +70,48 @@ def signal_trust_insights():
         return {"probability": 0.5}
 
     return compute_trust_scores(fetch_disagreement_prediction)
+
+
+# === Suppression Summary Route ===
+@router.get("/suppression-summary")
+def get_suppression_summary():
+    if not os.path.exists(SUPPRESSION_LOG_PATH):
+        return {
+            "total_suppressed": 0,
+            "by_asset": {},
+            "by_trust_range": {}
+        }
+
+    by_asset = defaultdict(int)
+    by_trust_range = defaultdict(int)
+    total = 0
+
+    def trust_bucket(score):
+        if score < 0.2:
+            return "<0.2"
+        elif score < 0.4:
+            return "0.2–0.4"
+        elif score < 0.6:
+            return "0.4–0.6"
+        elif score < 0.8:
+            return "0.6–0.8"
+        else:
+            return "0.8–1.0"
+
+    with open(SUPPRESSION_LOG_PATH, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                asset = entry.get("asset", "unknown")
+                score = entry.get("trust_score", 0.0)
+                total += 1
+                by_asset[asset] += 1
+                by_trust_range[trust_bucket(score)] += 1
+            except json.JSONDecodeError:
+                continue
+
+    return {
+        "total_suppressed": total,
+        "by_asset": dict(by_asset),
+        "by_trust_range": dict(by_trust_range)
+    }
