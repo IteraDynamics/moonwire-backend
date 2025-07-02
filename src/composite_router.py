@@ -37,17 +37,17 @@ def get_composite_signal(
     signal = generate_composite_signal(asset, twitter_score, news_score)
 
     feedback_summary = get_feedback_summary_for_signal(signal["id"])
-
-    # Safely convert confidence string to float
     confidence_map = {"low": 0.3, "medium": 0.6, "high": 0.9}
-    raw_confidence = signal.get("confidence", "medium")
-    confidence_val = confidence_map.get(raw_confidence, 0.6)
 
-    predicted_disagreement_prob = run_disagreement_prediction(
-        score=signal["score"],
-        confidence=confidence_val,
-        label=signal["label"]
-    )
+    try:
+        predicted_disagreement_prob = run_disagreement_prediction(
+            score=signal["score"],
+            confidence=confidence_map[signal["confidence"]],
+            label=signal["label"]
+        )
+    except Exception as e:
+        predicted_disagreement_prob = 0.9  # Assume high disagreement if prediction fails
+        signal["fallback_type"] = "disagreement_prediction_failed"
 
     trust_insights = {
         signal["id"]: {
@@ -57,6 +57,12 @@ def get_composite_signal(
     }
 
     compute_trust_scores(signal, trust_insights)
+
+    # Inject fallback trust score if not present
+    if "trust_score" not in signal or signal["trust_score"] is None:
+        signal["trust_score"] = 0.2  # Force low score to test suppression
+        signal["trust_label"] = "Low"
+        signal["fallback_type"] = "forced_low_for_testing"
 
     if signal.get("trust_score", 0.5) < SUPPRESSION_THRESHOLD:
         log_suppressed_signal(signal, reason="trust_score_below_threshold")
