@@ -7,7 +7,7 @@ import json
 router = APIRouter(prefix="/signals")
 
 SUPPRESSION_LOG_PATH = "data/suppression_log.jsonl"
-SUPPRESSION_THRESHOLD = 0.4  # trust_score below this = suppressed
+SUPPRESSION_THRESHOLD = 0.6  # trust_score below this = suppressed
 
 def log_suppressed_signal(signal, reason):
     log_entry = {
@@ -16,7 +16,9 @@ def log_suppressed_signal(signal, reason):
         "timestamp": signal.get("timestamp"),
         "trust_score": signal.get("trust_score"),
         "trust_label": signal.get("trust_label"),
-        "reason": reason
+        "reason": reason,
+        "status": "pending",
+        "full_payload": signal
     }
     os.makedirs(os.path.dirname(SUPPRESSION_LOG_PATH), exist_ok=True)
     with open(SUPPRESSION_LOG_PATH, "a") as f:
@@ -35,17 +37,18 @@ def get_composite_signal(
     signal = generate_composite_signal(asset, twitter_score, news_score)
 
     feedback_summary = get_feedback_summary_for_signal(signal["id"])
-
-    # Fix: handle string-to-float safely using a mapping
     confidence_map = {"low": 0.3, "medium": 0.6, "high": 0.9}
-    confidence_raw = signal.get("confidence", "").lower()
-    confidence_value = confidence_map.get(confidence_raw, 0.5)
+    confidence_value = confidence_map.get(signal.get("confidence", "low"), 0.3)
 
-    predicted_disagreement_prob = run_disagreement_prediction(
-        score=signal["score"],
-        confidence=confidence_value,
-        label=signal["label"]
-    )
+    try:
+        predicted_disagreement_prob = run_disagreement_prediction(
+            score=signal["score"],
+            confidence=confidence_value,
+            label=signal["label"]
+        )
+    except Exception as e:
+        print(f"Disagreement prediction failed: {e}")
+        predicted_disagreement_prob = None
 
     trust_insights = {
         signal["id"]: {
