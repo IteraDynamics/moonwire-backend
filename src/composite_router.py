@@ -6,8 +6,8 @@ import json
 
 router = APIRouter(prefix="/signals")
 
-SUPPRESSION_LOG_PATH = "data/suppression_log.jsonl"
-SUPPRESSION_THRESHOLD = 0.6  # trust_score below this = suppressed
+SUPPRESSION_LOG_PATH = "data/suppression_review_queue.jsonl"
+SUPPRESSION_THRESHOLD = 0.4  # trust_score below this = suppressed
 
 def log_suppressed_signal(signal, reason):
     log_entry = {
@@ -32,23 +32,18 @@ def get_composite_signal(
 ):
     """
     Generate a composite signal based on sentiment scores and trust insights.
-    Suppresses low-trust signals and flags likely disagreement.
+    Suppresses low-trust signals and logs them for internal review.
     """
     signal = generate_composite_signal(asset, twitter_score, news_score)
 
     feedback_summary = get_feedback_summary_for_signal(signal["id"])
     confidence_map = {"low": 0.3, "medium": 0.6, "high": 0.9}
-    confidence_value = confidence_map.get(signal.get("confidence", "low"), 0.3)
 
-    try:
-        predicted_disagreement_prob = run_disagreement_prediction(
-            score=signal["score"],
-            confidence=confidence_value,
-            label=signal["label"]
-        )
-    except Exception as e:
-        print(f"Disagreement prediction failed: {e}")
-        predicted_disagreement_prob = None
+    predicted_disagreement_prob = run_disagreement_prediction(
+        score=signal["score"],
+        confidence=confidence_map[signal["confidence"]],
+        label=signal["label"]
+    )
 
     trust_insights = {
         signal["id"]: {
