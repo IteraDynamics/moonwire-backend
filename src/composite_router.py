@@ -35,10 +35,15 @@ def get_composite_signal(
     signal = generate_composite_signal(asset, twitter_score, news_score)
 
     feedback_summary = get_feedback_summary_for_signal(signal["id"])
+
+    # Fix: handle string-to-float safely using a mapping
     confidence_map = {"low": 0.3, "medium": 0.6, "high": 0.9}
+    confidence_raw = signal.get("confidence", "").lower()
+    confidence_value = confidence_map.get(confidence_raw, 0.5)
+
     predicted_disagreement_prob = run_disagreement_prediction(
         score=signal["score"],
-        confidence=confidence_map[signal["confidence"]],
+        confidence=confidence_value,
         label=signal["label"]
     )
 
