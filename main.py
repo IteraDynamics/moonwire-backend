@@ -1,4 +1,5 @@
-# main.py
+import os
+os.makedirs("logs", exist_ok=True)  # ✅ Ensure logging directory exists at boot
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
