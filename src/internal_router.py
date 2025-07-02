@@ -1,6 +1,6 @@
 # src/internal_router.py
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from collections import defaultdict
 from typing import List
@@ -90,3 +90,39 @@ def review_suppressed_signals():
                 continue
 
     return {"review_queue": pending_signals}
+
+# === Suppression Status Update ===
+class SuppressionUpdate(BaseModel):
+    signal_id: str
+    new_status: str  # "reviewed" or "flag_for_retraining"
+
+@router.post("/mark-suppressed")
+def mark_suppressed(update: SuppressionUpdate):
+    if update.new_status not in ["reviewed", "flag_for_retraining"]:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    if not os.path.exists(SUPPRESSION_REVIEW_PATH):
+        raise HTTPException(status_code=404, detail="No suppression file found")
+
+    updated_entries = []
+    updated = False
+
+    with open(SUPPRESSION_REVIEW_PATH, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                if entry.get("id") == update.signal_id and entry.get("status") == "pending":
+                    entry["status"] = update.new_status
+                    updated = True
+                updated_entries.append(entry)
+            except json.JSONDecodeError:
+                continue
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Pending signal not found")
+
+    with open(SUPPRESSION_REVIEW_PATH, "w") as f:
+        for entry in updated_entries:
+            f.write(json.dumps(entry) + "\n")
+
+    return {"updated": True, "signal_id": update.signal_id, "new_status": update.new_status}
