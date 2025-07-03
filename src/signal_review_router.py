@@ -1,94 +1,142 @@
-# src/signal_review_router.py
-
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
 from datetime import datetime
 import json
 import os
+from pathlib import Path
+from collections import defaultdict
 
-router = APIRouter(prefix="/internal", tags=["signal-review"])
+router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
-SUPPRESSION_REVIEW_PATH = "data/suppression_review_queue.jsonl"
-RETRAIN_QUEUE_PATH = "data/retrain_queue.jsonl"
-OVERRIDE_LOG_PATH = "data/override_log.jsonl"
-
-
-def load_jsonl(path):
-    if not os.path.exists(path):
-        return []
-    with open(path, "r") as f:
-        return [json.loads(line) for line in f if line.strip()]
+SUPPRESSION_REVIEW_PATH = Path("logs/suppression_review_queue.jsonl")
+RETRAIN_QUEUE_PATH = Path("logs/retrain_queue.jsonl")
+OVERRIDE_LOG_PATH = Path("logs/override_log.jsonl")
 
 
-def append_jsonl(path, entry):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a") as f:
-        f.write(json.dumps(entry) + "\n")
+class RetrainRequest(BaseModel):
+    signal_id: str
+    reason: str
+    note: Optional[str] = None
 
 
-@router.get("/review-suppressed")
-def review_suppressed_signals():
-    review_data = load_jsonl(SUPPRESSION_REVIEW_PATH)
-    return {"review_queue": review_data}
+class OverrideRequest(BaseModel):
+    signal_id: str
+    override_reason: str
+    note: Optional[str] = None
+    reviewed_by: Optional[str] = "founder"
 
 
 @router.post("/flag-for-retraining")
-async def flag_signal_for_retraining(request: Request):
-    body = await request.json()
-    signal_id = body.get("signal_id")
-    reason = body.get("reason", "unspecified")
-    note = body.get("note", "")
+def flag_for_retraining(req: RetrainRequest):
+    if not SUPPRESSION_REVIEW_PATH.exists():
+        raise HTTPException(status_code=404, detail="Suppression review file not found.")
 
-    review_queue = load_jsonl(SUPPRESSION_REVIEW_PATH)
-    matching_signal = next((s for s in review_queue if s["id"] == signal_id), None)
+    matched_signal = None
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                if entry.get("id") == req.signal_id:
+                    matched_signal = entry
+                    break
+            except json.JSONDecodeError:
+                continue
 
-    if not matching_signal:
-        raise HTTPException(status_code=404, detail="Signal not found in suppression queue")
+    if not matched_signal:
+        raise HTTPException(status_code=404, detail="Signal not found in review queue.")
 
-    # Check for duplicates
-    retrain_queue = load_jsonl(RETRAIN_QUEUE_PATH)
-    if any(s["id"] == signal_id for s in retrain_queue):
-        return {"status": "ok", "added": False, "signal_id": signal_id, "reason": "already exists"}
-
-    matching_signal.update({
+    new_entry = {
+        **matched_signal.get("full_payload", {}),
         "flagged_for_retraining": True,
-        "flag_reason": reason,
-        "flagged_at": datetime.utcnow().isoformat(),
-    })
+        "flag_reason": req.reason,
+        "note": req.note,
+        "flagged_at": datetime.utcnow().isoformat()
+    }
 
-    if note:
-        matching_signal["note"] = note
+    os.makedirs(RETRAIN_QUEUE_PATH.parent, exist_ok=True)
+    with RETRAIN_QUEUE_PATH.open("a") as f:
+        f.write(json.dumps(new_entry) + "\n")
 
-    append_jsonl(RETRAIN_QUEUE_PATH, matching_signal)
-
-    return {"status": "ok", "added": True, "signal_id": signal_id}
+    return {"status": "ok", "added": True, "signal_id": req.signal_id}
 
 
 @router.post("/override-suppression")
-async def override_suppressed_signal(request: Request):
-    body = await request.json()
-    signal_id = body.get("signal_id")
-    override_reason = body.get("override_reason", "unspecified")
-    note = body.get("note", "")
-    reviewed_by = "founder"
+def override_suppressed_signal(req: OverrideRequest):
+    if not SUPPRESSION_REVIEW_PATH.exists():
+        raise HTTPException(status_code=404, detail="Suppression review file not found.")
 
-    review_queue = load_jsonl(SUPPRESSION_REVIEW_PATH)
-    signal = next((s for s in review_queue if s["id"] == signal_id), None)
+    matched_signal = None
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                if entry.get("id") == req.signal_id:
+                    matched_signal = entry
+                    break
+            except json.JSONDecodeError:
+                continue
 
-    if not signal:
-        raise HTTPException(status_code=404, detail="Signal not found in suppression queue")
+    if not matched_signal:
+        raise HTTPException(status_code=404, detail="Signal not found in review queue.")
 
-    override_entry = {
+    override_log = {
         "timestamp": datetime.utcnow().isoformat(),
-        "signal_id": signal_id,
-        "override_reason": override_reason,
+        "signal_id": req.signal_id,
+        "override_reason": req.override_reason,
         "source": "manual_override",
-        "reviewed_by": reviewed_by,
-        "full_payload": signal,
+        "reviewed_by": req.reviewed_by,
+        "note": req.note,
+        "full_payload": matched_signal.get("full_payload", {})
     }
 
-    if note:
-        override_entry["note"] = note
+    os.makedirs(OVERRIDE_LOG_PATH.parent, exist_ok=True)
+    with OVERRIDE_LOG_PATH.open("a") as f:
+        f.write(json.dumps(override_log) + "\n")
 
-    append_jsonl(OVERRIDE_LOG_PATH, override_entry)
+    return {"status": "ok", "override_applied": True, "signal_id": req.signal_id}
 
-    return {"status": "ok", "override_applied": True, "signal_id": signal_id}
+
+@router.get("/retrain-summary")
+def retrain_summary():
+    if not RETRAIN_QUEUE_PATH.exists():
+        return {
+            "total_flagged": 0,
+            "assets": {},
+            "flag_reasons": {},
+            "latest_entries": []
+        }
+
+    entries = []
+    with RETRAIN_QUEUE_PATH.open("r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                entries.append(entry)
+            except json.JSONDecodeError:
+                continue
+
+    total_flagged = len(entries)
+    assets = defaultdict(int)
+    flag_reasons = defaultdict(int)
+
+    for entry in entries:
+        assets[entry.get("asset", "Unknown")] += 1
+        flag_reasons[entry.get("flag_reason", "Unknown")] += 1
+
+    sorted_entries = sorted(entries, key=lambda e: e.get("flagged_at", ""), reverse=True)
+    latest_entries = []
+    for entry in sorted_entries[:10]:
+        latest_entries.append({
+            "signal_id": entry.get("id"),
+            "flag_reason": entry.get("flag_reason"),
+            "trust_score": entry.get("trust_score", "Unknown"),
+            "flagged_at": entry.get("flagged_at", "Unknown")
+        })
+
+    return {
+        "total_flagged": total_flagged,
+        "assets": dict(assets),
+        "flag_reasons": dict(flag_reasons),
+        "latest_entries": latest_entries
+    }
