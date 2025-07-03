@@ -30,7 +30,9 @@ from src.feedback_ingestion_router import router as feedback_ingestion_router
 from src.high_disagreement_router import router as high_disagreement_router
 from src.feedback_insights_router import router as feedback_insights_router
 from src.feedback_prediction_router import router as feedback_prediction_router
-from src.internal_trusted_signals_router import router as trust_intelligence_router  # ✅ FIXED IMPORT
+from src.internal_trusted_signals_router import router as trust_intelligence_router
+from src.signal_review_router import router as signal_review_router
+
 
 app = FastAPI()
 
@@ -68,11 +70,13 @@ app.include_router(export_training_router)
 app.include_router(adjustment_router)
 app.include_router(adjustment_trigger_router)
 app.include_router(internal_router)
-app.include_router(feedback_ingestion_router)  # ✅ NEW
+app.include_router(feedback_ingestion_router)
 app.include_router(high_disagreement_router)
 app.include_router(feedback_insights_router)
 app.include_router(feedback_prediction_router, prefix="/internal")
-app.include_router(trust_intelligence_router)  # ✅ REGISTERED
+app.include_router(trust_intelligence_router)
+app.include_router(signal_review_router)
+
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
