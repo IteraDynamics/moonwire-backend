@@ -1,6 +1,8 @@
-from fastapi import APIRouter
+# src/internal_router.py
+
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from collections import defaultdict, Counter
+from collections import defaultdict
 from typing import List
 import json
 import os
@@ -9,8 +11,8 @@ from src.signal_utils import compute_trust_scores
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
-FEEDBACK_LOG_PATH = "data/feedback.jsonl"  # Location of feedback data
-SUPPRESSION_LOG_PATH = "data/suppression_log.jsonl"
+FEEDBACK_LOG_PATH = "data/feedback.jsonl"
+SUPPRESSION_REVIEW_PATH = "data/suppression_review_queue.jsonl"
 
 # === Feedback Summary Route ===
 @router.get("/feedback-summary")
@@ -40,7 +42,6 @@ def get_feedback_summary():
             except json.JSONDecodeError:
                 continue
 
-    # Get top 3 most disagreed signals
     top_signals = sorted(disagree_signals.items(), key=lambda x: len(x[1]), reverse=True)[:3]
     most_disagreed = [
         {
@@ -58,7 +59,6 @@ def get_feedback_summary():
         "most_disagreed_signals": most_disagreed
     }
 
-
 # === Signal Trust Score Route ===
 @router.get("/signal-trust-insights")
 def signal_trust_insights():
@@ -73,41 +73,56 @@ def signal_trust_insights():
 
     return compute_trust_scores(fetch_disagreement_prediction)
 
+# === Suppression Review Queue Route ===
+@router.get("/review-suppressed")
+def review_suppressed_signals():
+    if not os.path.exists(SUPPRESSION_REVIEW_PATH):
+        return {"review_queue": []}
 
-# === Suppression Summary Route ===
-@router.get("/suppression-summary")
-def suppression_summary():
-    if not os.path.exists(SUPPRESSION_LOG_PATH):
-        return {"total_suppressed": 0, "by_asset": {}, "by_trust_band": {}}
-
-    asset_counts = defaultdict(int)
-    trust_band_counts = defaultdict(int)
-    total = 0
-
-    with open(SUPPRESSION_LOG_PATH, "r") as f:
+    pending_signals = []
+    with open(SUPPRESSION_REVIEW_PATH, "r") as f:
         for line in f:
             try:
                 entry = json.loads(line)
-                total += 1
-                asset = entry.get("asset", "Unknown")
-                trust_score = entry.get("trust_score", 0.5)
-
-                asset_counts[asset] += 1
-
-                if trust_score < 0.2:
-                    band = "< 0.2"
-                elif trust_score < 0.4:
-                    band = "0.2–0.4"
-                else:
-                    band = "0.4+"
-
-                trust_band_counts[band] += 1
-
+                if entry.get("status") == "pending":
+                    pending_signals.append(entry)
             except json.JSONDecodeError:
                 continue
 
-    return {
-        "total_suppressed": total,
-        "by_asset": dict(asset_counts),
-        "by_trust_band": dict(trust_band_counts)
-    }
+    return {"review_queue": pending_signals}
+
+# === Suppression Status Update ===
+class SuppressionUpdate(BaseModel):
+    signal_id: str
+    new_status: str  # "reviewed" or "flag_for_retraining"
+
+@router.post("/mark-suppressed")
+def mark_suppressed(update: SuppressionUpdate):
+    if update.new_status not in ["reviewed", "flag_for_retraining"]:
+        raise HTTPException(status_code=400, detail="Invalid status")
+
+    if not os.path.exists(SUPPRESSION_REVIEW_PATH):
+        raise HTTPException(status_code=404, detail="No suppression file found")
+
+    updated_entries = []
+    updated = False
+
+    with open(SUPPRESSION_REVIEW_PATH, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                if entry.get("id") == update.signal_id and entry.get("status") == "pending":
+                    entry["status"] = update.new_status
+                    updated = True
+                updated_entries.append(entry)
+            except json.JSONDecodeError:
+                continue
+
+    if not updated:
+        raise HTTPException(status_code=404, detail="Pending signal not found")
+
+    with open(SUPPRESSION_REVIEW_PATH, "w") as f:
+        for entry in updated_entries:
+            f.write(json.dumps(entry) + "\n")
+
+    return {"updated": True, "signal_id": update.signal_id, "new_status": update.new_status}
