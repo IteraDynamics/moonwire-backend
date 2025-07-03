@@ -1,8 +1,6 @@
-# src/signal_review_router.py
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime
 import json
 import os
@@ -48,10 +46,8 @@ def flag_for_retraining(req: RetrainRequest):
     if not matched_signal:
         raise HTTPException(status_code=404, detail="Signal not found in review queue.")
 
-    base_payload = matched_signal.get("full_payload") or matched_signal
-
     new_entry = {
-        **base_payload,
+        **matched_signal,
         "flagged_for_retraining": True,
         "flag_reason": req.reason,
         "note": req.note,
@@ -91,7 +87,7 @@ def override_suppressed_signal(req: OverrideRequest):
         "source": "manual_override",
         "reviewed_by": req.reviewed_by,
         "note": req.note,
-        "full_payload": matched_signal.get("full_payload", {})
+        "full_payload": matched_signal
     }
 
     os.makedirs(OVERRIDE_LOG_PATH.parent, exist_ok=True)
