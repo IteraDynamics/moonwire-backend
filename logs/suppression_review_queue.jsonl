@@ -1,0 +1,1 @@
+{"id": "sig_14489ecd", "timestamp": "2025-07-03T16:19:05.000994", "asset": "DOGE", "score": -0.13, "confidence": "low", "label": "Neutral", "trend": "downward", "top_drivers": ["twitter sentiment", "news sentiment"], "fallback_type": "missing_agreement", "trust_score": 0.488, "trust_label": "Uncertain", "status": "pending"}
