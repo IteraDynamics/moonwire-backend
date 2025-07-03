@@ -37,7 +37,8 @@ def flag_for_retraining(req: RetrainRequest):
         for line in f:
             try:
                 entry = json.loads(line)
-                if entry.get("id") == req.signal_id:
+                entry_id = entry.get("id") or entry.get("full_payload", {}).get("id")
+                if entry_id == req.signal_id:
                     matched_signal = entry
                     break
             except json.JSONDecodeError:
@@ -46,8 +47,10 @@ def flag_for_retraining(req: RetrainRequest):
     if not matched_signal:
         raise HTTPException(status_code=404, detail="Signal not found in review queue.")
 
+    payload = matched_signal.get("full_payload", matched_signal)
+
     new_entry = {
-        **matched_signal,
+        **payload,
         "flagged_for_retraining": True,
         "flag_reason": req.reason,
         "note": req.note,
@@ -71,7 +74,8 @@ def override_suppressed_signal(req: OverrideRequest):
         for line in f:
             try:
                 entry = json.loads(line)
-                if entry.get("id") == req.signal_id:
+                entry_id = entry.get("id") or entry.get("full_payload", {}).get("id")
+                if entry_id == req.signal_id:
                     matched_signal = entry
                     break
             except json.JSONDecodeError:
@@ -87,7 +91,7 @@ def override_suppressed_signal(req: OverrideRequest):
         "source": "manual_override",
         "reviewed_by": req.reviewed_by,
         "note": req.note,
-        "full_payload": matched_signal
+        "full_payload": matched_signal.get("full_payload", matched_signal)
     }
 
     os.makedirs(OVERRIDE_LOG_PATH.parent, exist_ok=True)
