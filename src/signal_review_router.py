@@ -10,8 +10,8 @@ from collections import defaultdict
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
 SUPPRESSION_REVIEW_PATH = Path("data/suppression_review_queue.jsonl")
-RETRAIN_QUEUE_PATH = Path("logs/retrain_queue.jsonl")
-OVERRIDE_LOG_PATH = Path("logs/override_log.jsonl")
+RETRAIN_QUEUE_PATH = Path("data/retrain_queue.jsonl")
+OVERRIDE_LOG_PATH = Path("data/override_log.jsonl")
 
 
 class RetrainRequest(BaseModel):
