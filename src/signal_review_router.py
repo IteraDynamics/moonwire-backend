@@ -9,7 +9,7 @@ from collections import defaultdict
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
-SUPPRESSION_REVIEW_PATH = Path("logs/suppression_review_queue.jsonl")
+SUPPRESSION_REVIEW_PATH = Path("data/suppression_review_queue.jsonl")
 RETRAIN_QUEUE_PATH = Path("logs/retrain_queue.jsonl")
 OVERRIDE_LOG_PATH = Path("logs/override_log.jsonl")
 
@@ -37,8 +37,7 @@ def flag_for_retraining(req: RetrainRequest):
         for line in f:
             try:
                 entry = json.loads(line)
-                entry_id = entry.get("id") or entry.get("full_payload", {}).get("id")
-                if entry_id == req.signal_id:
+                if entry.get("id") == req.signal_id:
                     matched_signal = entry
                     break
             except json.JSONDecodeError:
@@ -47,10 +46,8 @@ def flag_for_retraining(req: RetrainRequest):
     if not matched_signal:
         raise HTTPException(status_code=404, detail="Signal not found in review queue.")
 
-    payload = matched_signal.get("full_payload", matched_signal)
-
     new_entry = {
-        **payload,
+        **matched_signal.get("full_payload", {}),
         "flagged_for_retraining": True,
         "flag_reason": req.reason,
         "note": req.note,
@@ -74,8 +71,7 @@ def override_suppressed_signal(req: OverrideRequest):
         for line in f:
             try:
                 entry = json.loads(line)
-                entry_id = entry.get("id") or entry.get("full_payload", {}).get("id")
-                if entry_id == req.signal_id:
+                if entry.get("id") == req.signal_id:
                     matched_signal = entry
                     break
             except json.JSONDecodeError:
@@ -91,7 +87,7 @@ def override_suppressed_signal(req: OverrideRequest):
         "source": "manual_override",
         "reviewed_by": req.reviewed_by,
         "note": req.note,
-        "full_payload": matched_signal.get("full_payload", matched_signal)
+        "full_payload": matched_signal.get("full_payload", {})
     }
 
     os.makedirs(OVERRIDE_LOG_PATH.parent, exist_ok=True)
