@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query
 from src.signal_utils import generate_composite_signal, compute_trust_scores
 from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
+from datetime import datetime, timedelta
 import os
 import json
 
@@ -8,6 +9,47 @@ router = APIRouter(prefix="/signals")
 
 SUPPRESSION_LOG_PATH = "data/suppression_review_queue.jsonl"
 SUPPRESSION_THRESHOLD = 0.4  # trust_score below this = suppressed
+
+def get_recent_suppressions(asset: str, lookback_minutes=1440):
+    """
+    Returns number of times this asset was suppressed in past lookback_minutes.
+    """
+    if not os.path.exists(SUPPRESSION_LOG_PATH):
+        return 0
+
+    count = 0
+    cutoff = datetime.utcnow() - timedelta(minutes=lookback_minutes)
+
+    with open(SUPPRESSION_LOG_PATH, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                if (
+                    entry.get("asset") == asset and
+                    datetime.fromisoformat(entry.get("timestamp")) >= cutoff
+                ):
+                    count += 1
+            except Exception:
+                continue
+    return count
+
+def add_retrain_hint_if_applicable(signal: dict, log_entry: dict):
+    """
+    Adds retrain_hint to log_entry if signal matches known retraining patterns.
+    """
+    hints = []
+
+    if signal.get("confidence") == "low":
+        hints.append("low_confidence")
+
+    if signal.get("fallback_type") == "missing_agreement":
+        hints.append("missing_agreement")
+
+    if get_recent_suppressions(signal.get("asset")) >= 2:
+        hints.append("asset_spike")
+
+    if hints:
+        log_entry["retrain_hint"] = hints[0]  # Prioritize first match
 
 def log_suppressed_signal(signal, reason):
     log_entry = {
@@ -20,6 +62,9 @@ def log_suppressed_signal(signal, reason):
         "status": "pending",
         "full_payload": signal
     }
+
+    add_retrain_hint_if_applicable(signal, log_entry)
+
     os.makedirs(os.path.dirname(SUPPRESSION_LOG_PATH), exist_ok=True)
     with open(SUPPRESSION_LOG_PATH, "a") as f:
         f.write(json.dumps(log_entry) + "\n")
@@ -45,7 +90,7 @@ def get_composite_signal(
             confidence=confidence_map[signal["confidence"]],
             label=signal["label"]
         )
-    except Exception as e:
+    except Exception:
         predicted_disagreement_prob = 0.9  # Assume high disagreement if prediction fails
         signal["fallback_type"] = "disagreement_prediction_failed"
 

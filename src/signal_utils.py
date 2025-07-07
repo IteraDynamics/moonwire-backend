@@ -1,6 +1,6 @@
 # src/signal_utils.py
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import json
 import os
@@ -43,11 +43,6 @@ def get_trend(score):
         return "flat"
 
 def compute_trust_scores(signal, trust_insights):
-    """
-    Computes trust_score and trust_label for a given signal using:
-    - historical_agreement_rate
-    - predicted_disagreement_prob (inverted as a proxy for trust)
-    """
     insight = trust_insights.get(signal["id"], {})
 
     agreement = insight.get("historical_agreement_rate")
@@ -72,7 +67,6 @@ def compute_trust_scores(signal, trust_insights):
             signal["fallback_type"] = "missing_disagreement"
             fallback_used = True
 
-    # Compute weighted trust score
     trust_score = round(
         0.6 * agreement + 0.4 * (1 - disagreement_prob),
         3
@@ -80,7 +74,6 @@ def compute_trust_scores(signal, trust_insights):
 
     signal["trust_score"] = trust_score
 
-    # Apply label
     if trust_score >= 0.75:
         signal["trust_label"] = "Trusted"
     elif trust_score <= 0.35:
@@ -90,6 +83,34 @@ def compute_trust_scores(signal, trust_insights):
 
     if fallback_used:
         log_to_review_queue(signal, reason=signal.get("fallback_type", "trust_fallback"))
+
+def detect_retrain_hint(signal):
+    hints = []
+
+    if signal.get("confidence") == "low":
+        hints.append("low_confidence")
+
+    if signal.get("fallback_type") == "missing_agreement":
+        hints.append("missing_agreement")
+
+    # Optional: check for asset spike (>=2 in last 24h)
+    recent_signals = []
+    try:
+        if os.path.exists(SUPPRESSION_REVIEW_PATH):
+            with open(SUPPRESSION_REVIEW_PATH, "r") as f:
+                for line in f:
+                    entry = json.loads(line)
+                    if (
+                        entry["asset"] == signal["asset"]
+                        and datetime.fromisoformat(entry["timestamp"]) >= datetime.utcnow() - timedelta(hours=24)
+                    ):
+                        recent_signals.append(entry)
+        if len(recent_signals) >= 2:
+            hints.append("asset_spike")
+    except Exception:
+        pass
+
+    return hints[0] if hints else None
 
 def log_to_review_queue(signal, reason):
     entry = {
@@ -104,6 +125,11 @@ def log_to_review_queue(signal, reason):
         "reason": reason,
         "status": "pending"
     }
+
+    hint = detect_retrain_hint(signal)
+    if hint:
+        entry["retrain_hint"] = hint
+
     os.makedirs(os.path.dirname(SUPPRESSION_REVIEW_PATH), exist_ok=True)
     with open(SUPPRESSION_REVIEW_PATH, "a") as f:
         f.write(json.dumps(entry) + "\n")
