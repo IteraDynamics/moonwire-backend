@@ -1,47 +1,57 @@
 from fastapi import APIRouter, Query
 from src.signal_utils import generate_composite_signal, compute_trust_scores
 from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
+from datetime import datetime, timedelta
 import os
 import json
-from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/signals")
 
 SUPPRESSION_LOG_PATH = "data/suppression_review_queue.jsonl"
 SUPPRESSION_THRESHOLD = 0.4  # trust_score below this = suppressed
 
+def get_recent_suppressions(asset: str, lookback_minutes=1440):
+    """
+    Returns number of times this asset was suppressed in past lookback_minutes.
+    """
+    if not os.path.exists(SUPPRESSION_LOG_PATH):
+        return 0
+
+    count = 0
+    cutoff = datetime.utcnow() - timedelta(minutes=lookback_minutes)
+
+    with open(SUPPRESSION_LOG_PATH, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                if (
+                    entry.get("asset") == asset and
+                    datetime.fromisoformat(entry.get("timestamp")) >= cutoff
+                ):
+                    count += 1
+            except Exception:
+                continue
+    return count
+
+def add_retrain_hint_if_applicable(signal: dict, log_entry: dict):
+    """
+    Adds retrain_hint to log_entry if signal matches known retraining patterns.
+    """
+    hints = []
+
+    if signal.get("confidence") == "low":
+        hints.append("low_confidence")
+
+    if signal.get("fallback_type") == "missing_agreement":
+        hints.append("missing_agreement")
+
+    if get_recent_suppressions(signal.get("asset")) >= 2:
+        hints.append("asset_spike")
+
+    if hints:
+        log_entry["retrain_hint"] = hints[0]  # Prioritize first match
 
 def log_suppressed_signal(signal, reason):
-    retrain_hint = None
-
-    # Hint 1: Low confidence
-    if signal.get("trust_score", 0.5) < 0.4:
-        retrain_hint = "low_confidence"
-
-    # Hint 2: Known fallback type
-    if signal.get("fallback_type") == "missing_agreement":
-        retrain_hint = "missing_agreement"
-
-    # Hint 3: Asset spike in last 24h
-    try:
-        recent_count = 0
-        cutoff_time = datetime.utcnow() - timedelta(hours=24)
-        if os.path.exists(SUPPRESSION_LOG_PATH):
-            with open(SUPPRESSION_LOG_PATH, "r") as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line.strip())
-                        if entry.get("asset") == signal.get("asset"):
-                            entry_time = datetime.fromisoformat(entry.get("timestamp"))
-                            if entry_time > cutoff_time:
-                                recent_count += 1
-                    except Exception:
-                        continue
-        if recent_count >= 2:
-            retrain_hint = "asset_spike"
-    except Exception:
-        pass
-
     log_entry = {
         "id": signal["id"],
         "asset": signal.get("asset"),
@@ -53,13 +63,11 @@ def log_suppressed_signal(signal, reason):
         "full_payload": signal
     }
 
-    if retrain_hint:
-        log_entry["retrain_hint"] = retrain_hint
+    add_retrain_hint_if_applicable(signal, log_entry)
 
     os.makedirs(os.path.dirname(SUPPRESSION_LOG_PATH), exist_ok=True)
     with open(SUPPRESSION_LOG_PATH, "a") as f:
         f.write(json.dumps(log_entry) + "\n")
-
 
 @router.get("/composite")
 def get_composite_signal(
@@ -82,7 +90,7 @@ def get_composite_signal(
             confidence=confidence_map[signal["confidence"]],
             label=signal["label"]
         )
-    except Exception as e:
+    except Exception:
         predicted_disagreement_prob = 0.9  # Assume high disagreement if prediction fails
         signal["fallback_type"] = "disagreement_prediction_failed"
 
