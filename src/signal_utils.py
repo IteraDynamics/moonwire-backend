@@ -62,7 +62,7 @@ def compute_trust_scores(signal, trust_insights):
                 confidence={"low": 0.3, "medium": 0.6, "high": 0.9}[signal["confidence"]],
                 label=signal["label"]
             )
-        except Exception as e:
+        except Exception:
             disagreement_prob = 0.5
             signal["fallback_type"] = "missing_disagreement"
             fallback_used = True
@@ -147,3 +147,60 @@ def generate_composite_signal(asset, twitter_score, news_score, timestamp=None):
         "top_drivers": ["twitter sentiment", "news sentiment"],
         "fallback_type": None
     }
+
+# === PRIORITY SCORING ===
+
+def compute_priority_score(signal, asset_suppression_counts=None, now=None):
+    """
+    Compute priority_score ∈ [0.0, 1.0] using weighted factors:
+    - trust_score (inverted)
+    - retrain_hint importance
+    - timestamp recency
+    - asset recurrence
+    - likely_disagreed flag
+    """
+    asset_suppression_counts = asset_suppression_counts or {}
+    now = now or datetime.utcnow()
+
+    trust_score = signal.get("trust_score", 0.5)
+    retrain_hint = signal.get("retrain_hint", "")
+    timestamp_str = signal.get("timestamp")
+    likely_disagreed = signal.get("likely_disagreed", False)
+    asset = signal.get("asset")
+
+    # Normalize trust (inverted so lower = higher priority)
+    trust_component = 1.0 - min(max(trust_score, 0.0), 1.0)
+
+    # Weight retrain_hint types
+    hint_weights = {
+        "multiple_suppressions": 1.0,
+        "asset_spike": 0.8,
+        "low_confidence": 0.6,
+        "missing_agreement": 0.4
+    }
+    hint_component = hint_weights.get(retrain_hint, 0.0)
+
+    # Recency component (0–1 where recent = 1.0)
+    try:
+        ts = datetime.fromisoformat(timestamp_str)
+        hours_ago = (now - ts).total_seconds() / 3600
+        recency_component = max(0.0, 1.0 - min(hours_ago / 24, 1.0))  # Linear decay over 24h
+    except:
+        recency_component = 0.5
+
+    # Asset recurrence (more suppressed = higher score, capped at 5)
+    recurrence = asset_suppression_counts.get(asset, 1)
+    recurrence_component = min(recurrence / 5, 1.0)
+
+    # Disagreement flag
+    disagreement_component = 1.0 if likely_disagreed else 0.0
+
+    # Final weighted score
+    score = (
+        0.40 * trust_component +
+        0.25 * hint_component +
+        0.20 * recency_component +
+        0.10 * recurrence_component +
+        0.05 * disagreement_component
+    )
+    return round(score, 4)
