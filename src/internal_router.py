@@ -1,7 +1,10 @@
+# src/internal_router.py
+
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from collections import defaultdict
-from typing import List
+from typing import List, Optional
+from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime
 import json
 import os
@@ -204,4 +207,52 @@ def batch_flag_retraining(payload: BatchFlagRequest, dry_run: bool = Query(False
         "skipped_duplicates": skipped_duplicates,
         "filters_applied": filters.dict(),
         "dry_run": dry_run
+    }
+
+# === Export Retrain Queue ===
+@router.get("/export-retrain-queue")
+def export_retrain_queue(
+    asset: Optional[str] = Query(None),
+    hint: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None),
+    as_file: Optional[bool] = Query(False)
+):
+    if not RETRAIN_QUEUE_PATH.exists():
+        return {"exported": 0, "signals": []}
+
+    signals_by_id = {}
+    with open(RETRAIN_QUEUE_PATH, "r") as f:
+        for line in f:
+            try:
+                signal = json.loads(line)
+                signal_id = signal.get("id") or signal.get("signal_id")
+                if not signal_id:
+                    continue
+                if asset and signal.get("asset") != asset:
+                    continue
+                if hint and signal.get("retrain_hint") != hint:
+                    continue
+                signals_by_id[signal_id] = signal
+            except json.JSONDecodeError:
+                continue
+
+    signal_list = list(signals_by_id.values())
+    if limit:
+        signal_list = signal_list[:limit]
+
+    if as_file:
+        def iter_jsonl():
+            for s in signal_list:
+                yield json.dumps(s) + "\n"
+
+        filename = f"retrain_export_{datetime.utcnow().isoformat()}.jsonl"
+        return StreamingResponse(
+            iter_jsonl(),
+            media_type="application/jsonl",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+
+    return {
+        "exported": len(signal_list),
+        "signals": signal_list
     }
