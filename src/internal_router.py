@@ -2,23 +2,24 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from collections import defaultdict
 from typing import List, Optional
-from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime
+from pathlib import Path
 import json
 import os
 import requests
-from src.signal_utils import compute_trust_scores, compute_priority_score
+
+from src.signal_utils import compute_trust_scores
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
-FEEDBACK_LOG_PATH = "data/feedback.jsonl"
-SUPPRESSION_REVIEW_PATH = "data/suppression_review_queue.jsonl"
-RETRAIN_QUEUE_PATH = "data/retrain_queue.jsonl"
+FEEDBACK_LOG_PATH = Path("data/feedback.jsonl")
+SUPPRESSION_REVIEW_PATH = Path("data/suppression_review_queue.jsonl")
+RETRAIN_QUEUE_PATH = Path("data/retrain_queue.jsonl")
 
 # === Feedback Summary Route ===
 @router.get("/feedback-summary")
 def get_feedback_summary():
-    if not os.path.exists(FEEDBACK_LOG_PATH):
+    if not FEEDBACK_LOG_PATH.exists():
         return {
             "total_feedback": 0,
             "agree_percentage": 0.0,
@@ -30,7 +31,7 @@ def get_feedback_summary():
     agree = 0
     disagree_signals = defaultdict(list)
 
-    with open(FEEDBACK_LOG_PATH, "r") as f:
+    with FEEDBACK_LOG_PATH.open("r") as f:
         for line in f:
             try:
                 fb = json.loads(line)
@@ -77,22 +78,20 @@ def signal_trust_insights():
 # === Suppression Review Queue Route ===
 @router.get("/review-suppressed")
 def review_suppressed_signals():
-    if not os.path.exists(SUPPRESSION_REVIEW_PATH):
+    if not SUPPRESSION_REVIEW_PATH.exists():
         return {"review_queue": []}
 
     pending_signals = []
-    with open(SUPPRESSION_REVIEW_PATH, "r") as f:
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
         for line in f:
             try:
                 entry = json.loads(line)
                 if entry.get("status") == "pending":
-                    entry["priority_score"] = compute_priority_score(entry)
                     pending_signals.append(entry)
             except json.JSONDecodeError:
                 continue
 
-    sorted_signals = sorted(pending_signals, key=lambda x: x.get("priority_score", 0), reverse=True)
-    return {"review_queue": sorted_signals}
+    return {"review_queue": pending_signals}
 
 # === Suppression Status Update ===
 class SuppressionUpdate(BaseModel):
@@ -104,13 +103,13 @@ def mark_suppressed(update: SuppressionUpdate):
     if update.new_status not in ["reviewed", "flag_for_retraining"]:
         raise HTTPException(status_code=400, detail="Invalid status")
 
-    if not os.path.exists(SUPPRESSION_REVIEW_PATH):
+    if not SUPPRESSION_REVIEW_PATH.exists():
         raise HTTPException(status_code=404, detail="No suppression file found")
 
     updated_entries = []
     updated = False
 
-    with open(SUPPRESSION_REVIEW_PATH, "r") as f:
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
         for line in f:
             try:
                 entry = json.loads(line)
@@ -124,30 +123,90 @@ def mark_suppressed(update: SuppressionUpdate):
     if not updated:
         raise HTTPException(status_code=404, detail="Pending signal not found")
 
-    with open(SUPPRESSION_REVIEW_PATH, "w") as f:
+    with SUPPRESSION_REVIEW_PATH.open("w") as f:
         for entry in updated_entries:
             f.write(json.dumps(entry) + "\n")
 
     return {"updated": True, "signal_id": update.signal_id, "new_status": update.new_status}
 
-# === Retrain Summary with Prioritization ===
-@router.get("/retrain-summary")
-def retrain_summary():
-    if not os.path.exists(RETRAIN_QUEUE_PATH):
-        return {"retrain_queue": []}
+# === Update Suppression Status (Task 2) ===
+class SuppressionStatusUpdate(BaseModel):
+    signal_id: str
+    status: str  # "reviewed", "ignored", "retrained", "overridden"
+    reviewer_id: str
+    note: Optional[str] = None
 
-    signals = []
-    seen_ids = set()
-    with open(RETRAIN_QUEUE_PATH, "r") as f:
+@router.post("/update-suppression-status")
+def update_suppression_status(update: SuppressionStatusUpdate):
+    if not SUPPRESSION_REVIEW_PATH.exists():
+        raise HTTPException(status_code=404, detail="Suppression log not found.")
+
+    valid_statuses = {"reviewed", "ignored", "retrained", "overridden"}
+    if update.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="Invalid status value.")
+
+    updated_entries = []
+    found = False
+    status_changed = False
+
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
         for line in f:
             try:
                 entry = json.loads(line)
-                if entry["id"] not in seen_ids:
-                    entry["priority_score"] = compute_priority_score(entry)
-                    signals.append(entry)
-                    seen_ids.add(entry["id"])
+                if entry.get("id") == update.signal_id:
+                    found = True
+                    if entry.get("status") != update.status:
+                        entry["status"] = update.status
+                        entry["reviewer_id"] = update.reviewer_id
+                        entry["note"] = update.note or ""
+                        entry["last_updated"] = datetime.utcnow().isoformat()
+                        status_changed = True
+                updated_entries.append(entry)
             except json.JSONDecodeError:
                 continue
 
-    sorted_signals = sorted(signals, key=lambda x: x.get("priority_score", 0), reverse=True)
-    return {"retrain_queue": sorted_signals}
+    if not found:
+        raise HTTPException(status_code=404, detail="Signal ID not found.")
+
+    if not status_changed:
+        return {"updated": False, "reason": "Status already up to date."}
+
+    with SUPPRESSION_REVIEW_PATH.open("w") as f:
+        for entry in updated_entries:
+            f.write(json.dumps(entry) + "\n")
+
+    return {
+        "updated": True,
+        "signal_id": update.signal_id,
+        "new_status": update.status
+    }
+
+# === Review Status Summary (Task 2) ===
+@router.get("/review-status-summary")
+def review_status_summary():
+    if not SUPPRESSION_REVIEW_PATH.exists():
+        return {"total_reviewed": 0, "status_counts": {}, "hint_breakdown": {}}
+
+    status_counts = defaultdict(int)
+    hint_breakdown = defaultdict(int)
+    total_reviewed = 0
+
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                status = entry.get("status")
+                if status and status != "pending":
+                    total_reviewed += 1
+                    status_counts[status] += 1
+                    hint = entry.get("retrain_hint")
+                    if hint:
+                        hint_breakdown[hint] += 1
+            except json.JSONDecodeError:
+                continue
+
+    return {
+        "total_reviewed": total_reviewed,
+        "status_counts": dict(status_counts),
+        "hint_breakdown": dict(hint_breakdown)
+    }
