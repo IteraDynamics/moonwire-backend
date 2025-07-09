@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from collections import defaultdict
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import os
@@ -129,7 +129,7 @@ def mark_suppressed(update: SuppressionUpdate):
 
     return {"updated": True, "signal_id": update.signal_id, "new_status": update.new_status}
 
-# === Update Suppression Status (Task 2) ===
+# === Update Suppression Status (Task 2 + Task 1 impact score) ===
 class SuppressionStatusUpdate(BaseModel):
     signal_id: str
     status: str  # "reviewed", "ignored", "retrained", "overridden"
@@ -145,25 +145,49 @@ def update_suppression_status(update: SuppressionStatusUpdate):
     if update.status not in valid_statuses:
         raise HTTPException(status_code=400, detail="Invalid status value.")
 
+    action_weights = {"ignored": 0.1, "reviewed": 0.3, "retrained": 0.6, "overridden": 1.0}
+    now = datetime.utcnow()
     updated_entries = []
     found = False
     status_changed = False
 
+    # Gather entries for recurrence checking
+    all_entries = []
     with SUPPRESSION_REVIEW_PATH.open("r") as f:
         for line in f:
             try:
                 entry = json.loads(line)
-                if entry.get("id") == update.signal_id:
-                    found = True
-                    if entry.get("status") != update.status:
-                        entry["status"] = update.status
-                        entry["reviewer_id"] = update.reviewer_id
-                        entry["note"] = update.note or ""
-                        entry["last_updated"] = datetime.utcnow().isoformat()
-                        status_changed = True
-                updated_entries.append(entry)
+                all_entries.append(entry)
             except json.JSONDecodeError:
                 continue
+
+    for entry in all_entries:
+        if entry.get("id") == update.signal_id:
+            found = True
+            if entry.get("status") != update.status:
+                entry["status"] = update.status
+                entry["reviewer_id"] = update.reviewer_id
+                entry["note"] = update.note or ""
+                entry["last_updated"] = now.isoformat()
+                status_changed = True
+
+                trust_score = entry.get("trust_score", 0.5)
+                action_weight = action_weights[update.status]
+                recurrence_bonus = 0.0
+
+                recent_count = sum(
+                    1 for e in all_entries
+                    if e.get("asset") == entry.get("asset")
+                    and e.get("id") != entry.get("id")
+                    and e.get("timestamp")
+                    and datetime.fromisoformat(e["timestamp"]) >= now - timedelta(hours=24)
+                )
+                if recent_count >= 2:
+                    recurrence_bonus = 0.1
+
+                entry["impact_score"] = round(action_weight * (1 - trust_score) + recurrence_bonus, 3)
+
+        updated_entries.append(entry)
 
     if not found:
         raise HTTPException(status_code=404, detail="Signal ID not found.")
@@ -181,14 +205,23 @@ def update_suppression_status(update: SuppressionStatusUpdate):
         "new_status": update.status
     }
 
-# === Review Status Summary (Task 2) ===
+# === Review Status Summary (extended for impact score) ===
 @router.get("/review-status-summary")
 def review_status_summary():
     if not SUPPRESSION_REVIEW_PATH.exists():
-        return {"total_reviewed": 0, "status_counts": {}, "hint_breakdown": {}}
+        return {
+            "total_reviewed": 0,
+            "status_counts": {},
+            "hint_breakdown": {},
+            "average_impact_score_by_status": {},
+            "top_5_most_impactful": []
+        }
 
     status_counts = defaultdict(int)
     hint_breakdown = defaultdict(int)
+    impact_totals = defaultdict(float)
+    impact_counts = defaultdict(int)
+    impactful = []
     total_reviewed = 0
 
     with SUPPRESSION_REVIEW_PATH.open("r") as f:
@@ -202,11 +235,25 @@ def review_status_summary():
                     hint = entry.get("retrain_hint")
                     if hint:
                         hint_breakdown[hint] += 1
+                    if "impact_score" in entry:
+                        impact_totals[status] += entry["impact_score"]
+                        impact_counts[status] += 1
+                        impactful.append(entry)
             except json.JSONDecodeError:
                 continue
+
+    avg_impact = {
+        status: round(impact_totals[status] / impact_counts[status], 3)
+        for status in impact_totals
+        if impact_counts[status] > 0
+    }
+
+    top_impactful = sorted(impactful, key=lambda x: x.get("impact_score", 0), reverse=True)[:5]
 
     return {
         "total_reviewed": total_reviewed,
         "status_counts": dict(status_counts),
-        "hint_breakdown": dict(hint_breakdown)
+        "hint_breakdown": dict(hint_breakdown),
+        "average_impact_score_by_status": avg_impact,
+        "top_5_most_impactful": top_impactful
     }
