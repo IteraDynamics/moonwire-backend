@@ -257,3 +257,86 @@ def review_status_summary():
         "average_impact_score_by_status": avg_impact,
         "top_5_most_impactful": top_impactful
     }
+
+# === Asset Risk Summary (Task 2) ===
+@router.get("/asset-risk-summary")
+def asset_risk_summary(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    trust_band: Optional[str] = Query(None)  # "trusted", "untrusted", etc.
+):
+    if not SUPPRESSION_REVIEW_PATH.exists():
+        return {"assets": []}
+
+    asset_stats = defaultdict(lambda: {
+        "suppressed_count": 0,
+        "overridden_count": 0,
+        "retrain_flag_count": 0,
+        "trust_scores": [],
+        "impact_scores": []
+    })
+
+    try:
+        start_dt = datetime.fromisoformat(start_date) if start_date else None
+        end_dt = datetime.fromisoformat(end_date) if end_date else None
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use ISO8601.")
+
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                ts = entry.get("timestamp")
+                asset = entry.get("asset")
+                if not asset or not ts:
+                    continue
+
+                ts_dt = datetime.fromisoformat(ts)
+                if start_dt and ts_dt < start_dt:
+                    continue
+                if end_dt and ts_dt > end_dt:
+                    continue
+                if trust_band and entry.get("trust_label") != trust_band:
+                    continue
+
+                asset_stats[asset]["suppressed_count"] += 1
+                if entry.get("status") == "overridden":
+                    asset_stats[asset]["overridden_count"] += 1
+                if entry.get("retrain_hint"):
+                    asset_stats[asset]["retrain_flag_count"] += 1
+                if "trust_score" in entry:
+                    asset_stats[asset]["trust_scores"].append(entry["trust_score"])
+                if "impact_score" in entry:
+                    asset_stats[asset]["impact_scores"].append(entry["impact_score"])
+
+            except json.JSONDecodeError:
+                continue
+
+    def compute_risk_rank(data):
+        ts_avg = sum(data["trust_scores"]) / len(data["trust_scores"]) if data["trust_scores"] else 0.5
+        im_avg = sum(data["impact_scores"]) / len(data["impact_scores"]) if data["impact_scores"] else 0.0
+        return round(
+            data["suppressed_count"] * 0.5 +
+            data["overridden_count"] * 1.0 +
+            data["retrain_flag_count"] * 0.7 +
+            (1 - ts_avg) * 10 +
+            im_avg * 5,
+            3
+        )
+
+    result = []
+    for asset, data in asset_stats.items():
+        avg_trust = sum(data["trust_scores"]) / len(data["trust_scores"]) if data["trust_scores"] else None
+        avg_impact = sum(data["impact_scores"]) / len(data["impact_scores"]) if data["impact_scores"] else None
+        result.append({
+            "asset": asset,
+            "suppressed_count": data["suppressed_count"],
+            "overridden_count": data["overridden_count"],
+            "retrain_flag_count": data["retrain_flag_count"],
+            "avg_trust_score": round(avg_trust, 3) if avg_trust is not None else None,
+            "avg_impact_score": round(avg_impact, 3) if avg_impact is not None else None,
+            "risk_rank_score": compute_risk_rank(data)
+        })
+
+    result.sort(key=lambda x: x["risk_rank_score"], reverse=True)
+    return {"assets": result[:10]}
