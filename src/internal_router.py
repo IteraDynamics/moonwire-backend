@@ -326,3 +326,71 @@ def suppression_pattern_summary(
     output_sorted = sorted(output, key=lambda x: (-x["count"], -x["avg_priority_score"]))
 
     return {"patterns": output_sorted[:10]}
+
+# === Trust Breakdown Timeline (Task 2 – 7/10) ===
+@router.get("/trust-breakdown-timeline")
+def trust_breakdown_timeline(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    asset: Optional[str] = Query(None),
+    label_type: Optional[str] = Query(None)
+):
+    if not SUPPRESSION_REVIEW_PATH.exists():
+        return {"timeline": []}
+
+    timeline_map = defaultdict(list)
+    start_dt = datetime.fromisoformat(start_date) if start_date else datetime.min
+    end_dt = datetime.fromisoformat(end_date) if end_date else datetime.utcnow()
+
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                ts = entry.get("timestamp")
+                if not ts:
+                    continue
+                ts_dt = datetime.fromisoformat(ts)
+                if not (start_dt <= ts_dt <= end_dt):
+                    continue
+
+                if asset and entry.get("asset") != asset:
+                    continue
+                if label_type and entry.get("label") != label_type:
+                    continue
+
+                date_key = ts_dt.date().isoformat()
+                timeline_map[date_key].append(entry)
+            except Exception:
+                continue
+
+    timeline = []
+    for date_str, entries in sorted(timeline_map.items()):
+        total = len(entries)
+        suppressed = sum(1 for e in entries if e.get("status") in {"reviewed", "ignored", "retrained", "overridden"})
+        overridden = sum(1 for e in entries if e.get("status") == "overridden")
+        retrain_flags = sum(1 for e in entries if e.get("status") == "retrained")
+
+        trust_scores = [e.get("trust_score", 0.5) for e in entries]
+        avg_trust = round(sum(trust_scores) / len(trust_scores), 3) if trust_scores else 0.5
+
+        label_counts = defaultdict(int)
+        asset_counts = defaultdict(int)
+        for e in entries:
+            label_counts[e.get("label", "unknown")] += 1
+            asset_counts[e.get("asset", "unknown")] += 1
+
+        top_labels = sorted(label_counts.items(), key=lambda x: -x[1])[:3]
+        top_assets = sorted(asset_counts.items(), key=lambda x: -x[1])[:3]
+
+        timeline.append({
+            "date": date_str,
+            "total_signals": total,
+            "suppressed_count": suppressed,
+            "avg_trust_score": avg_trust,
+            "overridden_count": overridden,
+            "retrain_flag_count": retrain_flags,
+            "top_labels_triggered": top_labels,
+            "top_assets_triggered": top_assets
+        })
+
+    return {"timeline": timeline}
