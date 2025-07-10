@@ -151,7 +151,6 @@ def update_suppression_status(update: SuppressionStatusUpdate):
     found = False
     status_changed = False
 
-    # Gather entries for recurrence checking
     all_entries = []
     with SUPPRESSION_REVIEW_PATH.open("r") as f:
         for line in f:
@@ -258,85 +257,72 @@ def review_status_summary():
         "top_5_most_impactful": top_impactful
     }
 
-# === Asset Risk Summary (Task 2) ===
-@router.get("/asset-risk-summary")
-def asset_risk_summary(
+# === Suppression Pattern Intelligence (Task 1 – 7/10) ===
+@router.get("/suppression-patterns")
+def suppression_pattern_summary(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
-    trust_band: Optional[str] = Query(None)  # "trusted", "untrusted", etc.
+    trust_band: Optional[str] = Query(None)
 ):
     if not SUPPRESSION_REVIEW_PATH.exists():
-        return {"assets": []}
+        return {"patterns": []}
 
-    asset_stats = defaultdict(lambda: {
-        "suppressed_count": 0,
-        "overridden_count": 0,
-        "retrain_flag_count": 0,
-        "trust_scores": [],
-        "impact_scores": []
-    })
+    pattern_groups = defaultdict(list)
+    now = datetime.utcnow()
 
-    try:
-        start_dt = datetime.fromisoformat(start_date) if start_date else None
-        end_dt = datetime.fromisoformat(end_date) if end_date else None
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use ISO8601.")
+    start_dt = datetime.fromisoformat(start_date) if start_date else datetime.min
+    end_dt = datetime.fromisoformat(end_date) if end_date else now
 
     with SUPPRESSION_REVIEW_PATH.open("r") as f:
         for line in f:
             try:
                 entry = json.loads(line)
+
+                if entry.get("status") == "pending":
+                    continue
+
                 ts = entry.get("timestamp")
-                asset = entry.get("asset")
-                if not asset or not ts:
+                if not ts:
                     continue
 
                 ts_dt = datetime.fromisoformat(ts)
-                if start_dt and ts_dt < start_dt:
+                if not (start_dt <= ts_dt <= end_dt):
                     continue
-                if end_dt and ts_dt > end_dt:
-                    continue
+
                 if trust_band and entry.get("trust_label") != trust_band:
                     continue
 
-                asset_stats[asset]["suppressed_count"] += 1
-                if entry.get("status") == "overridden":
-                    asset_stats[asset]["overridden_count"] += 1
-                if entry.get("retrain_hint"):
-                    asset_stats[asset]["retrain_flag_count"] += 1
-                if "trust_score" in entry:
-                    asset_stats[asset]["trust_scores"].append(entry["trust_score"])
-                if "impact_score" in entry:
-                    asset_stats[asset]["impact_scores"].append(entry["impact_score"])
+                key = (
+                    entry.get("label", "unknown"),
+                    entry.get("fallback_type", "unknown"),
+                    entry.get("retrain_hint", "none")
+                )
+                pattern_groups[key].append(entry)
 
-            except json.JSONDecodeError:
+            except Exception:
                 continue
 
-    def compute_risk_rank(data):
-        ts_avg = sum(data["trust_scores"]) / len(data["trust_scores"]) if data["trust_scores"] else 0.5
-        im_avg = sum(data["impact_scores"]) / len(data["impact_scores"]) if data["impact_scores"] else 0.0
-        return round(
-            data["suppressed_count"] * 0.5 +
-            data["overridden_count"] * 1.0 +
-            data["retrain_flag_count"] * 0.7 +
-            (1 - ts_avg) * 10 +
-            im_avg * 5,
-            3
-        )
+    output = []
+    for (label, fallback, hint), group in pattern_groups.items():
+        trust_scores = [e.get("trust_score", 0.5) for e in group]
+        impact_scores = [e.get("impact_score", 0.0) for e in group]
+        overridden_count = sum(1 for e in group if e.get("status") == "overridden")
 
-    result = []
-    for asset, data in asset_stats.items():
-        avg_trust = sum(data["trust_scores"]) / len(data["trust_scores"]) if data["trust_scores"] else None
-        avg_impact = sum(data["impact_scores"]) / len(data["impact_scores"]) if data["impact_scores"] else None
-        result.append({
-            "asset": asset,
-            "suppressed_count": data["suppressed_count"],
-            "overridden_count": data["overridden_count"],
-            "retrain_flag_count": data["retrain_flag_count"],
-            "avg_trust_score": round(avg_trust, 3) if avg_trust is not None else None,
-            "avg_impact_score": round(avg_impact, 3) if avg_impact is not None else None,
-            "risk_rank_score": compute_risk_rank(data)
+        avg_trust = round(sum(trust_scores) / len(trust_scores), 3)
+        avg_impact = round(sum(impact_scores) / len(impact_scores), 3)
+        avg_priority = round((1 - avg_trust) * avg_impact, 3)
+
+        output.append({
+            "label_type": label,
+            "fallback_type": fallback,
+            "retrain_hint": hint,
+            "count": len(group),
+            "avg_trust_score": avg_trust,
+            "avg_impact_score": avg_impact,
+            "avg_priority_score": avg_priority,
+            "overridden_count": overridden_count
         })
 
-    result.sort(key=lambda x: x["risk_rank_score"], reverse=True)
-    return {"assets": result[:10]}
+    output_sorted = sorted(output, key=lambda x: (-x["count"], -x["avg_priority_score"]))
+
+    return {"patterns": output_sorted[:10]}
