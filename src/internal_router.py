@@ -394,3 +394,63 @@ def trust_breakdown_timeline(
         })
 
     return {"timeline": timeline}
+    
+@router.get("/trust-today")
+def trust_today_diagnostics():
+    if not SUPPRESSION_REVIEW_PATH.exists():
+        return {"error": "Suppression log not found."}
+
+    today = datetime.utcnow().date()
+    total_signals = 0
+    suppressed = 0
+    overridden = 0
+    retrain_flags = 0
+    trust_scores = []
+    retrain_hints = defaultdict(int)
+    asset_priority = defaultdict(float)
+
+    with SUPPRESSION_REVIEW_PATH.open("r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+                ts = entry.get("timestamp")
+                if not ts:
+                    continue
+                ts_dt = datetime.fromisoformat(ts)
+                if ts_dt.date() != today:
+                    continue
+
+                total_signals += 1
+                status = entry.get("status")
+                if status in {"reviewed", "ignored", "retrained", "overridden"}:
+                    suppressed += 1
+                if status == "overridden":
+                    overridden += 1
+                if status == "retrained":
+                    retrain_flags += 1
+
+                trust_scores.append(entry.get("trust_score", 0.5))
+                hint = entry.get("retrain_hint")
+                if hint:
+                    retrain_hints[hint] += 1
+
+                asset = entry.get("asset", "unknown")
+                priority = entry.get("impact_score", 0.0)
+                asset_priority[asset] += priority
+            except Exception:
+                continue
+
+    avg_trust = round(sum(trust_scores) / len(trust_scores), 3) if trust_scores else 0.5
+    top_assets = sorted(asset_priority.items(), key=lambda x: -x[1])[:5]
+    top_hints = sorted(retrain_hints.items(), key=lambda x: -x[1])[:5]
+
+    return {
+        "total_signals_today": total_signals,
+        "suppressed_today": suppressed,
+        "overrides_today": overridden,
+        "retrain_flags_today": retrain_flags,
+        "avg_trust_score_today": avg_trust,
+        "top_risky_assets": top_assets,
+        "most_common_retrain_hints": top_hints,
+        "last_updated_at": datetime.utcnow().isoformat()
+    }
