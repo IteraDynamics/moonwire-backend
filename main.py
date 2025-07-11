@@ -32,7 +32,8 @@ from src.feedback_insights_router import router as feedback_insights_router
 from src.feedback_prediction_router import router as feedback_prediction_router
 from src.internal_trusted_signals_router import router as trust_intelligence_router
 from src.signal_review_router import router as signal_review_router
-from src.trust_asset_pulse_router import router as trust_asset_pulse_router  # ✅ New route import
+from src.trust_asset_pulse_router import router as trust_asset_pulse_router
+from src.trust_volatility_spike_router import router as trust_volatility_spike_router  # ✅ New route
 
 app = FastAPI()
 
@@ -76,7 +77,8 @@ app.include_router(feedback_insights_router)
 app.include_router(feedback_prediction_router, prefix="/internal")
 app.include_router(trust_intelligence_router)
 app.include_router(signal_review_router)
-app.include_router(trust_asset_pulse_router)  # ✅ New route mounted
+app.include_router(trust_asset_pulse_router)
+app.include_router(trust_volatility_spike_router)  # ✅ Route mount
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
