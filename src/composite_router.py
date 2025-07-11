@@ -2,6 +2,7 @@ from fastapi import APIRouter, Query
 from src.signal_utils import generate_composite_signal, compute_trust_scores
 from src.feedback_utils import get_feedback_summary_for_signal, run_disagreement_prediction
 from datetime import datetime, timedelta
+from pathlib import Path
 import os
 import json
 
@@ -9,6 +10,7 @@ router = APIRouter(prefix="/signals")
 
 SUPPRESSION_LOG_PATH = "data/suppression_review_queue.jsonl"
 SUPPRESSION_THRESHOLD = 0.4  # trust_score below this = suppressed
+SIGNAL_HISTORY_PATH = Path("data/signal_history.jsonl")
 
 def get_recent_suppressions(asset: str, lookback_minutes=1440):
     """
@@ -78,6 +80,7 @@ def get_composite_signal(
     """
     Generate a composite signal based on sentiment scores and trust insights.
     Suppresses low-trust signals and logs them for internal review.
+    Also appends the full signal to signal_history.jsonl for analytics use.
     """
     signal = generate_composite_signal(asset, twitter_score, news_score)
 
@@ -111,5 +114,13 @@ def get_composite_signal(
 
     if signal.get("trust_score", 0.5) < SUPPRESSION_THRESHOLD:
         log_suppressed_signal(signal, reason="trust_score_below_threshold")
+
+    # ✅ Append to signal_history.jsonl
+    try:
+        SIGNAL_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SIGNAL_HISTORY_PATH.open("a") as f:
+            f.write(json.dumps(signal) + "\n")
+    except Exception as e:
+        print(f"[⚠️] Failed to append signal to history: {e}")
 
     return signal
