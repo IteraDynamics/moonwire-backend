@@ -9,6 +9,7 @@ import os
 import requests
 
 from src.signal_utils import compute_trust_scores
+from src.reviewer_impact_logger import log_reviewer_impact
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
@@ -185,6 +186,18 @@ def update_suppression_status(update: SuppressionStatusUpdate):
                     recurrence_bonus = 0.1
 
                 entry["impact_score"] = round(action_weight * (1 - trust_score) + recurrence_bonus, 3)
+
+                # === Reviewer Impact Logging ===
+                log_reviewer_impact(
+                    reviewer_id=update.reviewer_id,
+                    signal_id=update.signal_id,
+                    action_type=update.status,
+                    original_trust_score=trust_score,
+                    signal_timestamp=entry.get("timestamp"),
+                    reviewer_note=update.note,
+                    reason=entry.get("retrain_hint", "unspecified")
+                    )    
+
 
         updated_entries.append(entry)
 
