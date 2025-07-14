@@ -195,8 +195,11 @@ def update_suppression_status(update: SuppressionStatusUpdate):
                     original_trust_score=trust_score,
                     signal_timestamp=entry.get("timestamp"),
                     reviewer_note=update.note,
-                    reason=entry.get("retrain_hint", "unspecified")
-                    )    
+                    reason=entry.get("retrain_hint", "unspecified"),
+                    trust_score_before=trust_score,
+                    trust_score_after=updated_trust_score if update.status == "retrained" else None,
+)
+
 
 
         updated_entries.append(entry)
