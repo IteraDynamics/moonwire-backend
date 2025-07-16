@@ -187,20 +187,22 @@ def update_suppression_status(update: SuppressionStatusUpdate):
 
                 entry["impact_score"] = round(action_weight * (1 - trust_score) + recurrence_bonus, 3)
 
-                # === Reviewer Impact Logging ===
-                log_reviewer_impact(
-                    reviewer_id=update.reviewer_id,
-                    signal_id=update.signal_id,
-                    action_type=update.status,
-                    original_trust_score=trust_score,
-                    signal_timestamp=entry.get("timestamp"),
-                    reviewer_note=update.note,
-                    reason=entry.get("retrain_hint", "unspecified"),
-                    trust_score_before=trust_score,
-                    trust_score_after=updated_trust_score if update.status == "retrained" else None,
-)
-
-
+                # ✅ Log reviewer impact (this is the key Step 2 part)
+                try:
+                    log_reviewer_impact(
+                        reviewer_id=update.reviewer_id,
+                        signal_id=update.signal_id,
+                        action_type=update.status,
+                        original_trust_score=trust_score,
+                        trust_score_before=trust_score,
+                        trust_score_after=trust_score if update.status == "overridden" else None,
+                        signal_timestamp=entry.get("timestamp"),
+                        reviewer_note=update.note,
+                        reason=entry.get("retrain_hint", "unspecified"),
+                        model_version=entry.get("model_version", "v1.0")
+                    )
+                except Exception as e:
+                    print(f"❌ Reviewer impact log failed: {e}")
 
         updated_entries.append(entry)
 
