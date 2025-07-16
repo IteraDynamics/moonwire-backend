@@ -547,16 +547,6 @@ class ReviewerImpactLog(BaseModel):
     reviewer_id: str
     action: str  # e.g. "reviewed", "ignored", etc.
     note: Optional[str] = None
-
-@router.post("/internal/reviewer-impact-log")
-def log_reviewer_impact(entry: ReviewerImpactLog):
-    log_reviewer_action(
-        signal_id=entry.signal_id,
-        reviewer_id=entry.reviewer_id,
-        action=entry.action,
-        note=entry.note,
-    )
-    return {"logged": True, "signal_id": entry.signal_id}
     
 # This is just a helper — no decorator
 def log_reviewer_impact(entry: ReviewerImpactLog):
