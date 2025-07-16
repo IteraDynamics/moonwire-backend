@@ -10,6 +10,7 @@ import requests
 from src.signal_utils import compute_trust_scores
 from src.reviewer_impact_logger import log_reviewer_impact
 from src.reviewer_impact_logger import ReviewerImpactLog
+from src.reviewer_log_utils import log_reviewer_action
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
@@ -562,3 +563,4 @@ def log_reviewer_impact(entry: ReviewerImpactLog):
 async def reviewer_impact_endpoint(log: ReviewerImpactLog):
     log_reviewer_impact(log)
     return {"status": "logged"}
+
