@@ -1,6 +1,14 @@
 import os
 import json
 from datetime import datetime
+from pydantic import BaseModel
+from typing import Optional
+
+class ReviewerImpactLog(BaseModel):
+    signal_id: str
+    reviewer_id: str
+    action: str  # e.g. "reviewed", "ignored", etc.
+    note: Optional[str] = None
 
 
 REVIEWER_IMPACT_LOG_PATH = "data/reviewer_impact_log.jsonl"
