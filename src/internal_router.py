@@ -558,7 +558,7 @@ def log_reviewer_impact(entry: ReviewerImpactLog):
     )
 
 # This is your actual HTTP endpoint — keep this decorator
-@router.post("/internal/reviewer-impact-log")
+@router.post("/reviewer-impact-log")
 async def reviewer_impact_endpoint(log: ReviewerImpactLog):
     log_reviewer_impact(log)
     return {"status": "logged"}
