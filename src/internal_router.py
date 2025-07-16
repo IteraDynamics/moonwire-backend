@@ -9,6 +9,7 @@ import os
 import requests
 from src.signal_utils import compute_trust_scores
 from src.reviewer_impact_logger import log_reviewer_impact
+from reviewer_impact_logger import ReviewerImpactLog
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
@@ -556,3 +557,8 @@ def log_reviewer_impact(entry: ReviewerImpactLog):
         note=entry.note,
     )
     return {"logged": True, "signal_id": entry.signal_id}
+    
+    @router.post("/internal/reviewer-impact-log")
+async def reviewer_impact_endpoint(log: ReviewerImpactLog):
+    log_reviewer_impact(log)
+    return {"status": "logged"}
