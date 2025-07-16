@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel
 from collections import defaultdict
 from typing import List, Optional
@@ -7,7 +7,6 @@ from pathlib import Path
 import json
 import os
 import requests
-
 from src.signal_utils import compute_trust_scores
 from src.reviewer_impact_logger import log_reviewer_impact
 
@@ -472,3 +471,46 @@ def trust_today_diagnostics():
         "most_common_retrain_hints": top_hints,
         "last_updated_at": datetime.utcnow().isoformat()
     }
+
+SUPPRESSION_REVIEW_PATH = Path("data/suppression_review_queue.jsonl")
+SUPPRESSION_REVIEW_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+class SuppressedSignal(BaseModel):
+    signal_id: str
+    asset: str
+    trust_score: float
+    suppression_reason: str
+    label: Optional[str] = None
+    score: Optional[float] = None
+    confidence: Optional[float] = None
+    likely_disagreed: Optional[bool] = None
+    retrain_hint: Optional[str] = None
+    model_version: Optional[str] = "unknown"
+
+@router.post("/internal/log-signal-for-review")
+def log_signal_for_review(signal: SuppressedSignal):
+    if not signal.suppression_reason:
+        raise HTTPException(status_code=400, detail="suppression_reason is required.")
+
+    entry = {
+        "id": signal.signal_id,
+        "asset": signal.asset,
+        "trust_score": signal.trust_score,
+        "suppression_reason": signal.suppression_reason,
+        "status": "pending",
+        "timestamp": datetime.utcnow().isoformat(),
+        "label": signal.label,
+        "score": signal.score,
+        "confidence": signal.confidence,
+        "likely_disagreed": signal.likely_disagreed,
+        "retrain_hint": signal.retrain_hint,
+        "model_version": signal.model_version,
+    }
+
+    try:
+        with SUPPRESSION_REVIEW_PATH.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write suppression log: {e}")
+
+    return {"logged": True, "signal_id": signal.signal_id}
