@@ -82,3 +82,7 @@ app.include_router(trust_volatility_spike_router)  # ✅ Route mount
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
     return {"status": "ok"}
+    
+@app.get("/debug/routes")
+def list_routes():
+    return [{"path": route.path, "methods": route.methods} for route in app.routes]
