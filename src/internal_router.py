@@ -9,7 +9,7 @@ import os
 import requests
 from src.signal_utils import compute_trust_scores
 from src.reviewer_impact_logger import log_reviewer_impact
-from reviewer_impact_logger import ReviewerImpactLog
+from src.reviewer_impact_logger import ReviewerImpactLog
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
