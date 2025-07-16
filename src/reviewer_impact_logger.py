@@ -1,7 +1,7 @@
 import os
 import json
 from datetime import datetime
-from src.schemas import ReviewerImpactLog
+
 
 REVIEWER_IMPACT_LOG_PATH = "data/reviewer_impact_log.jsonl"
 os.makedirs("data", exist_ok=True)  # Ensure data directory exists
