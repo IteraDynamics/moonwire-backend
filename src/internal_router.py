@@ -558,7 +558,7 @@ def log_reviewer_impact(entry: ReviewerImpactLog):
     )
     return {"logged": True, "signal_id": entry.signal_id}
     
-    @router.post("/internal/reviewer-impact-log")
+@router.post("/internal/reviewer-impact-log")
 async def reviewer_impact_endpoint(log: ReviewerImpactLog):
     log_reviewer_impact(log)
     return {"status": "logged"}
