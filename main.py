@@ -1,7 +1,7 @@
 import os
 os.makedirs("logs", exist_ok=True)  # ✅ Ensure logging directory exists at boot
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.twitter_router import router as twitter_router
