@@ -514,3 +514,29 @@ def log_signal_for_review(signal: SuppressedSignal):
         raise HTTPException(status_code=500, detail=f"Failed to write suppression log: {e}")
 
     return {"logged": True, "signal_id": signal.signal_id}
+    
+    valid_statuses = {"reviewed", "ignored", "retrained", "overridden"}
+
+class SuppressionStatusUpdate(BaseModel):
+    signal_id: str
+    status: str
+    reviewer_id: str
+    note: Optional[str] = None
+
+@router.post("/update-suppression-status")
+def update_suppression_status(update: SuppressionStatusUpdate = Body(...)):
+    if update.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="Invalid status value.")
+
+    now = datetime.utcnow()
+    entry = {
+        "signal_id": update.signal_id,
+        "status": update.status,
+        "reviewer_id": update.reviewer_id,
+        "reviewer_note": update.note,
+        "logged_at": now.isoformat(),
+    }
+
+    log_reviewer_impact(**entry)
+
+    return {"updated": True}
