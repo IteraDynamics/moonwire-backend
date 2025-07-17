@@ -1,7 +1,7 @@
 import os
 os.makedirs("logs", exist_ok=True)  # ✅ Ensure logging directory exists at boot
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.twitter_router import router as twitter_router
@@ -74,7 +74,6 @@ app.include_router(internal_router)
 app.include_router(feedback_ingestion_router)
 app.include_router(high_disagreement_router)
 app.include_router(feedback_insights_router)
-app.include_router(feedback_prediction_router, prefix="/internal")
 app.include_router(trust_intelligence_router)
 app.include_router(signal_review_router)
 app.include_router(trust_asset_pulse_router)
@@ -83,3 +82,7 @@ app.include_router(trust_volatility_spike_router)  # ✅ Route mount
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
     return {"status": "ok"}
+    
+@app.get("/debug/routes")
+def list_routes():
+    return [{"path": route.path, "methods": route.methods} for route in app.routes]

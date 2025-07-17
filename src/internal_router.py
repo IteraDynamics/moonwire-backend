@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel
 from collections import defaultdict
 from typing import List, Optional
@@ -7,9 +7,10 @@ from pathlib import Path
 import json
 import os
 import requests
-
 from src.signal_utils import compute_trust_scores
 from src.reviewer_impact_logger import log_reviewer_impact
+from src.reviewer_impact_logger import ReviewerImpactLog
+from src.reviewer_log_utils import log_reviewer_action
 
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
 
@@ -187,20 +188,22 @@ def update_suppression_status(update: SuppressionStatusUpdate):
 
                 entry["impact_score"] = round(action_weight * (1 - trust_score) + recurrence_bonus, 3)
 
-                # === Reviewer Impact Logging ===
-                log_reviewer_impact(
-                    reviewer_id=update.reviewer_id,
-                    signal_id=update.signal_id,
-                    action_type=update.status,
-                    original_trust_score=trust_score,
-                    signal_timestamp=entry.get("timestamp"),
-                    reviewer_note=update.note,
-                    reason=entry.get("retrain_hint", "unspecified"),
-                    trust_score_before=trust_score,
-                    trust_score_after=updated_trust_score if update.status == "retrained" else None,
-)
-
-
+                # ✅ Log reviewer impact (this is the key Step 2 part)
+                try:
+                    log_reviewer_impact(
+                        reviewer_id=update.reviewer_id,
+                        signal_id=update.signal_id,
+                        action_type=update.status,
+                        original_trust_score=trust_score,
+                        trust_score_before=trust_score,
+                        trust_score_after=trust_score if update.status == "overridden" else None,
+                        signal_timestamp=entry.get("timestamp"),
+                        reviewer_note=update.note,
+                        reason=entry.get("retrain_hint", "unspecified"),
+                        model_version=entry.get("model_version", "v1.0")
+                    )
+                except Exception as e:
+                    print(f"❌ Reviewer impact log failed: {e}")
 
         updated_entries.append(entry)
 
@@ -470,3 +473,94 @@ def trust_today_diagnostics():
         "most_common_retrain_hints": top_hints,
         "last_updated_at": datetime.utcnow().isoformat()
     }
+
+SUPPRESSION_REVIEW_PATH = Path("data/suppression_review_queue.jsonl")
+SUPPRESSION_REVIEW_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+class SuppressedSignal(BaseModel):
+    signal_id: str
+    asset: str
+    trust_score: float
+    suppression_reason: str
+    label: Optional[str] = None
+    score: Optional[float] = None
+    confidence: Optional[float] = None
+    likely_disagreed: Optional[bool] = None
+    retrain_hint: Optional[str] = None
+    model_version: Optional[str] = "unknown"
+
+@router.post("/internal/log-signal-for-review")
+def log_signal_for_review(signal: SuppressedSignal):
+    if not signal.suppression_reason:
+        raise HTTPException(status_code=400, detail="suppression_reason is required.")
+
+    entry = {
+        "id": signal.signal_id,
+        "asset": signal.asset,
+        "trust_score": signal.trust_score,
+        "suppression_reason": signal.suppression_reason,
+        "status": "pending",
+        "timestamp": datetime.utcnow().isoformat(),
+        "label": signal.label,
+        "score": signal.score,
+        "confidence": signal.confidence,
+        "likely_disagreed": signal.likely_disagreed,
+        "retrain_hint": signal.retrain_hint,
+        "model_version": signal.model_version,
+    }
+
+    try:
+        with SUPPRESSION_REVIEW_PATH.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write suppression log: {e}")
+
+    return {"logged": True, "signal_id": signal.signal_id}
+    
+    valid_statuses = {"reviewed", "ignored", "retrained", "overridden"}
+
+class SuppressionStatusUpdate(BaseModel):
+    signal_id: str
+    status: str
+    reviewer_id: str
+    note: Optional[str] = None
+
+@router.post("/update-suppression-status")
+def update_suppression_status(update: SuppressionStatusUpdate = Body(...)):
+    if update.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail="Invalid status value.")
+
+    now = datetime.utcnow()
+    entry = {
+        "signal_id": update.signal_id,
+        "status": update.status,
+        "reviewer_id": update.reviewer_id,
+        "reviewer_note": update.note,
+        "logged_at": now.isoformat(),
+    }
+
+    log_reviewer_impact(**entry)
+
+    return {"updated": True}
+    
+class ReviewerImpactLog(BaseModel):
+    signal_id: str
+    reviewer_id: str
+    action: str  # e.g. "reviewed", "ignored", etc.
+    note: Optional[str] = None
+    
+# This is just a helper — no decorator
+def log_reviewer_impact(entry: ReviewerImpactLog):
+    log_reviewer_action(
+        signal_id=entry.signal_id,
+        reviewer_id=entry.reviewer_id,
+        action=entry.action,
+        note=entry.note,
+    )
+
+# This is your actual HTTP endpoint — keep this decorator
+@router.post("/reviewer-impact-log")
+async def reviewer_impact_endpoint(log: ReviewerImpactLog):
+    log_reviewer_impact(log)
+    return {"status": "logged"}
+
