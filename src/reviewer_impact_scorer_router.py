@@ -13,19 +13,22 @@ class ReviewerImpactEvent(BaseModel):
     signal_id: str
     action: str
 
-@router.post("/reviewer-impact-log")
+@router.post("/internal/reviewer-impact-log")
 def reviewer_impact_log(event: ReviewerImpactEvent):
     log_path = Path("logs/reviewer_impact_log.jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(log_path, "a") as f:
         f.write(json.dumps(event.dict()) + "\n")
+        f.flush()        # ensure it's written to buffer
+        os.fsync(f.fileno())  # force flush to disk
 
-    return {"logged": True}
+    return {"status": "logged"}
 
-@router.get("/reviewer-scores")
+@router.get("/internal/reviewer-scores")
 def get_reviewer_scores():
-    score_reviewers()  # Runs the computation and writes the file
+    print("[DEBUG] Calling score_reviewers()")
+    score_reviewers()
 
     output_path = "logs/reviewer_scores.jsonl"
     if not os.path.exists(output_path):
