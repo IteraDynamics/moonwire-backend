@@ -1,21 +1,29 @@
+# src/utils/reviewer_scoring.py
+
 import json
 from collections import defaultdict
 from typing import List, Dict
-import os
+from pathlib import Path
+import logging
 
-def load_logs(path: str) -> List[dict]:
-    print(f"[DEBUG] Loading logs from: {path}")
-    if not os.path.exists(path):
-        print(f"[WARNING] Log file does not exist: {path}")
+logger = logging.getLogger(__name__)
+
+# Resolve absolute path to repo root
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+DEFAULT_INPUT_PATH = BASE_DIR / "logs" / "reviewer_impact_log.jsonl"
+DEFAULT_OUTPUT_PATH = BASE_DIR / "logs" / "reviewer_scores.jsonl"
+
+def load_logs(path: Path) -> List[dict]:
+    logger.debug(f"Loading logs from: {path}")
+    if not path.exists():
+        logger.debug("Log file does not exist.")
         return []
-
-    with open(path, "r") as f:
+    with path.open("r") as f:
         lines = [line.strip() for line in f if line.strip()]
-        print(f"[DEBUG] Loaded {len(lines)} log lines")
-        return [json.loads(line) for line in lines]
+    logger.debug(f"Loaded {len(lines)} log lines")
+    return [json.loads(line) for line in lines]
 
 def compute_reviewer_scores(logs: List[dict]) -> List[Dict]:
-    print(f"[DEBUG] Computing reviewer scores from {len(logs)} logs")
     reviewers = defaultdict(list)
 
     for entry in logs:
@@ -32,36 +40,27 @@ def compute_reviewer_scores(logs: List[dict]) -> List[Dict]:
         avg_trust_delta = round(sum(trust_deltas) / len(trust_deltas), 4) if trust_deltas else 0.0
         helpful_pct = round((helpful_count / len(trust_deltas)) * 100, 2) if trust_deltas else 0.0
 
-        result = {
+        results.append({
             "reviewer_id": reviewer_id,
             "total_actions": total_actions,
             "avg_trust_delta": avg_trust_delta,
             "helpful_override_pct": helpful_pct
-        }
-        print(f"[DEBUG] Computed score for reviewer {reviewer_id}: {result}")
-        results.append(result)
+        })
 
     return results
 
-def write_scores(scores: List[dict], path: str):
-    print(f"[DEBUG] Writing {len(scores)} scores to {path}")
-    with open(path, "w") as f:
+def write_scores(scores: List[dict], path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
         for score in scores:
             f.write(json.dumps(score) + "\n")
-    print("[DEBUG] Write complete")
+    logger.debug(f"Wrote {len(scores)} scores to: {path}")
 
-def score_reviewers(input_path="logs/reviewer_impact_log.jsonl", output_path="logs/reviewer_scores.jsonl"):
-    print("[DEBUG] Starting reviewer scoring pipeline")
+def score_reviewers(input_path: Path = DEFAULT_INPUT_PATH, output_path: Path = DEFAULT_OUTPUT_PATH):
+    logger.debug("[DEBUG] Starting reviewer scoring pipeline")
     logs = load_logs(input_path)
-
     if not logs:
-        print("[INFO] No logs found or log file is empty — skipping scoring")
+        logger.info("No logs found or log file is empty — skipping scoring")
         return
-
     scores = compute_reviewer_scores(logs)
     write_scores(scores, output_path)
-    print("[DEBUG] Scoring pipeline completed successfully")
-
-# Optional CLI test
-if __name__ == "__main__":
-    score_reviewers()
