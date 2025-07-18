@@ -5,7 +5,7 @@ import os
 
 router = APIRouter()
 
-@router.get("/internal/reviewer-scores")
+@router.get("/reviewer-scores")
 def get_reviewer_scores():
     score_reviewers()  # Runs the computation and writes the file
 
