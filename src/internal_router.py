@@ -489,7 +489,7 @@ class SuppressedSignal(BaseModel):
     retrain_hint: Optional[str] = None
     model_version: Optional[str] = "unknown"
 
-@router.post("/internal/log-signal-for-review")
+@router.post("/log-signal-for-review")
 def log_signal_for_review(signal: SuppressedSignal):
     if not signal.suppression_reason:
         raise HTTPException(status_code=400, detail="suppression_reason is required.")
