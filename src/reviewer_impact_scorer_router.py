@@ -7,15 +7,13 @@ import os
 
 router = APIRouter()
 
-
 class ReviewerImpactEvent(BaseModel):
     reviewer_id: str
     trust_delta: float
     signal_id: str
     action: str
 
-
-@router.post("/internal/reviewer-impact-log")
+@router.post("/reviewer-impact-log")
 def reviewer_impact_log(event: ReviewerImpactEvent):
     log_path = Path("logs/reviewer_impact_log.jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,8 +23,7 @@ def reviewer_impact_log(event: ReviewerImpactEvent):
 
     return {"logged": True}
 
-
-@router.get("/internal/reviewer-scores")
+@router.get("/reviewer-scores")
 def get_reviewer_scores():
     score_reviewers()  # Runs the computation and writes the file
 
