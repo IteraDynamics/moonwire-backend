@@ -1,5 +1,3 @@
-# src/reviewer_impact_scorer_router.py
-
 from fastapi import APIRouter
 from pydantic import BaseModel
 from src.utils.reviewer_scoring import score_reviewers
@@ -36,7 +34,12 @@ def get_reviewer_scores():
     with open(output_path) as f:
         return [json.loads(line) for line in f if line.strip()]
 
-@router.post("/trigger-reviewer-scoring")
-def trigger_score_recomputation():
-    score_reviewers()
-    return {"recomputed": True}
+@router.get("/dev-dump-reviewer-logs")
+def dev_dump_reviewer_logs():
+    log_path = Path("logs/reviewer_impact_log.jsonl")
+    
+    if not log_path.exists():
+        return {"error": "Log file does not exist."}
+    
+    with open(log_path, "r") as f:
+        return {"log_contents": f.read()}
