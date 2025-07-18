@@ -13,7 +13,7 @@ class ReviewerImpactEvent(BaseModel):
     signal_id: str
     action: str
 
-@router.post("/internal/reviewer-impact-log")
+@router.post("/reviewer-impact-log")
 def reviewer_impact_log(event: ReviewerImpactEvent):
     log_path = Path("logs/reviewer_impact_log.jsonl")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,7 +25,7 @@ def reviewer_impact_log(event: ReviewerImpactEvent):
 
     return {"status": "logged"}
 
-@router.get("/internal/reviewer-scores")
+@router.get("/reviewer-scores")
 def get_reviewer_scores():
     print("[DEBUG] Calling score_reviewers()")
     score_reviewers()
