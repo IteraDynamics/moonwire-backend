@@ -4,19 +4,21 @@ from fastapi import APIRouter, Request
 import json
 import os
 
+# 1️⃣ Make sure this is here:
 from src.paths import REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
 
 router = APIRouter()
 
+# —————— Endpoint: log reviewer actions ——————
 @router.post("/reviewer-impact-log")
 async def log_reviewer_action(request: Request):
-    # 1) Read the incoming JSON
+    # Read the incoming JSON
     payload = await request.json()
 
-    # 2) DEBUG: confirm what FastAPI parsed
+    # DEBUG: confirm what FastAPI parsed
     print("🧐 Payload received:", payload)
 
-    # 3) Existing logging logic
+    # Main logging logic
     print("🚨 /internal/reviewer-impact-log hit")
     print(f"📄 Writing to: {REVIEWER_IMPACT_LOG_PATH}")
     try:
@@ -29,6 +31,7 @@ async def log_reviewer_action(request: Request):
         print(f"❌ Failed to write log: {e}")
         return {"error": str(e)}
 
+# —————— Endpoint: trigger scoring ——————
 @router.post("/trigger-reviewer-scoring")
 async def trigger_scoring():
     print("🚨 /internal/trigger-reviewer-scoring hit")
@@ -57,6 +60,7 @@ async def trigger_scoring():
         print(f"❌ Scoring failed: {e}")
         return {"error": str(e)}
 
+# —————— Endpoint: fetch scores ——————
 @router.get("/reviewer-scores")
 async def get_reviewer_scores():
     print("📥 /internal/reviewer-scores requested")
@@ -72,6 +76,7 @@ async def get_reviewer_scores():
         print(f"❌ Failed to read scores: {e}")
         return {"error": str(e)}
 
+# —————— Endpoint: debug file status ——————
 @router.get("/debug/jsonl-status")
 async def jsonl_status():
     print("🧪 /internal/debug/jsonl-status hit")
