@@ -1,5 +1,6 @@
+# src/reviewer_impact_scorer_router.py
+
 from fastapi import APIRouter, Request
-from pathlib import Path
 import json
 import os
 
@@ -9,7 +10,13 @@ router = APIRouter()
 
 @router.post("/reviewer-impact-log")
 async def log_reviewer_action(request: Request):
+    # 1) Read the incoming JSON
     payload = await request.json()
+
+    # 2) DEBUG: confirm what FastAPI parsed
+    print("🧐 Payload received:", payload)
+
+    # 3) Existing logging logic
     print("🚨 /internal/reviewer-impact-log hit")
     print(f"📄 Writing to: {REVIEWER_IMPACT_LOG_PATH}")
     try:
@@ -39,6 +46,7 @@ async def trigger_scoring():
             if reviewer_id:
                 reviewer_scores[reviewer_id] = reviewer_scores.get(reviewer_id, 0) + 1
 
+        os.makedirs(REVIEWER_SCORES_PATH.parent, exist_ok=True)
         with REVIEWER_SCORES_PATH.open("w") as f:
             for reviewer_id, score in reviewer_scores.items():
                 f.write(json.dumps({"reviewer_id": reviewer_id, "score": score}) + "\n")
