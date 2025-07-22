@@ -4,34 +4,61 @@ from fastapi import APIRouter, Request
 import json
 import os
 
-# 1️⃣ Make sure this is here:
 from src.paths import REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
+
+# 🚀 Loaded reviewer_impact_scorer_router with trust-weighted logging
+print("🚀 Loaded reviewer_impact_scorer_router v2 with trust-weighted logging")
 
 router = APIRouter()
 
-# —————— Endpoint: log reviewer actions ——————
 @router.post("/reviewer-impact-log")
 async def log_reviewer_action(request: Request):
-    # Read the incoming JSON
+    # 1) Read the incoming JSON
     payload = await request.json()
 
     # DEBUG: confirm what FastAPI parsed
     print("🧐 Payload received:", payload)
-
-    # Main logging logic
     print("🚨 /internal/reviewer-impact-log hit")
+
+    # 2) Load existing reviewer scores
+    scores = {}
+    if REVIEWER_SCORES_PATH.exists():
+        try:
+            with REVIEWER_SCORES_PATH.open("r") as sf:
+                for line in sf:
+                    if line.strip():
+                        entry = json.loads(line)
+                        rid = entry.get("reviewer_id")
+                        scores[rid] = entry.get("score", 0)
+        except Exception as e:
+            print(f"❌ Failed to load reviewer scores: {e}")
+
+    # 3) Determine weight multiplier based on score
+    reviewer_id = payload.get("reviewer_id")
+    raw_score = scores.get(reviewer_id, 0)
+    if raw_score >= 0.75:
+        weight = 1.25
+    elif raw_score >= 0.5:
+        weight = 1.0
+    else:
+        weight = 0.75
+
+    # Attach weight to payload
+    payload["reviewer_weight"] = weight
+    print(f"⚖️ Reviewer {reviewer_id} weight: {weight} (score: {raw_score})")
+
+    # 4) Append to impact log
     print(f"📄 Writing to: {REVIEWER_IMPACT_LOG_PATH}")
     try:
         os.makedirs(REVIEWER_IMPACT_LOG_PATH.parent, exist_ok=True)
         with REVIEWER_IMPACT_LOG_PATH.open("a") as f:
             f.write(json.dumps(payload) + "\n")
         print("✅ Log entry appended.")
-        return {"status": "logged"}
+        return {"status": "logged", "reviewer_weight": weight}
     except Exception as e:
         print(f"❌ Failed to write log: {e}")
         return {"error": str(e)}
 
-# —————— Endpoint: trigger scoring ——————
 @router.post("/trigger-reviewer-scoring")
 async def trigger_scoring():
     print("🚨 /internal/trigger-reviewer-scoring hit")
@@ -45,14 +72,14 @@ async def trigger_scoring():
 
         reviewer_scores = {}
         for log in logs:
-            reviewer_id = log.get("reviewer_id")
-            if reviewer_id:
-                reviewer_scores[reviewer_id] = reviewer_scores.get(reviewer_id, 0) + 1
+            rid = log.get("reviewer_id")
+            if rid:
+                reviewer_scores[rid] = reviewer_scores.get(rid, 0) + 1
 
         os.makedirs(REVIEWER_SCORES_PATH.parent, exist_ok=True)
         with REVIEWER_SCORES_PATH.open("w") as f:
-            for reviewer_id, score in reviewer_scores.items():
-                f.write(json.dumps({"reviewer_id": reviewer_id, "score": score}) + "\n")
+            for rid, score in reviewer_scores.items():
+                f.write(json.dumps({"reviewer_id": rid, "score": score}) + "\n")
 
         print(f"✅ {len(reviewer_scores)} reviewer scores written to {REVIEWER_SCORES_PATH}")
         return {"recomputed": True}
@@ -60,7 +87,6 @@ async def trigger_scoring():
         print(f"❌ Scoring failed: {e}")
         return {"error": str(e)}
 
-# —————— Endpoint: fetch scores ——————
 @router.get("/reviewer-scores")
 async def get_reviewer_scores():
     print("📥 /internal/reviewer-scores requested")
@@ -76,7 +102,6 @@ async def get_reviewer_scores():
         print(f"❌ Failed to read scores: {e}")
         return {"error": str(e)}
 
-# —————— Endpoint: debug file status ——————
 @router.get("/debug/jsonl-status")
 async def jsonl_status():
     print("🧪 /internal/debug/jsonl-status hit")
