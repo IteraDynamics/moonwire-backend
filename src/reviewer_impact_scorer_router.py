@@ -1,38 +1,47 @@
+# src/reviewer_impact_scorer_router.py
+
 from fastapi import APIRouter, Request
-from pathlib import Path
 import json
 import os
 
+# 1️⃣ Make sure this is here:
+from src.paths import REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
+
 router = APIRouter()
 
-LOG_PATH = Path("logs/reviewer_impact_log.jsonl")
-SCORES_PATH = Path("logs/reviewer_scores.jsonl")
-
+# —————— Endpoint: log reviewer actions ——————
 @router.post("/reviewer-impact-log")
 async def log_reviewer_action(request: Request):
+    # Read the incoming JSON
     payload = await request.json()
+
+    # DEBUG: confirm what FastAPI parsed
+    print("🧐 Payload received:", payload)
+
+    # Main logging logic
     print("🚨 /internal/reviewer-impact-log hit")
-    print(f"📄 Writing to: {LOG_PATH}")
+    print(f"📄 Writing to: {REVIEWER_IMPACT_LOG_PATH}")
     try:
-        os.makedirs(LOG_PATH.parent, exist_ok=True)
-        with LOG_PATH.open("a") as f:
+        os.makedirs(REVIEWER_IMPACT_LOG_PATH.parent, exist_ok=True)
+        with REVIEWER_IMPACT_LOG_PATH.open("a") as f:
             f.write(json.dumps(payload) + "\n")
-        print("✅ Log written successfully.")
+        print("✅ Log entry appended.")
         return {"status": "logged"}
     except Exception as e:
-        print(f"❌ Write failed: {e}")
+        print(f"❌ Failed to write log: {e}")
         return {"error": str(e)}
 
+# —————— Endpoint: trigger scoring ——————
 @router.post("/trigger-reviewer-scoring")
 async def trigger_scoring():
     print("🚨 /internal/trigger-reviewer-scoring hit")
-    if not LOG_PATH.exists() or LOG_PATH.stat().st_size == 0:
-        print("⚠️ Log file missing or empty.")
+    if not REVIEWER_IMPACT_LOG_PATH.exists() or REVIEWER_IMPACT_LOG_PATH.stat().st_size == 0:
+        print("⚠️ No reviewer logs to score.")
         return {"error": "No reviewer logs to score."}
-
     try:
-        with LOG_PATH.open("r") as f:
+        with REVIEWER_IMPACT_LOG_PATH.open("r") as f:
             logs = [json.loads(line) for line in f if line.strip()]
+        print(f"📊 Loaded {len(logs)} log entries")
 
         reviewer_scores = {}
         for log in logs:
@@ -40,27 +49,52 @@ async def trigger_scoring():
             if reviewer_id:
                 reviewer_scores[reviewer_id] = reviewer_scores.get(reviewer_id, 0) + 1
 
-        os.makedirs(SCORES_PATH.parent, exist_ok=True)
-        with SCORES_PATH.open("w") as f:
+        os.makedirs(REVIEWER_SCORES_PATH.parent, exist_ok=True)
+        with REVIEWER_SCORES_PATH.open("w") as f:
             for reviewer_id, score in reviewer_scores.items():
                 f.write(json.dumps({"reviewer_id": reviewer_id, "score": score}) + "\n")
 
-        print(f"✅ Reviewer scores written to {SCORES_PATH}")
+        print(f"✅ {len(reviewer_scores)} reviewer scores written to {REVIEWER_SCORES_PATH}")
         return {"recomputed": True}
     except Exception as e:
         print(f"❌ Scoring failed: {e}")
         return {"error": str(e)}
 
+# —————— Endpoint: fetch scores ——————
 @router.get("/reviewer-scores")
 async def get_reviewer_scores():
     print("📥 /internal/reviewer-scores requested")
-    if not SCORES_PATH.exists():
+    if not REVIEWER_SCORES_PATH.exists():
         print("⚠️ No reviewer_scores.jsonl found.")
         return {"scores": []}
     try:
-        with SCORES_PATH.open("r") as f:
+        with REVIEWER_SCORES_PATH.open("r") as f:
             scores = [json.loads(line) for line in f if line.strip()]
+        print(f"📊 Returning {len(scores)} scores")
         return {"scores": scores}
     except Exception as e:
         print(f"❌ Failed to read scores: {e}")
         return {"error": str(e)}
+
+# —————— Endpoint: debug file status ——————
+@router.get("/debug/jsonl-status")
+async def jsonl_status():
+    print("🧪 /internal/debug/jsonl-status hit")
+    files = {
+        "reviewer_impact_log": REVIEWER_IMPACT_LOG_PATH,
+        "reviewer_scores": REVIEWER_SCORES_PATH,
+    }
+    status = {}
+    for label, path in files.items():
+        abs_path = str(path.resolve())
+        exists = path.exists()
+        writable = os.access(path, os.W_OK) if exists else False
+        size = path.stat().st_size if exists else 0
+        status[label] = {
+            "exists": exists,
+            "size_bytes": size,
+            "writable": writable,
+            "absolute_path": abs_path,
+        }
+        print(f"🔍 {label} — exists: {exists}, writable: {writable}, size: {size} bytes")
+    return status
