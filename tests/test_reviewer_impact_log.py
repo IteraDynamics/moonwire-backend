@@ -1,8 +1,8 @@
 def test_reviewer_impact_log_and_scores(client):
     payload = {
-        "signal_id":   "test123",
+        "signal_id": "test123",
         "reviewer_id": "alice",
-        "action":      "override",
+        "action": "override",
         "trust_delta": 0.1,
     }
 
@@ -20,4 +20,5 @@ def test_reviewer_impact_log_and_scores(client):
     r3 = client.get("/internal/reviewer-scores")
     assert r3.status_code == 200
     scores = r3.json()["scores"]
+    # should contain one entry for "alice"
     assert any(s["reviewer_id"] == "alice" for s in scores)
