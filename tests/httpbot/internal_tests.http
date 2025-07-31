@@ -1,0 +1,32 @@
+@BASE_URL = {{BASE_URL}}
+
+### 1) Log signal for review
+POST {{BASE_URL}}/internal/log-signal-for-review
+Content-Type: application/json
+
+{
+  "signal_id": "sig_123",
+  "asset":      "BTC",
+  "trust_score": 0.2,
+  "suppression_reason": "test"
+}
+
+### 2) Reviewer-impact-log
+POST {{BASE_URL}}/internal/reviewer-impact-log
+Content-Type: application/json
+
+{
+  "signal_id":   "sig_123",
+  "reviewer_id": "alice",
+  "action":      "override",
+  "trust_delta": 0.1
+}
+
+### 3) Trigger scoring
+POST {{BASE_URL}}/internal/trigger-reviewer-scoring
+
+### 4) Fetch reviewer scores
+GET {{BASE_URL}}/internal/reviewer-scores
+
+### 5) Debug JSONL status
+GET {{BASE_URL}}/internal/debug/jsonl-status

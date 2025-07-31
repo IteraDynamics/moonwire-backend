@@ -1,0 +1,2 @@
+pytest>=7.0
+# add any other test-only libraries here, e.g. httpx, pytest-asyncio, etc.
