@@ -1,9 +1,13 @@
-def test_get_reviewer_scores(run_local, client, http, base_url):
-    if run_local:
-        resp = client.get("/internal/reviewer-scores")
-    else:
-        resp = http.get(f"{base_url}/internal/reviewer-scores")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "scores" in body
-    assert isinstance(body["scores"], list)
+# tests/test_reviewer_scores.py
+
+def test_get_reviewer_scores(client):
+    """
+    Simply verifies that GET /internal/reviewer-scores returns a 200
+    and that the JSON has a 'scores' key containing a list.
+    """
+    response = client.get("/internal/reviewer-scores")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert "scores" in body, "Response JSON must include a 'scores' field"
+    assert isinstance(body["scores"], list), "'scores' should be a list"
