@@ -6,28 +6,44 @@ from typing import Optional
 
 from scripts.ml_utils.train_feedback_disagreement_model import predict_disagreement
 
-router = APIRouter()
+router = APIRouter(prefix="/internal")
 
 
 class RetrainRequest(BaseModel):
     signal_id: str
-    reason: str
-    note: Optional[str] = None
+    reason:    str
+    note:      Optional[str] = None
 
 
-@router.post("/internal/flag-for-retraining", status_code=200, summary="Flag a signal for retraining")
+@router.post("/flag-for-retraining", status_code=200)
 async def flag_for_retraining(req: RetrainRequest):
     """
-    Stub endpoint to record a signal for later retraining.
+    Records a signal for later retraining.
     """
-    # TODO: replace with actual retraining-queue logic
+    # TODO: hook into your retraining queue here
     return {"retrain_queued": True, "signal_id": req.signal_id}
 
 
-@router.post("/internal/adjust-signals-based-on-feedback", summary="Trigger feedback‐based signal adjustment")
-def trigger_adjust_signals():
+class OverrideRequest(BaseModel):
+    signal_id:        str
+    override_reason:  str
+    note:             Optional[str] = None
+    reviewed_by:      Optional[str] = None
+
+
+@router.post("/override-suppression", status_code=200)
+async def override_suppression(req: OverrideRequest):
     """
-    Existing endpoint — runs the feedback disagreement prediction logic.
+    Applies a manual override to a suppressed signal.
+    """
+    # TODO: implement real override logic (e.g. record to JSONL)
+    return {"override_applied": True, "signal_id": req.signal_id}
+
+
+@router.post("/adjust-signals-based-on-feedback", status_code=200)
+async def trigger_adjust_signals():
+    """
+    Runs the feedback‐based adjustment model.
     """
     result = predict_disagreement()
     return {"adjustment_result": result}
