@@ -1,7 +1,13 @@
-def test_trigger_reviewer_scoring(run_local, client, http, base_url):
-    if run_local:
-        resp = client.post("/internal/trigger-reviewer-scoring")
-    else:
-        resp = http.post(f"{base_url}/internal/trigger-reviewer-scoring")
-    assert resp.status_code == 200
-    assert resp.json().get("recomputed") is True
+# tests/test_trigger_scoring.py
+
+def test_trigger_reviewer_scoring(client):
+    """
+    Verify that POST /internal/trigger-reviewer-scoring returns 200
+    and a JSON body containing {"recomputed": True}.
+    """
+    response = client.post("/internal/trigger-reviewer-scoring")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert "recomputed" in data, "Response JSON must include 'recomputed'"
+    assert data["recomputed"] is True
