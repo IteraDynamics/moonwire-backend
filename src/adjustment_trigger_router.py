@@ -1,3 +1,5 @@
+# src/adjustment_trigger_router.py
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -28,11 +30,11 @@ async def flag_for_retraining(req: RetrainRequest):
     Records a signal for later retraining, 
     storing the reviewer_weight for downstream prioritization.
     """
-    # 1) ensure logs directory exists
+    # ensure logs directory exists
     RETRAIN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # 2) lookup reviewer score
-    score = 0.0
+    # load reviewer score if available
+    score = None
     if REVIEWER_SCORES_PATH.exists():
         try:
             with REVIEWER_SCORES_PATH.open("r") as f:
@@ -44,15 +46,18 @@ async def flag_for_retraining(req: RetrainRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error reading reviewer scores: {e}")
 
-    # 3) compute weight
-    if score >= 0.75:
-        weight = 1.25
-    elif score >= 0.5:
+    # compute weight: default 1.0 if no score entry found
+    if score is None:
         weight = 1.0
     else:
-        weight = 0.75
+        if score >= 0.75:
+            weight = 1.25
+        elif score >= 0.5:
+            weight = 1.0
+        else:
+            weight = 0.75
 
-    # 4) assemble log entry
+    # assemble log entry
     entry = {
         "timestamp":       datetime.utcnow().isoformat() + "Z",
         "signal_id":       req.signal_id,
@@ -62,14 +67,14 @@ async def flag_for_retraining(req: RetrainRequest):
         "reviewer_weight": weight,
     }
 
-    # 5) append to JSONL
+    # append to JSONL
     try:
         with RETRAIN_LOG_PATH.open("a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error writing retraining log: {e}")
 
-    # 6) debug print
+    # debug print
     print(f"🚨 /internal/flag-for-retraining hit")
     print(f"  signal_id: {req.signal_id}, reviewer_id: {req.reviewer_id}, weight: {weight}")
     print(f"  reason: {req.reason}, note: {req.note}")
