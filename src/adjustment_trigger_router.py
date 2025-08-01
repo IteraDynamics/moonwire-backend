@@ -18,23 +18,22 @@ router = APIRouter(prefix="/internal")
 
 
 class RetrainRequest(BaseModel):
-    signal_id: str
-    reason:    str
-    reviewer_id: str
-    note:      Optional[str] = None
+    signal_id:  str
+    reason:     str
+    reviewer_id:str
+    note:       Optional[str] = None
 
 
 @router.post("/flag-for-retraining", status_code=200)
 async def flag_for_retraining(req: RetrainRequest):
     """
-    Records a signal for later retraining, 
-    storing the reviewer_weight for downstream prioritization.
+    Records a signal for later retraining, storing reviewer_weight for prioritization.
     """
-    # ensure logs directory exists
+    # Ensure logs directory exists
     RETRAIN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # load reviewer score if available
-    score = None
+    # Lookup reviewer score
+    score = 0.0
     if REVIEWER_SCORES_PATH.exists():
         try:
             with REVIEWER_SCORES_PATH.open("r") as f:
@@ -46,46 +45,88 @@ async def flag_for_retraining(req: RetrainRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error reading reviewer scores: {e}")
 
-    # compute weight: default 1.0 if no score entry found
-    if score is None:
+    # Compute weight
+    if score >= 0.75:
+        weight = 1.25
+    elif score >= 0.5:
         weight = 1.0
     else:
-        if score >= 0.75:
-            weight = 1.25
-        elif score >= 0.5:
-            weight = 1.0
-        else:
-            weight = 0.75
+        weight = 0.75
 
-    # assemble log entry
+    # Assemble retrain log entry
     entry = {
-        "timestamp":       datetime.utcnow().isoformat() + "Z",
-        "signal_id":       req.signal_id,
-        "reviewer_id":     req.reviewer_id,
-        "reason":          req.reason,
-        "note":            req.note,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "signal_id": req.signal_id,
+        "reviewer_id": req.reviewer_id,
+        "reason": req.reason,
+        "note": req.note,
         "reviewer_weight": weight,
     }
-
-    # append to JSONL
     try:
         with RETRAIN_LOG_PATH.open("a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error writing retraining log: {e}")
 
-    # debug print
-    print(f"🚨 /internal/flag-for-retraining hit")
-    print(f"  signal_id: {req.signal_id}, reviewer_id: {req.reviewer_id}, weight: {weight}")
-    print(f"  reason: {req.reason}, note: {req.note}")
+    # Debug print
+    print(f"🚨 /internal/flag-for-retraining hit -> reviewer_weight={weight}")
 
     return {"status": "queued", "reviewer_weight": weight}
 
 
+class OverrideRequest(BaseModel):
+    signal_id:       str
+    override_reason: str
+    reviewer_id:     str
+    trust_delta:     float
+    note:            Optional[str] = None
+
+
 @router.post("/override-suppression", status_code=200)
-async def override_suppression(req: BaseModel):
-    # existing override logic…
-    return {"override_applied": True, "signal_id": getattr(req, "signal_id", None)}
+async def override_suppression(req: OverrideRequest):
+    """
+    Applies a manual override, weighting trust_delta by reviewer_weight,
+    auto-unsuppressing if new_trust_score >= threshold.
+    """
+    # Lookup reviewer score
+    score = 0.0
+    if REVIEWER_SCORES_PATH.exists():
+        try:
+            with REVIEWER_SCORES_PATH.open("r") as f:
+                for line in f:
+                    entry = json.loads(line)
+                    if entry.get("reviewer_id") == req.reviewer_id:
+                        score = entry.get("score", 0.0)
+                        break
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error reading reviewer scores: {e}")
+
+    # Compute weight
+    if score >= 0.75:
+        weight = 1.25
+    elif score >= 0.5:
+        weight = 1.0
+    else:
+        weight = 0.75
+
+    # Calculate new trust score
+    old_score = 0.0  # TODO: retrieve actual existing trust score
+    new_score = old_score + weight * req.trust_delta
+    threshold = 0.4
+    unsuppressed = new_score >= threshold
+
+    # Debug print
+    print(f"🚨 /internal/override-suppression hit")
+    print(f"  reviewer_id={req.reviewer_id}, score={score}, weight={weight}")
+    print(f"  old_score={old_score}, trust_delta={req.trust_delta}, new_score={new_score}, unsuppressed={unsuppressed}")
+
+    return {
+        "override_applied": True,
+        "signal_id": req.signal_id,
+        "reviewer_weight": weight,
+        "new_trust_score": new_score,
+        "unsuppressed": unsuppressed,
+    }
 
 
 @router.post("/adjust-signals-based-on-feedback", status_code=200)
