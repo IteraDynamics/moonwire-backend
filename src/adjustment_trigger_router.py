@@ -32,9 +32,12 @@ async def flag_for_retraining(req: RetrainRequest):
     # Ensure logs directory exists
     RETRAIN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # Lookup reviewer score
-    score = 0.0
-    if REVIEWER_SCORES_PATH.exists():
+    # If no scores file, default weight to 1.0
+    if not REVIEWER_SCORES_PATH.exists():
+        weight = 1.0
+    else:
+        # Lookup reviewer score
+        score = 0.0
         try:
             with REVIEWER_SCORES_PATH.open("r") as f:
                 for line in f:
@@ -45,13 +48,13 @@ async def flag_for_retraining(req: RetrainRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error reading reviewer scores: {e}")
 
-    # Compute weight
-    if score >= 0.75:
-        weight = 1.25
-    elif score >= 0.5:
-        weight = 1.0
-    else:
-        weight = 0.75
+        # Compute weight based on existing score
+        if score >= 0.75:
+            weight = 1.25
+        elif score >= 0.5:
+            weight = 1.0
+        else:
+            weight = 0.75
 
     # Assemble retrain log entry
     entry = {
@@ -88,9 +91,12 @@ async def override_suppression(req: OverrideRequest):
     Applies a manual override, weighting trust_delta by reviewer_weight,
     auto-unsuppressing if new_trust_score >= threshold.
     """
-    # Lookup reviewer score
-    score = 0.0
-    if REVIEWER_SCORES_PATH.exists():
+    # If no scores file, default weight to 1.0
+    if not REVIEWER_SCORES_PATH.exists():
+        weight = 1.0
+    else:
+        # Lookup reviewer score
+        score = 0.0
         try:
             with REVIEWER_SCORES_PATH.open("r") as f:
                 for line in f:
@@ -101,13 +107,13 @@ async def override_suppression(req: OverrideRequest):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error reading reviewer scores: {e}")
 
-    # Compute weight
-    if score >= 0.75:
-        weight = 1.25
-    elif score >= 0.5:
-        weight = 1.0
-    else:
-        weight = 0.75
+        # Compute weight based on existing score
+        if score >= 0.75:
+            weight = 1.25
+        elif score >= 0.5:
+            weight = 1.0
+        else:
+            weight = 0.75
 
     # Calculate new trust score
     old_score = 0.0  # TODO: retrieve actual existing trust score
@@ -117,7 +123,7 @@ async def override_suppression(req: OverrideRequest):
 
     # Debug print
     print(f"🚨 /internal/override-suppression hit")
-    print(f"  reviewer_id={req.reviewer_id}, score={score}, weight={weight}")
+    print(f"  reviewer_id={req.reviewer_id}, reviewer_weight={weight}")
     print(f"  old_score={old_score}, trust_delta={req.trust_delta}, new_score={new_score}, unsuppressed={unsuppressed}")
 
     return {
