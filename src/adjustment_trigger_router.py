@@ -1,84 +1,153 @@
-# tests/test_override_suppression.py
+# src/adjustment_trigger_router.py
 
-import json
-import shutil
-import pytest
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import Optional
 from pathlib import Path
+import json
+from datetime import datetime
 
-# helper to write a reviewer_scores.jsonl in the real logs folder
-def write_scores(reviewer_scores: dict[str, float]):
-    repo_root = Path(__file__).resolve().parent.parent
-    logs_dir = repo_root / "logs"
-    shutil.rmtree(logs_dir, ignore_errors=True)
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    scores_file = logs_dir / "reviewer_scores.jsonl"
-    with scores_file.open("w") as f:
-        for reviewer_id, score in reviewer_scores.items():
-            f.write(json.dumps({"reviewer_id": reviewer_id, "score": score}) + "\n")
+from scripts.ml_utils.train_feedback_disagreement_model import predict_disagreement
+
+# Initialize router
+router = APIRouter(prefix="/internal")
+
+# File paths
+BASE_DIR = Path(__file__).resolve().parent.parent
+REVIEWER_SCORES_PATH = BASE_DIR / "logs" / "reviewer_scores.jsonl"
+RETRAIN_LOG_PATH = BASE_DIR / "logs" / "retraining_log.jsonl"
 
 
-def test_override_low_weight(client):
+def get_adaptive_threshold(reviewer_weight: float) -> float:
     """
-    A low-score reviewer (<0.5) has weight=0.75,
-    so with trust_delta=0.1 new_score=0.075 < threshold 0.8 → unsuppressed=False
+    Return a suppression threshold based on reviewer weight.
     """
-    write_scores({"low_rev": 0.0})
+    if reviewer_weight >= 1.2:
+        return 0.6
+    elif reviewer_weight <= 0.85:
+        return 0.8
+    else:
+        return 0.7
 
-    payload = {
-        "signal_id": "sig_low",
-        "override_reason": "unit-test",
-        "reviewer_id": "low_rev",
-        "trust_delta": 0.1,
+
+class RetrainRequest(BaseModel):
+    signal_id:   str
+    reason:      str
+    reviewer_id: str
+    note:        Optional[str] = None
+
+
+@router.post("/flag-for-retraining", status_code=200)
+async def flag_for_retraining(req: RetrainRequest):
+    """
+    Records a signal for later retraining, storing reviewer_weight for prioritization.
+    """
+    # Ensure logs directory exists
+    RETRAIN_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Default weight if no scores file
+    if not REVIEWER_SCORES_PATH.exists():
+        weight = 1.0
+    else:
+        score = 0.0
+        try:
+            with REVIEWER_SCORES_PATH.open("r") as f:
+                for line in f:
+                    entry = json.loads(line)
+                    if entry.get("reviewer_id") == req.reviewer_id:
+                        score = entry.get("score", 0.0)
+                        break
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error reading reviewer scores: {e}")
+        # Compute weight bands
+        if score >= 0.75:
+            weight = 1.25
+        elif score >= 0.5:
+            weight = 1.0
+        else:
+            weight = 0.75
+
+    # Create log entry
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "signal_id": req.signal_id,
+        "reviewer_id": req.reviewer_id,
+        "reason": req.reason,
+        "note": req.note,
+        "reviewer_weight": weight,
     }
-    r = client.post("/internal/override-suppression", json=payload)
-    assert r.status_code == 200
+    try:
+        with RETRAIN_LOG_PATH.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error writing retraining log: {e}")
 
-    data = r.json()
-    assert data["reviewer_weight"] == pytest.approx(0.75)
-    assert data["threshold_used"] == pytest.approx(0.8)
-    assert data["unsuppressed"] is False
+    print(f"🚨 /internal/flag-for-retraining hit -> reviewer_weight={weight}")
+    return {"status": "queued", "reviewer_weight": weight}
 
 
-def test_override_mid_weight(client):
+class OverrideRequest(BaseModel):
+    signal_id:       str
+    override_reason: str
+    reviewer_id:     str
+    trust_delta:     float
+    note:            Optional[str] = None
+
+
+@router.post("/override-suppression", status_code=200)
+async def override_suppression(req: OverrideRequest):
     """
-    A mid-score reviewer (0.5–0.74) has weight=1.0,
-    so with trust_delta=0.5 new_score=0.5 >= threshold 0.7 → unsuppressed=True
+    Applies a manual override: weights trust_delta by reviewer_weight,
+    unsuppress if new_score >= adaptive threshold.
     """
-    write_scores({"mid_rev": 0.6})
+    # Determine reviewer_weight
+    if not REVIEWER_SCORES_PATH.exists():
+        weight = 1.0
+    else:
+        score = 0.0
+        try:
+            with REVIEWER_SCORES_PATH.open("r") as f:
+                for line in f:
+                    entry = json.loads(line)
+                    if entry.get("reviewer_id") == req.reviewer_id:
+                        score = entry.get("score", 0.0)
+                        break
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error reading reviewer scores: {e}")
+        # Compute weight bands
+        if score >= 0.75:
+            weight = 1.25
+        elif score >= 0.5:
+            weight = 1.0
+        else:
+            weight = 0.75
 
-    payload = {
-        "signal_id": "sig_mid",
-        "override_reason": "unit-test",
-        "reviewer_id": "mid_rev",
-        "trust_delta": 0.5,
+    # Compute trust update
+    old_score = 0.0  # placeholder for existing trust score
+    weighted_delta = weight * req.trust_delta
+    new_score = old_score + weighted_delta
+
+    # Adaptive threshold logic
+    threshold = get_adaptive_threshold(weight)
+    unsuppressed = new_score >= threshold
+
+    print("🚨 /internal/override-suppression hit")
+    print(f"  reviewer_id={req.reviewer_id}, reviewer_weight={weight}")
+    print(f"  trust_delta={req.trust_delta}, weighted_delta={weighted_delta}")
+    print(f"  old_score={old_score}, new_score={new_score}")
+    print(f"  threshold_used={threshold}, unsuppressed={unsuppressed}")
+
+    return {
+        "override_applied": True,
+        "signal_id":        req.signal_id,
+        "reviewer_weight":  weight,
+        "new_trust_score":  new_score,
+        "threshold_used":   threshold,
+        "unsuppressed":     unsuppressed,
     }
-    r = client.post("/internal/override-suppression", json=payload)
-    assert r.status_code == 200
-
-    data = r.json()
-    assert data["reviewer_weight"] == pytest.approx(1.0)
-    assert data["threshold_used"] == pytest.approx(0.7)
-    assert data["unsuppressed"] is True
 
 
-def test_override_high_weight(client):
-    """
-    A high-score reviewer (>=0.75) has weight=1.25,
-    so with trust_delta=0.5 new_score=0.625 >= threshold 0.6 → unsuppressed=True
-    """
-    write_scores({"high_rev": 1.0})
-
-    payload = {
-        "signal_id": "sig_high",
-        "override_reason": "unit-test",
-        "reviewer_id": "high_rev",
-        "trust_delta": 0.5,
-    }
-    r = client.post("/internal/override-suppression", json=payload)
-    assert r.status_code == 200
-
-    data = r.json()
-    assert data["reviewer_weight"] == pytest.approx(1.25)
-    assert data["threshold_used"] == pytest.approx(0.6)
-    assert data["new_trust_score"] == pytest.approx(0.5 * 1.25)
-    assert data["unsuppressed"] is True
+@router.post("/adjust-signals-based-on-feedback", status_code=200)
+async def trigger_adjust_signals():
+    result = predict_disagreement()
+    return {"adjustment_result": result}
