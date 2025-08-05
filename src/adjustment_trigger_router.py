@@ -2,38 +2,62 @@
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, Literal
+from typing import Optional
+from datetime import datetime
 from pathlib import Path
 import json
-import time
 
-from scripts.ml_utils.train_feedback_disagreement_model import predict_disagreement
-from src.utils import get_reviewer_weight, read_jsonl, append_jsonl, LOG_DIR
+from src.utils import (
+    LOG_DIR,
+    read_jsonl,
+    append_jsonl,
+    get_reviewer_weight
+)
 
 router = APIRouter(prefix="/internal")
 
 
+def get_adaptive_threshold(reviewer_weight: float) -> float:
+    """
+    Return a suppression threshold based on reviewer weight.
+    High-trust reviewers (>=1.25) unsuppress easier at 0.4
+    Mid-trust reviewers use default 0.7
+    Low-trust reviewers (<=0.85) need stronger evidence at 0.8
+    """
+    if reviewer_weight >= 1.25:
+        return 0.4
+    elif reviewer_weight <= 0.85:
+        return 0.8
+    else:
+        return 0.7
+
+
 class RetrainRequest(BaseModel):
-    signal_id: str
-    reason:    str
-    note:      Optional[str] = None
+    signal_id:   str
+    reason:      str
+    reviewer_id: str
+    note:        Optional[str] = None
 
 
 @router.post("/flag-for-retraining", status_code=200)
 async def flag_for_retraining(req: RetrainRequest):
     """
-    Records a signal for later retraining.
+    Records retrain flags with reviewer_weight for prioritization.
     """
-    weight = get_reviewer_weight(req.reviewer_id)  # default=1.0
+    RETRAIN_LOG = LOG_DIR / "retraining_log.jsonl"
+    RETRAIN_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+    weight = get_reviewer_weight(req.reviewer_id)
     entry = {
-        "signal_id": req.signal_id,
-        "reviewer_id": req.reviewer_id,
-        "action": "flag_for_retraining",
-        "reason": req.reason,
+        "timestamp":       datetime.utcnow().isoformat() + "Z",
+        "signal_id":       req.signal_id,
+        "reviewer_id":     req.reviewer_id,
+        "action":          "flag_for_retraining",
+        "reason":          req.reason,
+        "note":            req.note,
         "reviewer_weight": weight,
-        "timestamp": time.time(),
     }
-    append_jsonl(LOG_DIR / "retraining_log.jsonl", entry)
+    append_jsonl(RETRAIN_LOG, entry)
     return entry
 
 
@@ -42,34 +66,35 @@ class OverrideRequest(BaseModel):
     override_reason: str
     reviewer_id:     str
     trust_delta:     float
+    note:            Optional[str] = None
 
 
 @router.post("/override-suppression", status_code=200)
 async def override_suppression(req: OverrideRequest):
     """
-    Applies a manual override to a suppressed signal.
+    Applies a manual override, using an adaptive threshold per reviewer tier.
     """
     weight = get_reviewer_weight(req.reviewer_id)
     weighted_delta = weight * req.trust_delta
 
-    # read old_score from wherever you store it; default 0.0
-    old_score = 0.0
-
+    old_score = 0.0  # placeholder
     new_score = old_score + weighted_delta
-    threshold = 0.4  # or use get_adaptive_threshold(weight)
 
+    threshold = get_adaptive_threshold(weight)
     unsuppressed = new_score >= threshold
 
     entry = {
-        "signal_id": req.signal_id,
-        "reviewer_id": req.reviewer_id,
-        "action": "override_suppression",
-        "override_reason": req.override_reason,
-        "trust_delta": req.trust_delta,
-        "reviewer_weight": weight,
-        "new_trust_score": new_score,
-        "unsuppressed": unsuppressed,
-        "timestamp": time.time(),
+        "timestamp":        datetime.utcnow().isoformat() + "Z",
+        "signal_id":        req.signal_id,
+        "reviewer_id":      req.reviewer_id,
+        "action":           "override_suppression",
+        "override_reason":  req.override_reason,
+        "trust_delta":      req.trust_delta,
+        "reviewer_weight":  weight,
+        "new_trust_score":  new_score,
+        "threshold_used":   threshold,
+        "unsuppressed":     unsuppressed,
+        "note":             req.note,
     }
     append_jsonl(LOG_DIR / "reviewer_impact_log.jsonl", entry)
     return entry
@@ -78,49 +103,43 @@ async def override_suppression(req: OverrideRequest):
 class RollbackRequest(BaseModel):
     signal_id:   str
     reviewer_id: str
-    action_type: Literal["override_suppression", "flag_for_retraining"]
+    action_type: str  # "override_suppression" or "flag_for_retraining"
     reason:      str
 
 
 @router.post("/rollback-reviewer-action", status_code=200)
 async def rollback_reviewer_action(req: RollbackRequest):
     """
-    Reverses the effect of a past reviewer action.
+    Reverse a prior reviewer action by applying the inverse trust delta.
     """
-    log_path = LOG_DIR / "reviewer_impact_log.jsonl"
+    log_path = LOG_DIR / f"{req.action_type}_log.jsonl"
     if not log_path.exists():
-        raise HTTPException(404, "No impact log found")
+        raise HTTPException(404, f"No log found for action {req.action_type}")
 
-    # find the most recent matching entry
     entries = read_jsonl(log_path)
+    # find the last matching entry
     match = next(
         (e for e in reversed(entries)
-         if e["signal_id"] == req.signal_id
-         and e["reviewer_id"] == req.reviewer_id
-         and e["action"] == req.action_type),
+         if e["signal_id"] == req.signal_id and e["reviewer_id"] == req.reviewer_id),
         None
     )
     if not match:
-        raise HTTPException(404, "No matching action to rollback")
+        raise HTTPException(404, "No matching reviewer action to rollback")
 
-    original_delta = match.get("trust_delta", 0.0)
-    weight = match.get("reviewer_weight", 1.0)
-    inverse_delta = -1 * (weight * original_delta)
-
-    # again, pull current_score from your store; default 0.0
-    current_score = 0.0
-    new_score = current_score + inverse_delta
+    original_delta    = match.get("trust_delta", 0.0)
+    reviewer_weight   = match.get("reviewer_weight", get_reviewer_weight(req.reviewer_id))
+    inverse_delta     = -1 * (reviewer_weight * original_delta)
 
     rollback_entry = {
-        "signal_id": req.signal_id,
-        "reviewer_id": req.reviewer_id,
-        "action": req.action_type,
-        "rollback": True,
-        "inverse_delta": inverse_delta,
-        "previous_score": current_score,
-        "new_score": new_score,
-        "reason": req.reason,
-        "timestamp": time.time(),
+        "timestamp":       datetime.utcnow().isoformat() + "Z",
+        "signal_id":       req.signal_id,
+        "reviewer_id":     req.reviewer_id,
+        "action_type":     req.action_type,
+        "rollback":        True,
+        "inverse_delta":   inverse_delta,
+        "previous_delta":  original_delta,
+        "reason":          req.reason,
+        "reviewer_weight": reviewer_weight,
     }
     append_jsonl(LOG_DIR / "rollback_log.jsonl", rollback_entry)
     return rollback_entry
