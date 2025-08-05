@@ -1,11 +1,8 @@
-# src/adjustment_trigger_router.py
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 from pathlib import Path
-import json
 
 from src.utils import (
     LOG_DIR,
@@ -14,16 +11,11 @@ from src.utils import (
     get_reviewer_weight
 )
 
-router = APIRouter(prefix="/internal")
+# ⚠️ No prefix here
+router = APIRouter()
 
 
 def get_adaptive_threshold(reviewer_weight: float) -> float:
-    """
-    Return a suppression threshold based on reviewer weight.
-    High-trust reviewers (>=1.25) unsuppress easier at 0.4
-    Mid-trust reviewers use default 0.7
-    Low-trust reviewers (<=0.85) need stronger evidence at 0.8
-    """
     if reviewer_weight >= 1.25:
         return 0.4
     elif reviewer_weight <= 0.85:
@@ -41,9 +33,6 @@ class RetrainRequest(BaseModel):
 
 @router.post("/flag-for-retraining", status_code=200)
 async def flag_for_retraining(req: RetrainRequest):
-    """
-    Records retrain flags with reviewer_weight for prioritization.
-    """
     RETRAIN_LOG = LOG_DIR / "retraining_log.jsonl"
     RETRAIN_LOG.parent.mkdir(parents=True, exist_ok=True)
 
@@ -58,8 +47,6 @@ async def flag_for_retraining(req: RetrainRequest):
         "reviewer_weight": weight,
     }
     append_jsonl(RETRAIN_LOG, entry)
-
-    # include status for test expectations
     return {"status": "queued", **entry}
 
 
@@ -73,13 +60,10 @@ class OverrideRequest(BaseModel):
 
 @router.post("/override-suppression", status_code=200)
 async def override_suppression(req: OverrideRequest):
-    """
-    Applies a manual override, using an adaptive threshold per reviewer tier.
-    """
     weight = get_reviewer_weight(req.reviewer_id)
     weighted_delta = weight * req.trust_delta
 
-    old_score = 0.0  # placeholder
+    old_score = 0.0
     new_score = old_score + weighted_delta
 
     threshold = get_adaptive_threshold(weight)
@@ -111,15 +95,17 @@ class RollbackRequest(BaseModel):
 
 @router.post("/rollback-reviewer-action", status_code=200)
 async def rollback_reviewer_action(req: RollbackRequest):
-    """
-    Reverse a prior reviewer action by applying the inverse trust delta.
-    """
-    log_path = LOG_DIR / f"{req.action_type}_log.jsonl"
-    if not log_path.exists():
+    # determine which log to read
+    suffix = "retraining" if req.action_type == "flag_for_retraining" else "reviewer_impact"
+    log_file = (
+        LOG_DIR / "retraining_log.jsonl"
+        if req.action_type == "flag_for_retraining"
+        else LOG_DIR / "reviewer_impact_log.jsonl"
+    )
+    if not log_file.exists():
         raise HTTPException(404, f"No log found for action {req.action_type}")
 
-    entries = read_jsonl(log_path)
-    # find the last matching entry
+    entries = read_jsonl(log_file)
     match = next(
         (e for e in reversed(entries)
          if e["signal_id"] == req.signal_id and e["reviewer_id"] == req.reviewer_id),
@@ -128,9 +114,9 @@ async def rollback_reviewer_action(req: RollbackRequest):
     if not match:
         raise HTTPException(404, "No matching reviewer action to rollback")
 
-    original_delta    = match.get("trust_delta", 0.0)
-    reviewer_weight   = match.get("reviewer_weight", get_reviewer_weight(req.reviewer_id))
-    inverse_delta     = -1 * (reviewer_weight * original_delta)
+    original_delta  = match.get("trust_delta", 0.0)
+    reviewer_weight = match.get("reviewer_weight", get_reviewer_weight(req.reviewer_id))
+    inverse_delta   = -1 * (reviewer_weight * original_delta)
 
     rollback_entry = {
         "timestamp":       datetime.utcnow().isoformat() + "Z",
