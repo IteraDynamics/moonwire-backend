@@ -58,7 +58,9 @@ async def flag_for_retraining(req: RetrainRequest):
         "reviewer_weight": weight,
     }
     append_jsonl(RETRAIN_LOG, entry)
-    return entry
+
+    # include status for test expectations
+    return {"status": "queued", **entry}
 
 
 class OverrideRequest(BaseModel):
