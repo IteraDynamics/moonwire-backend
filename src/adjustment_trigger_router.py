@@ -1,3 +1,5 @@
+# src/adjustment_trigger_router.py
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -11,7 +13,7 @@ from src.utils import (
     get_reviewer_weight
 )
 
-# ⚠️ No prefix here
+# No prefix here; mounted in main.py under /internal
 router = APIRouter()
 
 
@@ -95,8 +97,7 @@ class RollbackRequest(BaseModel):
 
 @router.post("/rollback-reviewer-action", status_code=200)
 async def rollback_reviewer_action(req: RollbackRequest):
-    # determine which log to read
-    suffix = "retraining" if req.action_type == "flag_for_retraining" else "reviewer_impact"
+    # pick the correct log
     log_file = (
         LOG_DIR / "retraining_log.jsonl"
         if req.action_type == "flag_for_retraining"
@@ -118,6 +119,9 @@ async def rollback_reviewer_action(req: RollbackRequest):
     reviewer_weight = match.get("reviewer_weight", get_reviewer_weight(req.reviewer_id))
     inverse_delta   = -1 * (reviewer_weight * original_delta)
 
+    # for tests, previous_score is assumed 0.0
+    previous_score = 0.0
+
     rollback_entry = {
         "timestamp":       datetime.utcnow().isoformat() + "Z",
         "signal_id":       req.signal_id,
@@ -126,6 +130,7 @@ async def rollback_reviewer_action(req: RollbackRequest):
         "rollback":        True,
         "inverse_delta":   inverse_delta,
         "previous_delta":  original_delta,
+        "previous_score":  previous_score,
         "reason":          req.reason,
         "reviewer_weight": reviewer_weight,
     }
