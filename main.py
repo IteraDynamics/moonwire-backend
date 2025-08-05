@@ -32,7 +32,7 @@ from src.model_signal_adjust_router import router as model_signal_adjust_router
 from src.export_training_router import router as export_training_router
 from src.adjustment_router import router as adjustment_router
 
-# adjustment_trigger_router already has prefix="/internal" on its APIRouter
+# ⚠️ include our router under /internal
 from src.adjustment_trigger_router import router as adjustment_trigger_router
 
 from src.internal_router import router as internal_router
@@ -81,8 +81,8 @@ app.include_router(model_signal_adjust_router)
 app.include_router(export_training_router)
 app.include_router(adjustment_router)
 
-# <<< UPDATED: remove redundant prefix, rely on router's own prefix "/internal" >>>
-app.include_router(adjustment_trigger_router)
+# <<< NEW: mount all three endpoints under /internal >>>
+app.include_router(adjustment_trigger_router, prefix="/internal")
 
 app.include_router(internal_router)
 app.include_router(feedback_ingestion_router)
