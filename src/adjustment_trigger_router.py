@@ -13,7 +13,7 @@ from src.utils import (
     get_reviewer_weight
 )
 
-# No prefix here; mounted in main.py under /internal
+# No prefix here; we mount this router under /internal in main.py
 router = APIRouter()
 
 
@@ -97,7 +97,7 @@ class RollbackRequest(BaseModel):
 
 @router.post("/rollback-reviewer-action", status_code=200)
 async def rollback_reviewer_action(req: RollbackRequest):
-    # pick the correct log
+    # Determine which log file to read
     log_file = (
         LOG_DIR / "retraining_log.jsonl"
         if req.action_type == "flag_for_retraining"
@@ -107,9 +107,17 @@ async def rollback_reviewer_action(req: RollbackRequest):
         raise HTTPException(404, f"No log found for action {req.action_type}")
 
     entries = read_jsonl(log_file)
+
+    # Only match entries of the same action type
     match = next(
-        (e for e in reversed(entries)
-         if e["signal_id"] == req.signal_id and e["reviewer_id"] == req.reviewer_id),
+        (
+            e for e in reversed(entries)
+            if (
+                e.get("signal_id") == req.signal_id
+                and e.get("reviewer_id") == req.reviewer_id
+                and e.get("action") == req.action_type
+            )
+        ),
         None
     )
     if not match:
@@ -119,7 +127,7 @@ async def rollback_reviewer_action(req: RollbackRequest):
     reviewer_weight = match.get("reviewer_weight", get_reviewer_weight(req.reviewer_id))
     inverse_delta   = -1 * (reviewer_weight * original_delta)
 
-    # for tests, previous_score is assumed 0.0
+    # Tests assume previous_score is 0.0
     previous_score = 0.0
 
     rollback_entry = {
