@@ -8,7 +8,7 @@ from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
 router = APIRouter(prefix="/internal")
 
 def load_jsonl(path: Path):
-    """Yield each line parsed as JSON dict, or empty if file missing."""
+    """Yield each line parsed as JSON dict, or empty list if file missing."""
     if not path.exists():
         return []
     with path.open() as f:
@@ -36,18 +36,18 @@ async def consensus_status(signal_id: str):
     if not matched:
         raise HTTPException(status_code=404, detail="No retraining entries for this signal")
 
-    # 3) build unique reviewer set + their weights
+    # 3) build unique reviewer set + their weights,
+    #    treating explicit None as missing
     seen = {}
     for e in matched:
         rid = e.get("reviewer_id")
         if rid not in seen:
-            # trust-weight stored on the log entry takes precedence
-            seen[rid] = e.get("reviewer_weight", get_reviewer_weight(rid))
+            raw = e.get("reviewer_weight")
+            # if raw is None or not provided, fallback:
+            weight = raw if raw is not None else get_reviewer_weight(rid)
+            seen[rid] = weight
 
-    reviewers = [
-        {"reviewer_id": rid, "weight": wt}
-        for rid, wt in seen.items()
-    ]
+    reviewers = [{"reviewer_id": rid, "weight": wt} for rid, wt in seen.items()]
 
     total_reviewers = len(reviewers)
     combined_weight = sum(r["weight"] for r in reviewers)
