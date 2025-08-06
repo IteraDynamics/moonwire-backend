@@ -1,56 +1,84 @@
+# src/reviewer_log_utils.py
+
 import json
-import time
 from pathlib import Path
+from time import time
 from typing import Any, Dict, List
 
-from src.paths import REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
+from src.paths import (
+    REVIEWER_IMPACT_LOG_PATH,
+    REVIEWER_SCORES_PATH,
+    RETRAINING_LOG_PATH,
+)
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
     """
-    Read every line of JSONL at `path` into a list of dicts.
-    Returns an empty list if the file does not exist.
+    Read a JSON‐per‐line file and return a list of dicts.
     """
-    if not path.exists():
-        return []
-    with path.open("r") as f:
-        return [json.loads(line) for line in f if line.strip()]
+    entries: List[Dict[str, Any]] = []
+    if path.exists():
+        for line in path.open("r"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
 
-def append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
+def append_jsonl(path: Path, entry: Dict[str, Any]) -> None:
     """
-    Append a JSON-serializable object as one line to `path`.
-    Ensures parent directories exist.
+    Append a single dict as a JSON line to the given file.
     """
+    # ensure parent dir exists
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
-        f.write(json.dumps(obj) + "\n")
+        f.write(json.dumps(entry) + "\n")
 
 def get_reviewer_weight(reviewer_id: str) -> float:
     """
-    Look up a reviewer’s latest score in reviewer_scores.jsonl 
-    and return the corresponding weight multiplier:
-      • score >= 0.75 → 1.25
-      • 0.5 <= score < 0.75 → 1.0
-      • score < 0.5 → 0.75
-    Defaults to 1.0 if no record is found.
+    Look up a reviewer's score in REVIEWER_SCORES_PATH,
+    and map it to the same weight bands you use elsewhere:
+      ≥ 0.75 → 1.25
+      ≥ 0.5  → 1.0
+      else   → 0.75
     """
-    records = load_jsonl(REVIEWER_SCORES_PATH)
-    for rec in records:
-        if rec.get("reviewer_id") == reviewer_id:
-            score = rec.get("score", 0.0)
-            if score >= 0.75:
-                return 1.25
-            if score >= 0.5:
-                return 1.0
-            return 0.75
-    return 1.0
+    # default raw score = 0.0 if missing
+    raw = 0.0
+    if REVIEWER_SCORES_PATH.exists():
+        for entry in load_jsonl(REVIEWER_SCORES_PATH):
+            if entry.get("reviewer_id") == reviewer_id:
+                raw = entry.get("score", 0.0)
+                break
 
-def apply_trust_delta(signal_id: str, delta: float) -> float:
+    if raw >= 0.75:
+        return 1.25
+    if raw >= 0.5:
+        return 1.0
+    return 0.75
+
+def log_reviewer_action(payload: Dict[str, Any]) -> None:
     """
-    Stub for applying a trust-delta to a signal’s stored trust score.
-    Should return the previous trust score before applying the delta.
-    You’ll need to hook this into your actual trust-store.
+    Legacy entrypoint for your internal_router `/reviewer-impact-log`.
+    Just appends the full payload (including any reviewer_weight you added)
+    to the impact log.
     """
-    # TODO: read the signal’s current trust from your datastore,
-    #       apply `delta`, persist the new score, then return the old one.
-    # For now we return 0.0 as the “previous” score:
-    return 0.0
+    append_jsonl(REVIEWER_IMPACT_LOG_PATH, payload)
+
+def log_retrain_flag(payload: Dict[str, Any]) -> None:
+    """
+    Called by your flag-for-retraining router.
+    Automatically stamps a timestamp and writes to RETRAINING_LOG_PATH.
+    """
+    record = payload.copy()
+    record.setdefault("timestamp", time())
+    append_jsonl(RETRAINING_LOG_PATH, record)
+
+def apply_trust_delta(signal_id: str, delta: float) -> None:
+    """
+    Stub for actually applying a trust change to a signal.
+    If you have an in-memory cache or DB, hook it here.
+    For now, this is a no-op.
+    """
+    pass
