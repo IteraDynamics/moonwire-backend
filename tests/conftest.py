@@ -1,26 +1,32 @@
-import os
-import pytest
-import requests
-from fastapi.testclient import TestClient
-from main import app
+# tests/conftest.py
 
-@pytest.fixture(scope="session")
+import shutil
+import json
+import pytest
+from pathlib import Path
+from fastapi.testclient import TestClient
+
+from main import app
+from src.paths import LOGS_DIR  # reuse the same logs dir
+
+# Ensure a clean logs directory for each test run
+@pytest.fixture(autouse=True)
+def cleanup_logs():
+    shutil.rmtree(LOGS_DIR, ignore_errors=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    yield
+    shutil.rmtree(LOGS_DIR, ignore_errors=True)
+
+# HTTP client for FastAPI
+@pytest.fixture
 def client():
+    return TestClient(app)
+
+def append_jsonl(path: Path, entry: dict):
     """
-    If RUN_LOCAL=true (default), use FastAPI TestClient.
-    Otherwise, use requests against BASE_URL.
+    Append a dict as a JSONL line to the given path, 
+    creating parent directories if needed.
     """
-    run_local = os.getenv("RUN_LOCAL", "true").lower() in ("1", "true", "yes")
-    if run_local:
-        return TestClient(app)
-    base = os.getenv("BASE_URL")
-    if not base:
-        pytest.skip("BASE_URL not set for live testing")
-    class LiveClient:
-        def get(self, path, **kwargs):
-            return requests.get(base + path, **kwargs)
-        def post(self, path, **kwargs):
-            return requests.post(base + path, **kwargs)
-        def head(self, path, **kwargs):
-            return requests.head(base + path, **kwargs)
-    return LiveClient()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
