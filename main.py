@@ -45,7 +45,10 @@ from src.signal_review_router import router as signal_review_router
 from src.trust_asset_pulse_router import router as trust_asset_pulse_router
 from src.trust_volatility_spike_router import router as trust_volatility_spike_router
 from src.reviewer_impact_scorer_router import router as reviewer_impact_scorer_router
-from src.consensus_router import router as consensus_router  # ensure consensus router is included
+
+# **NEW** imports for our Task 8/6/25
+from src.consensus_router import router as consensus_router
+from src.rollback_router   import router as rollback_router
 
 app = FastAPI()
 
@@ -90,9 +93,11 @@ app.include_router(trust_intelligence_router)
 app.include_router(signal_review_router)
 app.include_router(trust_asset_pulse_router)
 app.include_router(trust_volatility_spike_router)
-# reviewer-impact routers under /internal
+
+# **NEW** mount our internal-only routers
 app.include_router(reviewer_impact_scorer_router, prefix="/internal")
-app.include_router(consensus_router)  # also mounted under /internal
+app.include_router(consensus_router,           prefix="/internal")
+app.include_router(rollback_router,            prefix="/internal")
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
