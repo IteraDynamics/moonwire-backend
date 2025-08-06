@@ -1,26 +1,8 @@
-# src/consensus_router.py
 from fastapi import APIRouter, HTTPException
-from pathlib import Path
-import json
-
-from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
+from src.reviewer_log_utils import load_jsonl, get_reviewer_weight
+from src.paths import RETRAINING_LOG_PATH
 
 router = APIRouter(prefix="/internal")
-
-def load_jsonl(path: Path):
-    """Yield each line parsed as JSON dict, or empty list if file missing."""
-    if not path.exists():
-        return []
-    with path.open() as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-def get_reviewer_weight(reviewer_id: str) -> float:
-    """Lookup weight in reviewer_scores.jsonl, default to 1.0."""
-    if REVIEWER_SCORES_PATH.exists():
-        for entry in load_jsonl(REVIEWER_SCORES_PATH):
-            if entry.get("reviewer_id") == reviewer_id:
-                return entry.get("score", 1.0)
-    return 1.0
 
 @router.get("/consensus-status/{signal_id}")
 async def consensus_status(signal_id: str):
@@ -36,16 +18,16 @@ async def consensus_status(signal_id: str):
     if not matched:
         raise HTTPException(status_code=404, detail="No retraining entries for this signal")
 
-    # 3) build unique reviewer set + their weights,
-    #    treating explicit None as missing
-    seen = {}
+    # 3) build unique reviewer set + their weights
+    seen: dict[str, float] = {}
     for e in matched:
         rid = e.get("reviewer_id")
-        if rid not in seen:
-            raw = e.get("reviewer_weight")
-            # if raw is None or not provided, fallback:
-            weight = raw if raw is not None else get_reviewer_weight(rid)
-            seen[rid] = weight
+        if rid and rid not in seen:
+            # weight on the log takes precedence; fallback to lookup
+            wt = e.get("reviewer_weight")
+            if wt is None:
+                wt = get_reviewer_weight(rid)
+            seen[rid] = wt
 
     reviewers = [{"reviewer_id": rid, "weight": wt} for rid, wt in seen.items()]
 
