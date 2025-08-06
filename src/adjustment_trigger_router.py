@@ -17,10 +17,10 @@ def get_adaptive_threshold(reviewer_weight: float) -> float:
     """
     Returns an adaptive suppression threshold based on reviewer_weight.
     """
-    if reviewer_weight >= 1.2:
-        return 0.6   # high‐trust reviewers need less delta
+    if reviewer_weight >= 1.25:
+        return 0.4   # high‐trust reviewers unsuppress easier
     elif reviewer_weight <= 0.85:
-        return 0.8   # low‐trust reviewers need more delta
+        return 0.8   # low‐trust reviewers need stronger justification
     else:
         return 0.7   # default
 
@@ -34,14 +34,12 @@ class RetrainRequest(BaseModel):
 
 @router.post("/flag-for-retraining", status_code=200)
 async def flag_for_retraining(req: RetrainRequest):
-    # determine reviewer_id
     reviewer = req.reviewer_id or "unknown"
-    # lookup weight
     weight = get_reviewer_weight(reviewer)
-    # ensure directory & file
+
     os.makedirs(LOGS_DIR, exist_ok=True)
     RETRAINING_LOG_PATH.touch(exist_ok=True)
-    # build entry
+
     entry = {
         "timestamp":       time.time(),
         "signal_id":       req.signal_id,
@@ -50,12 +48,13 @@ async def flag_for_retraining(req: RetrainRequest):
         "note":            req.note,
         "reviewer_weight": weight,
     }
-    # append
+
     try:
         with RETRAINING_LOG_PATH.open("a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
     return {"status": "queued", "signal_id": req.signal_id, "reviewer_weight": weight}
 
 
@@ -69,28 +68,24 @@ class OverrideRequest(BaseModel):
 
 @router.post("/override-suppression", status_code=200)
 async def override_suppression(req: OverrideRequest):
-    """
-    Applies a manual override to a suppressed signal.
-    """
     reviewer = req.reviewer_id or "unknown"
     weight = get_reviewer_weight(reviewer)
-    # compute weighted delta & new score
+
     weighted_delta = req.trust_delta * weight
-    old_score = 0.0  # placeholder; replace with real lookup if you have one
+    old_score = 0.0
     new_score = old_score + weighted_delta
-    # pick adaptive threshold
+
     threshold = get_adaptive_threshold(weight)
     unsuppressed = new_score >= threshold
 
-    # ensure logs dir & file if you're also writing JSONL here...
     os.makedirs(LOGS_DIR, exist_ok=True)
-    # (your existing JSONL‐append code goes here)
+    # (your existing JSONL append for override log here)
 
     return {
-        "signal_id":      req.signal_id,
+        "signal_id":       req.signal_id,
         "reviewer_weight": weight,
         "new_trust_score": new_score,
-        "unsuppressed":   unsuppressed,
+        "unsuppressed":    unsuppressed,
     }
 
 
@@ -102,11 +97,6 @@ def load_jsonl(path: Path):
 
 
 def get_reviewer_weight(reviewer_id: str) -> float:
-    """
-    Fetches reviewer score from reviewer_scores.jsonl (field "score"),
-    and maps it to a weight multiplier (1.25 / 1.0 / 0.75).
-    """
-    # default raw score = 0.0 if missing
     raw = 0.0
     if REVIEWER_SCORES_PATH.exists():
         for e in load_jsonl(REVIEWER_SCORES_PATH):
