@@ -1,57 +1,60 @@
 # src/consensus_router.py
-
-import json
 from fastapi import APIRouter, HTTPException
 from pathlib import Path
-from typing import List, Dict
+import json
 
-from src.paths import LOGS_DIR, RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
+from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
 
 router = APIRouter(prefix="/internal")
 
-@router.get("/consensus-status/{signal_id}", status_code=200)
-def get_consensus_status(signal_id: str):
+def load_jsonl(path: Path):
+    """Yield each line parsed as JSON dict, or empty if file missing."""
+    if not path.exists():
+        return []
+    with path.open() as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+def get_reviewer_weight(reviewer_id: str) -> float:
+    """Lookup weight in reviewer_scores.jsonl, default to 1.0."""
+    if REVIEWER_SCORES_PATH.exists():
+        for entry in load_jsonl(REVIEWER_SCORES_PATH):
+            if entry.get("reviewer_id") == reviewer_id:
+                return entry.get("score", 1.0)
+    return 1.0
+
+@router.get("/consensus-status/{signal_id}")
+async def consensus_status(signal_id: str):
     """
-    Returns how many unique reviewers have flagged a signal, 
-    their weights, and the combined total.
+    Returns how many distinct reviewers have flagged this signal_id
+    for retraining, and their combined trust-weight.
     """
-    log_path = Path(RETRAINING_LOG_PATH)
-    if not log_path.exists():
-        raise HTTPException(404, detail="No retraining log found")
+    # 1) load all retraining entries
+    entries = load_jsonl(RETRAINING_LOG_PATH)
 
-    # 1) Read retraining entries
-    reviewers: Dict[str, float] = {}
-    with open(log_path, "r") as f:
-        for line in f:
-            entry = json.loads(line)
-            if entry.get("signal_id") != signal_id:
-                continue
-            rid = entry["reviewer_id"]
-            reviewers[rid] = entry.get("reviewer_weight", None)  # we'll fill fallback next
+    # 2) filter for this signal_id
+    matched = [e for e in entries if e.get("signal_id") == signal_id]
+    if not matched:
+        raise HTTPException(status_code=404, detail="No retraining entries for this signal")
 
-    if not reviewers:
-        raise HTTPException(404, detail="No entries for this signal_id")
+    # 3) build unique reviewer set + their weights
+    seen = {}
+    for e in matched:
+        rid = e.get("reviewer_id")
+        if rid not in seen:
+            # trust-weight stored on the log entry takes precedence
+            seen[rid] = e.get("reviewer_weight", get_reviewer_weight(rid))
 
-    # 2) Load reviewer scores for fallback
-    scores_path = Path(REVIEWER_SCORES_PATH)
-    scores = {}
-    if scores_path.exists():
-        with open(scores_path, "r") as f:
-            for line in f:
-                rec = json.loads(line)
-                scores[rec["reviewer_id"]] = rec.get("score", 1.0)
+    reviewers = [
+        {"reviewer_id": rid, "weight": wt}
+        for rid, wt in seen.items()
+    ]
 
-    # 3) Build response list, applying fallback=1.0
-    resp_reviewers: List[Dict[str, float]] = []
-    total_weight = 0.0
-    for rid, weight in reviewers.items():
-        w = weight if weight is not None else scores.get(rid, 1.0)
-        resp_reviewers.append({"reviewer_id": rid, "weight": w})
-        total_weight += w
+    total_reviewers = len(reviewers)
+    combined_weight = sum(r["weight"] for r in reviewers)
 
     return {
         "signal_id":       signal_id,
-        "total_reviewers": len(resp_reviewers),
-        "combined_weight": total_weight,
-        "reviewers":       resp_reviewers,
+        "total_reviewers": total_reviewers,
+        "combined_weight": combined_weight,
+        "reviewers":       reviewers,
     }
