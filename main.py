@@ -7,6 +7,10 @@ from src.paths import LOGS_DIR, REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
 # Ensure logging directory exists at boot
 os.makedirs(LOGS_DIR, exist_ok=True)
 
+# Ensure the log files themselves exist (empty if new)
+REVIEWER_IMPACT_LOG_PATH.touch(exist_ok=True)
+REVIEWER_SCORES_PATH.touch(exist_ok=True)
+
 print("📁 Log directory initialized:")
 print(f"  - Impact log path: {REVIEWER_IMPACT_LOG_PATH}")
 print(f"  - Scores path:     {REVIEWER_SCORES_PATH}")
@@ -36,13 +40,12 @@ from src.internal_router import router as internal_router
 from src.feedback_ingestion_router import router as feedback_ingestion_router
 from src.high_disagreement_router import router as high_disagreement_router
 from src.feedback_insights_router import router as feedback_insights_router
-from src.feedback_prediction_router import router as feedback_prediction_router
 from src.internal_trusted_signals_router import router as trust_intelligence_router
 from src.signal_review_router import router as signal_review_router
 from src.trust_asset_pulse_router import router as trust_asset_pulse_router
 from src.trust_volatility_spike_router import router as trust_volatility_spike_router
 from src.reviewer_impact_scorer_router import router as reviewer_impact_scorer_router
-from src.consensus_router import router as consensus_router
+from src.consensus_router import router as consensus_router  # ensure consensus router is included
 
 app = FastAPI()
 
@@ -78,7 +81,7 @@ app.include_router(feedback_prediction_router)
 app.include_router(model_signal_adjust_router)
 app.include_router(export_training_router)
 app.include_router(adjustment_router)
-app.include_router(adjustment_trigger_router, prefix="/internal")
+app.include_router(adjustment_trigger_router)
 app.include_router(internal_router)
 app.include_router(feedback_ingestion_router)
 app.include_router(high_disagreement_router)
@@ -87,13 +90,14 @@ app.include_router(trust_intelligence_router)
 app.include_router(signal_review_router)
 app.include_router(trust_asset_pulse_router)
 app.include_router(trust_volatility_spike_router)
+# reviewer-impact routers under /internal
 app.include_router(reviewer_impact_scorer_router, prefix="/internal")
-app.include_router(consensus_router)
+app.include_router(consensus_router)  # also mounted under /internal
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
     return {"status": "ok"}
-    
+
 @app.get("/debug/routes")
 def list_routes():
     return [{"path": route.path, "methods": route.methods} for route in app.routes]
