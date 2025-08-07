@@ -45,6 +45,7 @@ from src.signal_review_router import router as signal_review_router
 from src.trust_asset_pulse_router import router as trust_asset_pulse_router
 from src.trust_volatility_spike_router import router as trust_volatility_spike_router
 from src.reviewer_impact_scorer_router import router as reviewer_impact_scorer_router
+from src.consensus_dashboard_router import router as consensus_dashboard_router
 
 app = FastAPI()
 
@@ -80,6 +81,7 @@ app.include_router(feedback_prediction_router)
 app.include_router(model_signal_adjust_router)
 app.include_router(export_training_router)
 app.include_router(adjustment_router)
+app.include_router(consensus_dashboard_router)
 
 # <<< NEW: mount all three endpoints under /internal >>>
 app.include_router(adjustment_trigger_router, prefix="/internal")
