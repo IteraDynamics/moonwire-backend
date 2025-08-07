@@ -1,60 +1,65 @@
+# src/rollback_router.py
+
 from fastapi import APIRouter, HTTPException
-from typing import Dict, Any
+from pydantic import BaseModel
+from typing import Optional
+from time import time
+
+from src.reviewer_log_utils import (
+    load_jsonl,
+    get_signal_trust,
+    apply_trust_delta,
+    append_jsonl,
+)
 from src.paths import REVIEWER_IMPACT_LOG_PATH
-from src.reviewer_log_utils import load_jsonl, append_jsonl, get_reviewer_weight
 
-router = APIRouter()
+router = APIRouter(prefix="/internal")
 
+class RollbackRequest(BaseModel):
+    signal_id:   str
+    reviewer_id: str
+    action_type: str            # e.g. "override_suppression" or "flag_for_retraining"
+    reason:      str
+    note:        Optional[str] = None
 
 @router.post("/rollback-reviewer-action", status_code=200)
-async def rollback_reviewer_action(payload: Dict[str, Any]):
-    """
-    Reverse the effect of a previous reviewer action (override or flag-for-retraining).
-    """
-    signal_id = payload.get("signal_id")
-    reviewer_id = payload.get("reviewer_id")
-    action_type = payload.get("action_type")
-    reason = payload.get("reason")
-
-    # 1) load all impact log entries
+async def rollback_reviewer_action(req: RollbackRequest):
+    # find last matching entry in the impact log
     entries = load_jsonl(REVIEWER_IMPACT_LOG_PATH)
-
-    # 2) find the most recent matching entry
-    matched = [
-        e
-        for e in entries
-        if e.get("signal_id") == signal_id
-        and e.get("reviewer_id") == reviewer_id
-        and e.get("action") == action_type
+    matching = [
+        e for e in entries
+        if e.get("signal_id") == req.signal_id
+        and e.get("reviewer_id") == req.reviewer_id
+        and e.get("action") == req.action_type
     ]
-    if not matched:
+    if not matching:
         raise HTTPException(status_code=404, detail="No matching entry to rollback")
 
-    orig = matched[-1]  # last‐in
+    orig = matching[-1]
+    inverse_delta = -1 * (orig["trust_delta"] * orig["reviewer_weight"])
 
-    # 3) compute inverse delta
-    raw_delta = orig.get("trust_delta", 0.0)
-    reviewer_weight = orig.get("reviewer_weight")
-    if reviewer_weight is None:
-        reviewer_weight = get_reviewer_weight(reviewer_id)
-    inverse_delta = -1 * (reviewer_weight * raw_delta)
+    old_score = get_signal_trust(req.signal_id)
+    apply_trust_delta(req.signal_id, inverse_delta)
+    new_score = old_score + inverse_delta
 
-    # 4) assume previous_score is zero if not logged
-    previous_score = orig.get("previous_score", 0.0)
-    new_score = previous_score + inverse_delta
-
-    # 5) append rollback record
-    record = {
-        "signal_id":      signal_id,
-        "reviewer_id":    reviewer_id,
-        "action":         action_type,
-        "reason":         reason,
-        "rollback":       True,
-        "inverse_delta":  inverse_delta,
-        "previous_score": previous_score,
-        "new_score":      new_score,
-        # timestamp will be added by your log util if you want
+    # record the rollback as its own log entry
+    payload = {
+        "signal_id":        req.signal_id,
+        "reviewer_id":      req.reviewer_id,
+        "action":           req.action_type,
+        "inverse_delta":    inverse_delta,
+        "previous_score":   old_score,
+        "timestamp":        time(),
+        "rollback":         True,
+        "reason":           req.reason,
+        "note":             req.note,
     }
-    append_jsonl(REVIEWER_IMPACT_LOG_PATH, record)
+    append_jsonl(REVIEWER_IMPACT_LOG_PATH, payload)
 
-    return record
+    return {
+        "signal_id":       req.signal_id,
+        "inverse_delta":   inverse_delta,
+        "previous_score":  old_score,
+        "new_trust_score": new_score,
+        "rollback":        True,
+    }
