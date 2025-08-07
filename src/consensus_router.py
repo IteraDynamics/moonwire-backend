@@ -1,11 +1,12 @@
 # src/consensus_router.py
 
 import json
+import time
 from typing import List, Dict
 from pathlib import Path
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
 
-from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
+from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH, RETRAINING_TRIGGERED_LOG_PATH
 
 router = APIRouter()
 
@@ -15,6 +16,10 @@ def load_jsonl(path: Path):
     with open(path, "r") as f:
         return [json.loads(line) for line in f if line.strip()]
 
+def append_jsonl(path: Path, obj: dict):
+    with open(path, "a") as f:
+        f.write(json.dumps(obj) + "\n")
+
 def map_score_to_weight(score: float) -> float:
     if score >= 0.75:
         return 1.25
@@ -23,8 +28,7 @@ def map_score_to_weight(score: float) -> float:
     else:
         return 0.75
 
-@router.get("/consensus-status/{signal_id}")
-def get_consensus_status(signal_id: str):
+def get_consensus_status(signal_id: str) -> dict:
     retraining_entries = load_jsonl(RETRAINING_LOG_PATH)
     matching = [e for e in retraining_entries if e.get("signal_id") == signal_id]
 
@@ -60,4 +64,48 @@ def get_consensus_status(signal_id: str):
         "total_reviewers": len(reviewers),
         "combined_weight": round(combined_weight, 2),
         "reviewers": reviewers
+    }
+
+@router.get("/consensus-status/{signal_id}")
+def get_status(signal_id: str):
+    return get_consensus_status(signal_id)
+
+@router.post("/evaluate-consensus-retraining")
+def evaluate_consensus_retraining(
+    payload: dict = Body(...),
+    threshold: float = 2.5
+):
+    signal_id = payload.get("signal_id")
+    if not signal_id:
+        raise HTTPException(status_code=400, detail="Missing signal_id in request body")
+
+    try:
+        consensus = get_consensus_status(signal_id)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return {
+                "triggered": False,
+                "total_weight": 0.0,
+                "reviewers": []
+            }
+        raise
+
+    total = consensus["combined_weight"]
+
+    if total >= threshold:
+        trigger_entry = {
+            "signal_id": signal_id,
+            "timestamp": time.time(),
+            "total_weight": total,
+            "reviewers": consensus["reviewers"],
+        }
+        append_jsonl(RETRAINING_TRIGGERED_LOG_PATH, trigger_entry)
+        return {
+            "triggered": True,
+            **consensus
+        }
+
+    return {
+        "triggered": False,
+        **consensus
     }
