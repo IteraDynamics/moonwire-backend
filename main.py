@@ -84,7 +84,7 @@ app.include_router(adjustment_router)
 # <<< NEW: mount all three endpoints under /internal >>>
 app.include_router(adjustment_trigger_router, prefix="/internal")
 app.include_router(reviewer_impact_scorer_router, prefix="/internal")
-app.include_router(consensus_router, prefix="/internal")  # ✅ NEW
+app.include_router(consensus_router)
 
 app.include_router(internal_router)
 app.include_router(feedback_ingestion_router)
