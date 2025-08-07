@@ -1,7 +1,6 @@
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from src.paths import LOGS_DIR, REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
 
 # Ensure logging directory and files exist at boot
@@ -13,6 +12,7 @@ print("📁 Log directory initialized:")
 print(f"  - Impact log path: {REVIEWER_IMPACT_LOG_PATH}")
 print(f"  - Scores path:     {REVIEWER_SCORES_PATH}")
 
+# -- all your existing routers/imports --
 from src.twitter_router import router as twitter_router
 from src.news_router import router as news_router
 from src.composite_router import router as composite_router
@@ -42,7 +42,7 @@ from src.signal_review_router import router as signal_review_router
 from src.trust_asset_pulse_router import router as trust_asset_pulse_router
 from src.trust_volatility_spike_router import router as trust_volatility_spike_router
 from src.reviewer_impact_scorer_router import router as reviewer_impact_scorer_router
-from src.consensus_router import router as consensus_router   # <-- import it here
+from src.consensus_router import router as consensus_router
 
 app = FastAPI()
 
@@ -55,10 +55,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load mocks
+# Load mock cache
 load_mock_cache_data()
 
-# Public routers
+# Public endpoints
 app.include_router(twitter_router)
 app.include_router(news_router)
 app.include_router(composite_router)
@@ -87,9 +87,9 @@ app.include_router(signal_review_router)
 app.include_router(trust_asset_pulse_router)
 app.include_router(trust_volatility_spike_router)
 
-# Internal routers, all under /internal
+# **Internal endpoints all under `/internal`**
 app.include_router(reviewer_impact_scorer_router, prefix="/internal")
-app.include_router(consensus_router,               prefix="/internal")  # <-- mount here
+app.include_router(consensus_router,               prefix="/internal")
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
