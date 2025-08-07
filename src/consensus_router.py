@@ -1,109 +1,75 @@
 # src/consensus_router.py
 
 import json
-import time
-from pathlib import Path
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import List, Dict
+from pathlib import Path
+from typing import List, Dict, Optional
+from datetime import datetime
 
-import src.paths as paths  # dynamic import to support monkeypatching in tests
+from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
 
-router = APIRouter(prefix="/internal")
+CONSENSUS_THRESHOLD = 2.5
 
-class EvaluateRequest(BaseModel):
-    signal_id: str
+router = APIRouter()
 
-DEFAULT_THRESHOLD = 2.5
 
-def load_jsonl(path: Path) -> List[dict]:
-    if not path.exists():
-        return []
-    with path.open("r") as f:
-        return [json.loads(line) for line in f if line.strip()]
+@router.get("/internal/consensus-debug/{signal_id}")
+def consensus_debug(signal_id: str):
+    log_path = Path(RETRAINING_LOG_PATH)
+    if not log_path.exists():
+        raise HTTPException(status_code=404, detail="No retraining log found")
 
-def get_consensus_status(signal_id: str, raise_on_empty: bool = False):
-    entries = load_jsonl(paths.RETRAINING_LOG_PATH)
-    matching = [e for e in entries if e.get("signal_id") == signal_id]
+    # Load reviewer scores (fallback)
+    scores_path = Path(REVIEWER_SCORES_PATH)
+    fallback_scores = {}
+    if scores_path.exists():
+        with open(scores_path, "r") as f:
+            for line in f:
+                rec = json.loads(line)
+                fallback_scores[rec["reviewer_id"]] = rec.get("score", 1.0)
 
-    if not matching:
-        if raise_on_empty:
-            raise HTTPException(404, detail="No entries for this signal_id")
-        return {
-            "signal_id": signal_id,
-            "total_reviewers": 0,
-            "combined_weight": 0.0,
-            "reviewers": []
-        }
-
-    seen = set()
-    deduped = []
-    for entry in matching:
-        rid = entry["reviewer_id"]
-        if rid not in seen:
-            seen.add(rid)
-            deduped.append(entry)
-
-    scores = {}
-    for s in load_jsonl(paths.REVIEWER_SCORES_PATH):
-        scores[s["reviewer_id"]] = s.get("score", 1.0)
-
-    def compute_weight(entry):
-        if "reviewer_weight" in entry:
-            return entry["reviewer_weight"]
-        score = scores.get(entry["reviewer_id"])
-        if score is None:
-            return 1.0
-        if score >= 0.75:
-            return 1.25
-        elif score >= 0.5:
-            return 1.0
-        else:
-            return 0.75
-
-    reviewers = []
+    # Parse log entries for this signal
+    all_flags = []
+    seen_reviewers = set()
+    counted_reviewers = []
     total_weight = 0.0
-    for entry in deduped:
-        weight = compute_weight(entry)
-        reviewers.append({
-            "reviewer_id": entry["reviewer_id"],
-            "weight": weight
-        })
-        total_weight += weight
+
+    with open(log_path, "r") as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if entry.get("signal_id") != signal_id:
+                continue
+
+            reviewer_id = entry["reviewer_id"]
+            weight = entry.get("reviewer_weight")
+            if weight is None:
+                weight = fallback_scores.get(reviewer_id, 1.0)
+
+            is_duplicate = reviewer_id in seen_reviewers
+            all_flags.append({
+                "reviewer_id": reviewer_id,
+                "reviewer_weight": weight,
+                "timestamp": datetime.fromtimestamp(entry["timestamp"]).isoformat(),
+                "duplicate": is_duplicate
+            })
+
+            if not is_duplicate:
+                seen_reviewers.add(reviewer_id)
+                counted_reviewers.append(reviewer_id)
+                total_weight += weight
+
+    if not all_flags:
+        raise HTTPException(status_code=404, detail="No entries for this signal_id")
 
     return {
         "signal_id": signal_id,
-        "total_reviewers": len(reviewers),
-        "combined_weight": total_weight,
-        "reviewers": reviewers
+        "all_flags": all_flags,
+        "counted_reviewers": counted_reviewers,
+        "total_weight_used": total_weight,
+        "threshold": CONSENSUS_THRESHOLD,
+        "triggered": total_weight >= CONSENSUS_THRESHOLD
     }
-
-@router.post("/evaluate-consensus-retraining")
-def evaluate_consensus(req: EvaluateRequest):
-    threshold = DEFAULT_THRESHOLD
-    consensus = get_consensus_status(req.signal_id, raise_on_empty=False)
-
-    total_weight = consensus["combined_weight"]
-    reviewers = consensus["reviewers"]
-    triggered = total_weight >= threshold
-
-    if triggered:
-        log_entry = {
-            "signal_id": req.signal_id,
-            "total_weight": total_weight,
-            "threshold": threshold,
-            "reviewers": reviewers,
-            "timestamp": time.time(),
-        }
-        with open(paths.RETRAINING_TRIGGERED_LOG_PATH, "a") as f:
-            f.write(json.dumps(log_entry) + "\n")
-
-    return {
-        "triggered": triggered,
-        "total_weight": total_weight,
-        "reviewers": reviewers
-    }
-
-@router.get("/consensus-status/{signal_id}", status_code=200)
-def get_consensus_status_route(signal_id: str):
-    return get_consensus_status(signal_id, raise_on_empty=True)
