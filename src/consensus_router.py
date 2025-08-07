@@ -1,5 +1,3 @@
-# src/consensus_router.py
-
 import json
 from fastapi import APIRouter, HTTPException
 from pathlib import Path
@@ -13,7 +11,7 @@ CONSENSUS_THRESHOLD = 2.5
 router = APIRouter(prefix="/internal")
 
 
-@router.get("/internal/consensus-debug/{signal_id}")
+@router.get("/consensus-debug/{signal_id}")  # ✅ FIXED: Removed second /internal
 def consensus_debug(signal_id: str):
     log_path = Path(RETRAINING_LOG_PATH)
     if not log_path.exists():
