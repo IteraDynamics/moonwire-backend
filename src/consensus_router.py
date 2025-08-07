@@ -1,17 +1,13 @@
 # src/consensus_router.py
 
 import json
+import time
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict
-import time
 
-from src.paths import (
-    RETRAINING_LOG_PATH,
-    REVIEWER_SCORES_PATH,
-    RETRAINING_TRIGGERED_LOG_PATH,
-)
+import src.paths as paths  # Dynamically loaded to support monkeypatching in tests
 
 router = APIRouter(prefix="/internal")
 
@@ -27,7 +23,7 @@ def load_jsonl(path: Path) -> List[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 def get_consensus_status(signal_id: str, raise_on_empty: bool = False):
-    entries = load_jsonl(RETRAINING_LOG_PATH)
+    entries = load_jsonl(paths.RETRAINING_LOG_PATH)
     matching = [e for e in entries if e.get("signal_id") == signal_id]
     if not matching:
         if raise_on_empty:
@@ -43,7 +39,7 @@ def get_consensus_status(signal_id: str, raise_on_empty: bool = False):
             deduped.append(entry)
 
     scores = {}
-    for s in load_jsonl(REVIEWER_SCORES_PATH):
+    for s in load_jsonl(paths.REVIEWER_SCORES_PATH):
         scores[s["reviewer_id"]] = s.get("score", 1.0)
 
     def compute_weight(entry):
@@ -93,7 +89,7 @@ def evaluate_consensus(req: EvaluateRequest):
             "reviewers": reviewers,
             "timestamp": time.time(),
         }
-        with open(RETRAINING_TRIGGERED_LOG_PATH, "a") as f:
+        with open(paths.RETRAINING_TRIGGERED_LOG_PATH, "a") as f:
             f.write(json.dumps(log_entry) + "\n")
 
     return {
