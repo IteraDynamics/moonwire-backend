@@ -6,21 +6,19 @@ from src.reviewer_log_utils import load_jsonl, get_reviewer_weight
 
 router = APIRouter()
 
-def _get_raw_score(reviewer_id: str) -> float:
+def _get_all_scores() -> list[dict]:
     """
-    Look up a reviewer’s raw score in REVIEWER_SCORES_PATH.
-    Returns 0.0 if no entry is found.
+    Load all raw score entries (reviewer_id + score) from the scores file.
     """
-    for entry in load_jsonl(REVIEWER_SCORES_PATH):
-        if entry.get("reviewer_id") == reviewer_id:
-            return entry.get("score", 0.0)
-    return 0.0
+    if not REVIEWER_SCORES_PATH.exists():
+        return []
+    return load_jsonl(REVIEWER_SCORES_PATH)
 
 @router.get("/consensus-status/{signal_id}")
 async def consensus_status(signal_id: str):
     """
     Returns how many distinct reviewers have flagged this signal_id
-    for retraining, and their combined trust‐weight.
+    for retraining, and their combined trust-weight.
     """
     # 1) load all retraining entries
     entries = load_jsonl(RETRAINING_LOG_PATH)
@@ -30,22 +28,32 @@ async def consensus_status(signal_id: str):
     if not matched:
         raise HTTPException(status_code=404, detail="No retraining entries for this signal")
 
-    # 3) build unique reviewer set + their weights
+    # 3) load scores just once
+    all_scores = _get_all_scores()
+    has_any_scores = len(all_scores) > 0
+
+    # 4) build unique reviewer set + their weights
     seen: dict[str, float] = {}
     for e in matched:
         rid = e.get("reviewer_id")
         if rid in seen:
             continue
 
+        # trust-weight explicitly stored on the log entry takes precedence
         wt = e.get("reviewer_weight")
         if wt is None:
-            # first try raw score (to satisfy tests expecting raw weight)
-            raw = _get_raw_score(rid)
-            if raw and raw != 0.0:
-                wt = raw
+            # if no scores at all, default to 1.0
+            if not has_any_scores:
+                wt = 1.0
             else:
-                # fallback to banded weight if no raw score
-                wt = get_reviewer_weight(rid)
+                # try to find a raw score for this reviewer
+                raw_match = next((r for r in all_scores if r.get("reviewer_id") == rid), None)
+                if raw_match:
+                    wt = raw_match.get("score", 1.0)
+                else:
+                    # no entry for this reviewer but scores exist → use banded weight
+                    wt = get_reviewer_weight(rid)
+
         seen[rid] = wt
 
     reviewers = [{"reviewer_id": rid, "weight": wt} for rid, wt in seen.items()]
