@@ -34,7 +34,13 @@ def read_trigger_log():
             return [json.loads(line) for line in f if line.strip()]
     return []
 
+def clear_logs():
+    RETRAINING_LOG_PATH.write_text("")
+    REVIEWER_SCORES_PATH.write_text("")
+    RETRAINING_TRIGGERED_LOG_PATH.write_text("")
+
 def test_trigger_not_met(client):
+    clear_logs()
     write_flag("sig-low", "r1", weight=1.0)
     r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-low"})
     assert r.status_code == 200
@@ -42,6 +48,7 @@ def test_trigger_not_met(client):
     assert r.json()["total_weight"] == 1.0
 
 def test_trigger_met(client):
+    clear_logs()
     write_flag("sig-high", "r1", weight=1.0)
     write_flag("sig-high", "r2", weight=1.25)
     write_flag("sig-high", "r3", weight=0.75)
@@ -51,6 +58,7 @@ def test_trigger_met(client):
     assert r.json()["total_weight"] == pytest.approx(3.0)
 
 def test_mixed_scores_and_weights(client):
+    clear_logs()
     write_score("rA", 0.82)  # → 1.25
     write_score("rB", 0.60)  # → 1.0
     write_score("rC", 0.40)  # → 0.75
@@ -63,6 +71,7 @@ def test_mixed_scores_and_weights(client):
     assert r.json()["total_weight"] == pytest.approx(3.0)
 
 def test_no_reviewers_returns_triggered_false(client):
+    clear_logs()
     r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-none"})
     assert r.status_code == 200
     assert r.json()["triggered"] is False
@@ -70,6 +79,7 @@ def test_no_reviewers_returns_triggered_false(client):
     assert r.json()["reviewers"] == []
 
 def test_log_written_on_trigger(client):
+    clear_logs()
     write_flag("sig-log", "r1", weight=2.6)
     r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-log"})
     assert r.status_code == 200
