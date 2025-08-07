@@ -14,7 +14,7 @@ def clean_logs(tmp_path, monkeypatch):
     # point LOG_DIR to a temp dir for each test
     monkeypatch.setattr("src.utils.LOG_DIR", tmp_path / "logs")
     p = tmp_path / "logs"
-    p.mkdir()
+    p.mkdir(exist_ok=True)
     yield
 
 def write_override(signal_id, reviewer_id, trust_delta, reviewer_weight):
