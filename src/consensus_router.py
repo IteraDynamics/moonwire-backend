@@ -26,13 +26,14 @@ def load_jsonl(path: Path) -> List[dict]:
     with path.open("r") as f:
         return [json.loads(line) for line in f if line.strip()]
 
-def get_consensus_status(signal_id: str):
+def get_consensus_status(signal_id: str, raise_on_empty: bool = False):
     entries = load_jsonl(RETRAINING_LOG_PATH)
     matching = [e for e in entries if e.get("signal_id") == signal_id]
     if not matching:
+        if raise_on_empty:
+            raise HTTPException(404, detail="No entries for this signal_id")
         return {"signal_id": signal_id, "total_reviewers": 0, "combined_weight": 0.0, "reviewers": []}
 
-    # Deduplicate by reviewer_id
     seen = set()
     deduped = []
     for entry in matching:
@@ -41,7 +42,6 @@ def get_consensus_status(signal_id: str):
             seen.add(rid)
             deduped.append(entry)
 
-    # Load scores
     scores = {}
     for s in load_jsonl(REVIEWER_SCORES_PATH):
         scores[s["reviewer_id"]] = s.get("score", 1.0)
@@ -79,15 +79,7 @@ def get_consensus_status(signal_id: str):
 @router.post("/evaluate-consensus-retraining")
 def evaluate_consensus(req: EvaluateRequest):
     threshold = DEFAULT_THRESHOLD
-    consensus = get_consensus_status(req.signal_id)
-
-    # Always return full structure
-    if consensus["total_reviewers"] == 0:
-        return {
-            "triggered": False,
-            "total_weight": 0.0,
-            "reviewers": []
-        }
+    consensus = get_consensus_status(req.signal_id, raise_on_empty=False)
 
     total_weight = consensus["combined_weight"]
     reviewers = consensus["reviewers"]
@@ -112,7 +104,4 @@ def evaluate_consensus(req: EvaluateRequest):
 
 @router.get("/consensus-status/{signal_id}", status_code=200)
 def get_consensus_status_route(signal_id: str):
-    consensus = get_consensus_status(signal_id)
-    if consensus["total_reviewers"] == 0:
-        raise HTTPException(404, detail="No entries for this signal_id")
-    return consensus
+    return get_consensus_status(signal_id, raise_on_empty=True)
