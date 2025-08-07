@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
-from src.reviewer_impact_scorer_router import get_reviewer_weight
+from src.reviewer_log_utils import get_reviewer_weight
 from src.reviewer_log_utils import load_jsonl
 
 router = APIRouter()
