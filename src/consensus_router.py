@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict
 
-import src.paths as paths  # Dynamically loaded to support monkeypatching in tests
+import src.paths as paths  # dynamic import to support monkeypatching in tests
 
 router = APIRouter(prefix="/internal")
 
@@ -25,10 +25,16 @@ def load_jsonl(path: Path) -> List[dict]:
 def get_consensus_status(signal_id: str, raise_on_empty: bool = False):
     entries = load_jsonl(paths.RETRAINING_LOG_PATH)
     matching = [e for e in entries if e.get("signal_id") == signal_id]
+
     if not matching:
         if raise_on_empty:
             raise HTTPException(404, detail="No entries for this signal_id")
-        return {"signal_id": signal_id, "total_reviewers": 0, "combined_weight": 0.0, "reviewers": []}
+        return {
+            "signal_id": signal_id,
+            "total_reviewers": 0,
+            "combined_weight": 0.0,
+            "reviewers": []
+        }
 
     seen = set()
     deduped = []
