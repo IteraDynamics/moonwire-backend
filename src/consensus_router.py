@@ -10,7 +10,7 @@ from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
 
 CONSENSUS_THRESHOLD = 2.5
 
-router = APIRouter()
+router = APIRouter(prefix="/internal")
 
 
 @router.get("/internal/consensus-debug/{signal_id}")
