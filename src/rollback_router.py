@@ -3,7 +3,7 @@ from typing import Dict, Any
 from src.paths import REVIEWER_IMPACT_LOG_PATH
 from src.reviewer_log_utils import load_jsonl, append_jsonl, get_reviewer_weight
 
-router = APIRouter(prefix="/internal")
+router = APIRouter()
 
 
 @router.post("/rollback-reviewer-action", status_code=200)
