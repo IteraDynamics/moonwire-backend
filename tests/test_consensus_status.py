@@ -5,7 +5,11 @@ import time
 from pathlib import Path
 import pytest
 
-from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
+from src.paths import (
+    RETRAINING_LOG_PATH,
+    REVIEWER_SCORES_PATH,
+    RETRAINING_TRIGGERED_LOG_PATH,
+)
 
 def append_jsonl(path: Path, obj: dict):
     with path.open("a") as f:
@@ -24,43 +28,52 @@ def write_flag(signal_id: str, reviewer_id: str, weight: float = None):
 def write_score(reviewer_id: str, score: float):
     append_jsonl(REVIEWER_SCORES_PATH, {"reviewer_id": reviewer_id, "score": score})
 
-def test_single_reviewer(client):
-    write_flag("sig-123", "r1", weight=1.1)
-    res = client.get("/internal/consensus-status/sig-123")
-    assert res.status_code == 200
-    assert res.json()["combined_weight"] == 1.1
-    assert res.json()["total_reviewers"] == 1
+def read_trigger_log():
+    if RETRAINING_TRIGGERED_LOG_PATH.exists():
+        with RETRAINING_TRIGGERED_LOG_PATH.open("r") as f:
+            return [json.loads(line) for line in f if line.strip()]
+    return []
 
-def test_multiple_reviewers(client):
-    write_flag("sig-abc", "a", weight=1.0)
-    write_flag("sig-abc", "b", weight=1.25)
-    write_flag("sig-abc", "c", weight=0.75)
-    res = client.get("/internal/consensus-status/sig-abc")
-    assert res.status_code == 200
-    assert res.json()["total_reviewers"] == 3
-    assert res.json()["combined_weight"] == pytest.approx(3.0)
+def test_trigger_not_met(client):
+    write_flag("sig-low", "r1", weight=1.0)
+    r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-low"})
+    assert r.status_code == 200
+    assert r.json()["triggered"] is False
+    assert r.json()["total_weight"] == 1.0
 
-def test_duplicate_reviewers_not_counted_twice(client):
-    write_flag("sig-dedupe", "r1", weight=1.1)
-    write_flag("sig-dedupe", "r1", weight=0.9)
-    res = client.get("/internal/consensus-status/sig-dedupe")
-    assert res.status_code == 200
-    assert res.json()["total_reviewers"] == 1
-    assert res.json()["combined_weight"] == 1.1
+def test_trigger_met(client):
+    write_flag("sig-high", "r1", weight=1.0)
+    write_flag("sig-high", "r2", weight=1.25)
+    write_flag("sig-high", "r3", weight=0.75)
+    r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-high"})
+    assert r.status_code == 200
+    assert r.json()["triggered"] is True
+    assert r.json()["total_weight"] == pytest.approx(3.0)
 
-def test_missing_weight_with_score_fallback(client):
-    write_score("r2", 0.82)  # → 1.25
-    write_flag("sig-fallback", "r2")
-    res = client.get("/internal/consensus-status/sig-fallback")
-    assert res.status_code == 200
-    assert res.json()["combined_weight"] == 1.25
+def test_mixed_scores_and_weights(client):
+    write_score("rA", 0.82)  # → 1.25
+    write_score("rB", 0.60)  # → 1.0
+    write_score("rC", 0.40)  # → 0.75
+    write_flag("sig-mixed", "rA")
+    write_flag("sig-mixed", "rB")
+    write_flag("sig-mixed", "rC")
+    r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-mixed"})
+    assert r.status_code == 200
+    assert r.json()["triggered"] is True
+    assert r.json()["total_weight"] == pytest.approx(3.0)
 
-def test_missing_weight_and_score_defaults_to_1(client):
-    write_flag("sig-default", "ghost")  # no score
-    res = client.get("/internal/consensus-status/sig-default")
-    assert res.status_code == 200
-    assert res.json()["combined_weight"] == 1.0
+def test_no_reviewers_returns_triggered_false(client):
+    r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-none"})
+    assert r.status_code == 200
+    assert r.json()["triggered"] is False
+    assert r.json()["total_weight"] == 0.0
+    assert r.json()["reviewers"] == []
 
-def test_not_found(client):
-    res = client.get("/internal/consensus-status/not-real")
-    assert res.status_code == 404
+def test_log_written_on_trigger(client):
+    write_flag("sig-log", "r1", weight=2.6)
+    r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-log"})
+    assert r.status_code == 200
+    assert r.json()["triggered"] is True
+    logs = read_trigger_log()
+    found = any(entry["signal_id"] == "sig-log" for entry in logs)
+    assert found
