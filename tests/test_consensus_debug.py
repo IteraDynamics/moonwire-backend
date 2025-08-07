@@ -3,7 +3,6 @@
 import pytest
 from datetime import datetime
 
-@pytest.mark.usefixtures("clear_logs")
 def test_consensus_debug_basic(client, write_flag, write_score):
     # One reviewer with known weight
     write_flag("sigX", "alice", weight=1.2)
