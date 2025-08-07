@@ -1,13 +1,11 @@
 import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.paths import LOGS_DIR, REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
 
-# Ensure logging directory exists at boot
+# Ensure logging directory and files exist at boot
 os.makedirs(LOGS_DIR, exist_ok=True)
-
-# Ensure the log files themselves exist (empty if new)
 REVIEWER_IMPACT_LOG_PATH.touch(exist_ok=True)
 REVIEWER_SCORES_PATH.touch(exist_ok=True)
 
@@ -18,7 +16,6 @@ print(f"  - Scores path:     {REVIEWER_SCORES_PATH}")
 from src.twitter_router import router as twitter_router
 from src.news_router import router as news_router
 from src.composite_router import router as composite_router
-# from src.feedback_router import router as feedback_router
 from src.health_router import router as health_router
 from src.admin_router import router as admin_router
 from src.trend_router import router as trend_router
@@ -45,7 +42,7 @@ from src.signal_review_router import router as signal_review_router
 from src.trust_asset_pulse_router import router as trust_asset_pulse_router
 from src.trust_volatility_spike_router import router as trust_volatility_spike_router
 from src.reviewer_impact_scorer_router import router as reviewer_impact_scorer_router
-from src.consensus_router import router as consensus_router  # ensure consensus router is included
+from src.consensus_router import router as consensus_router   # <-- import it here
 
 app = FastAPI()
 
@@ -58,14 +55,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cache boot
+# Load mocks
 load_mock_cache_data()
 
-# Routers
+# Public routers
 app.include_router(twitter_router)
 app.include_router(news_router)
 app.include_router(composite_router)
-# app.include_router(feedback_router)
 app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(trend_router)
@@ -91,9 +87,9 @@ app.include_router(signal_review_router)
 app.include_router(trust_asset_pulse_router)
 app.include_router(trust_volatility_spike_router)
 
-# **Mount both reviewer-impact and consensus under /internal:**
+# Internal routers, all under /internal
 app.include_router(reviewer_impact_scorer_router, prefix="/internal")
-app.include_router(consensus_router, prefix="/internal")
+app.include_router(consensus_router,               prefix="/internal")  # <-- mount here
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
