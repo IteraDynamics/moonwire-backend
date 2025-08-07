@@ -9,9 +9,17 @@ from src.paths import (
     RETRAINING_LOG_PATH,
     REVIEWER_SCORES_PATH,
     RETRAINING_TRIGGERED_LOG_PATH,
+    LOGS_DIR
 )
 
+def ensure_logs_exist():
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    RETRAINING_LOG_PATH.touch(exist_ok=True)
+    REVIEWER_SCORES_PATH.touch(exist_ok=True)
+    RETRAINING_TRIGGERED_LOG_PATH.touch(exist_ok=True)
+
 def append_jsonl(path: Path, obj: dict):
+    ensure_logs_exist()
     with path.open("a") as f:
         f.write(json.dumps(obj) + "\n")
 
@@ -29,12 +37,14 @@ def write_score(reviewer_id: str, score: float):
     append_jsonl(REVIEWER_SCORES_PATH, {"reviewer_id": reviewer_id, "score": score})
 
 def read_trigger_log():
+    ensure_logs_exist()
     if RETRAINING_TRIGGERED_LOG_PATH.exists():
         with RETRAINING_TRIGGERED_LOG_PATH.open("r") as f:
             return [json.loads(line) for line in f if line.strip()]
     return []
 
 def clear_logs():
+    ensure_logs_exist()
     RETRAINING_LOG_PATH.write_text("")
     REVIEWER_SCORES_PATH.write_text("")
     RETRAINING_TRIGGERED_LOG_PATH.write_text("")
