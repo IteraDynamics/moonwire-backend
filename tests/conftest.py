@@ -39,11 +39,6 @@ def client():
 
 # ---------- HELPER WRITERS ----------
 
-from src.paths import (
-    RETRAINING_LOG_PATH,
-    REVIEWER_SCORES_PATH,
-)
-
 def append_jsonl(path: Path, obj: dict):
     with path.open("a") as f:
         f.write(json.dumps(obj) + "\n")
@@ -51,6 +46,7 @@ def append_jsonl(path: Path, obj: dict):
 @pytest.fixture
 def write_flag():
     def _write(signal_id: str, reviewer_id: str, weight: float = None):
+        from src.paths import RETRAINING_LOG_PATH  # ✅ Import inside to respect monkeypatch
         entry = {
             "signal_id": signal_id,
             "reviewer_id": reviewer_id,
@@ -58,12 +54,13 @@ def write_flag():
         }
         if weight is not None:
             entry["reviewer_weight"] = weight
-        append_jsonl(RETRAINING_LOG_PATH, entry)
+        append_jsonl(Path(RETRAINING_LOG_PATH), entry)
     return _write
 
 @pytest.fixture
 def write_score():
     def _write(reviewer_id: str, score: float):
+        from src.paths import REVIEWER_SCORES_PATH  # ✅ Import inside to respect monkeypatch
         entry = {"reviewer_id": reviewer_id, "score": score}
-        append_jsonl(REVIEWER_SCORES_PATH, entry)
+        append_jsonl(Path(REVIEWER_SCORES_PATH), entry)
     return _write
