@@ -32,14 +32,14 @@ from src.model_signal_adjust_router import router as model_signal_adjust_router
 from src.export_training_router import router as export_training_router
 from src.adjustment_router import router as adjustment_router
 
-# ⚠️ include our router under /internal
-from src.adjustment_trigger_router import router as adjustment_trigger_router
+# <<< NEW: consensus endpoint >>>
+from src.consensus_router import router as consensus_router
 
+from src.adjustment_trigger_router import router as adjustment_trigger_router
 from src.internal_router import router as internal_router
 from src.feedback_ingestion_router import router as feedback_ingestion_router
 from src.high_disagreement_router import router as high_disagreement_router
 from src.feedback_insights_router import router as feedback_insights_router
-from src.feedback_prediction_router import router as feedback_prediction_router
 from src.internal_trusted_signals_router import router as trust_intelligence_router
 from src.signal_review_router import router as signal_review_router
 from src.trust_asset_pulse_router import router as trust_asset_pulse_router
@@ -83,6 +83,8 @@ app.include_router(adjustment_router)
 
 # <<< NEW: mount all three endpoints under /internal >>>
 app.include_router(adjustment_trigger_router, prefix="/internal")
+app.include_router(reviewer_impact_scorer_router, prefix="/internal")
+app.include_router(consensus_router, prefix="/internal")  # ✅ NEW
 
 app.include_router(internal_router)
 app.include_router(feedback_ingestion_router)
@@ -92,7 +94,6 @@ app.include_router(trust_intelligence_router)
 app.include_router(signal_review_router)
 app.include_router(trust_asset_pulse_router)
 app.include_router(trust_volatility_spike_router)
-app.include_router(reviewer_impact_scorer_router, prefix="/internal")
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
