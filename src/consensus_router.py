@@ -6,11 +6,21 @@ from pathlib import Path
 from typing import Dict
 from datetime import datetime
 
-import src.paths as paths  # <— dynamic reference so monkeypatching works
+import src.paths as paths  # dynamic so tests can monkeypatch
 
 CONSENSUS_THRESHOLD = 2.5
 
 router = APIRouter(prefix="/internal")
+
+
+def _score_to_weight(score):
+    if score is None:
+        return 1.0
+    if score >= 0.75:
+        return 1.25
+    if score >= 0.5:
+        return 1.0
+    return 0.75
 
 
 @router.get("/consensus-debug/{signal_id}")
@@ -19,7 +29,7 @@ def consensus_debug(signal_id: str):
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="No retraining log found")
 
-    # Load reviewer scores (fallback)
+    # Load reviewer scores (fallback to map into bands)
     scores_path = Path(paths.REVIEWER_SCORES_PATH)
     fallback_scores: Dict[str, float] = {}
     if scores_path.exists():
@@ -28,9 +38,9 @@ def consensus_debug(signal_id: str):
                 if not line.strip():
                     continue
                 rec = json.loads(line)
-                fallback_scores[rec["reviewer_id"]] = rec.get("score", 1.0)
+                # store raw score; convert to band when used
+                fallback_scores[rec["reviewer_id"]] = rec.get("score")
 
-    # Parse log entries for this signal
     all_flags = []
     seen_reviewers = set()
     counted_reviewers = []
@@ -51,7 +61,7 @@ def consensus_debug(signal_id: str):
             reviewer_id = entry["reviewer_id"]
             weight = entry.get("reviewer_weight")
             if weight is None:
-                weight = fallback_scores.get(reviewer_id, 1.0)
+                weight = _score_to_weight(fallback_scores.get(reviewer_id))
 
             is_duplicate = reviewer_id in seen_reviewers
             all_flags.append({
@@ -89,7 +99,7 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="Retraining log not found")
 
-    # Load reviewer scores (fallback)
+    # Load reviewer scores (raw), apply weight bands when used
     scores_path = Path(paths.REVIEWER_SCORES_PATH)
     fallback_scores: Dict[str, float] = {}
     if scores_path.exists():
@@ -98,7 +108,7 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
                 if not line.strip():
                     continue
                 rec = json.loads(line)
-                fallback_scores[rec["reviewer_id"]] = rec.get("score", 1.0)
+                fallback_scores[rec["reviewer_id"]] = rec.get("score")
 
     seen = set()
     total_weight = 0.0
@@ -122,7 +132,7 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
 
             weight = entry.get("reviewer_weight")
             if weight is None:
-                weight = fallback_scores.get(reviewer_id, 1.0)
+                weight = _score_to_weight(fallback_scores.get(reviewer_id))
 
             seen.add(reviewer_id)
             total_weight += weight
