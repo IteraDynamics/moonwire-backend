@@ -27,8 +27,7 @@ def _score_to_weight(score):
 @router.get("/consensus-debug/{signal_id}")
 def consensus_debug(signal_id: str):
     """
-    Audit trail for a single signal. IMPORTANT: fallback uses RAW score (no banding),
-    matching the Task 3 spec & test expectations.
+    Audit trail for a single signal. Fallback uses RAW score (no banding).
     """
     log_path = Path(paths.RETRAINING_LOG_PATH)
     if not log_path.exists():
@@ -63,10 +62,9 @@ def consensus_debug(signal_id: str):
                 continue
 
             reviewer_id = entry["reviewer_id"]
-            # Fallback is RAW score for debug
             weight = entry.get("reviewer_weight")
             if weight is None:
-                weight = raw_scores.get(reviewer_id, 1.0)
+                weight = raw_scores.get(reviewer_id, 1.0)  # RAW for debug
 
             is_duplicate = reviewer_id in seen_reviewers
             all_flags.append({
@@ -97,8 +95,8 @@ def consensus_debug(signal_id: str):
 @router.post("/evaluate-consensus-retraining")
 def evaluate_consensus_retraining(payload: Dict[str, str]):
     """
-    Threshold decision endpoint. IMPORTANT: fallback uses BANDING (1.25/1.0/0.75),
-    matching Task 2 tests.
+    Threshold decision endpoint. Fallback uses BANDING (1.25/1.0/0.75).
+    Also writes a trigger log line when threshold is met.
     """
     signal_id = payload.get("signal_id")
     if not signal_id:
@@ -147,10 +145,26 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
             total_weight += weight
             reviewer_weights[reviewer_id] = weight
 
+    triggered = total_weight >= CONSENSUS_THRESHOLD
+
+    # 🔐 Write trigger log if threshold met
+    if triggered:
+        trig_path = Path(paths.RETRAINING_TRIGGERED_LOG_PATH)
+        trig_path.parent.mkdir(parents=True, exist_ok=True)
+        log_entry = {
+            "signal_id": signal_id,
+            "total_weight": total_weight,
+            "threshold": CONSENSUS_THRESHOLD,
+            "reviewers": [{"id": r, "weight": reviewer_weights[r]} for r in seen],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        with trig_path.open("a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
     return {
         "signal_id": signal_id,
         "total_weight": total_weight,
-        "triggered": total_weight >= CONSENSUS_THRESHOLD,
+        "triggered": triggered,
         "threshold": CONSENSUS_THRESHOLD,
         "reviewers": [{"id": r, "weight": reviewer_weights[r]} for r in seen]
     }
