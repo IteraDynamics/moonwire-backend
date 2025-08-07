@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
-from src.reviewer_log_utils import load_jsonl, get_reviewer_weight
-from src.paths import RETRAINING_LOG_PATH
+from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
+from src.reviewer_impact_scorer_router import get_reviewer_weight
+from src.reviewer_log_utils import load_jsonl
 
-router = APIRouter(prefix="/internal")
+router = APIRouter()
 
 @router.get("/consensus-status/{signal_id}")
 async def consensus_status(signal_id: str):
@@ -19,18 +20,17 @@ async def consensus_status(signal_id: str):
         raise HTTPException(status_code=404, detail="No retraining entries for this signal")
 
     # 3) build unique reviewer set + their weights
-    seen: dict[str, float] = {}
+    seen = {}
     for e in matched:
         rid = e.get("reviewer_id")
-        if rid and rid not in seen:
-            # weight on the log takes precedence; fallback to lookup
+        if rid not in seen:
+            # trust-weight stored on the log entry takes precedence
             wt = e.get("reviewer_weight")
             if wt is None:
                 wt = get_reviewer_weight(rid)
             seen[rid] = wt
 
     reviewers = [{"reviewer_id": rid, "weight": wt} for rid, wt in seen.items()]
-
     total_reviewers = len(reviewers)
     combined_weight = sum(r["weight"] for r in reviewers)
 
