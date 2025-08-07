@@ -1,24 +1,16 @@
-import time
+import pytest
 from src.paths import LOGS_DIR
 from pathlib import Path
-import json
-import pytest
-
-from tests.conftest import write_flag, write_score
 
 
+@pytest.fixture(autouse=True)
 def clear_logs():
     log_dir = Path(LOGS_DIR)
     for path in log_dir.glob("*.jsonl"):
         path.write_text("")
 
 
-@pytest.fixture(autouse=True)
-def _auto_clear():
-    clear_logs()
-
-
-def test_dashboard_endpoint_returns_expected_structure(client):
+def test_dashboard_endpoint_returns_expected_structure(client, write_flag, write_score):
     write_flag("sigD1", "alice", weight=1.1)
     write_flag("sigD1", "bob", weight=1.0)
     write_flag("sigD2", "charlie", weight=0.8)
