@@ -1,6 +1,7 @@
 # tests/test_reviewer_trends.py
 
 import time
+import pytest
 from datetime import timedelta, datetime
 
 def test_returns_subset_for_days(client, write_score_history):
