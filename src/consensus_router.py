@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Dict, Optional, List
 from datetime import datetime
 
-import src.paths as paths  # dynamic so tests can monkeypatch
-
 CONSENSUS_THRESHOLD = 2.5
 
 router = APIRouter(prefix="/internal")
@@ -30,6 +28,9 @@ def consensus_debug(signal_id: str):
     """
     Audit trail for a single signal. Fallback uses RAW score (no banding).
     """
+    # Import paths inside the function so pytest's reload() is respected
+    import src.paths as paths
+
     log_path = Path(paths.RETRAINING_LOG_PATH)
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="No retraining log found")
@@ -100,6 +101,8 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
     Threshold decision endpoint. Fallback uses BANDING (1.25/1.0/0.75).
     Also writes a trigger log line when threshold is met.
     """
+    import src.paths as paths
+
     signal_id = payload.get("signal_id")
     if not signal_id:
         raise HTTPException(status_code=400, detail="Missing signal_id")
@@ -179,6 +182,8 @@ def consensus_simulate(signal_id: str, threshold: Optional[float] = None):
     Read-only replay: dedupe by reviewer, resolve weights using BANDING fallback,
     sum, and compare to provided threshold (or system default).
     """
+    import src.paths as paths
+
     thr = threshold if threshold is not None else CONSENSUS_THRESHOLD
 
     log_path = Path(paths.RETRAINING_LOG_PATH)
@@ -240,7 +245,7 @@ def consensus_simulate(signal_id: str, threshold: Optional[float] = None):
     }
 
 
-# ---------- NEW: REVIEWER LEADERBOARD ----------
+# ---------- REVIEWER LEADERBOARD ----------
 @router.get("/reviewer-leaderboard")
 def reviewer_leaderboard(limit: int = Query(10, ge=1, le=100)):
     """
@@ -250,11 +255,13 @@ def reviewer_leaderboard(limit: int = Query(10, ge=1, le=100)):
     - Sorts high→low by weight, then score
     - last_updated is ISO8601 if timestamp/updated_at present; otherwise null
     """
+    import src.paths as paths
+
     scores_path = Path(paths.REVIEWER_SCORES_PATH)
     if not scores_path.exists():
         return {"leaderboard": []}
 
-    latest: Dict[str, Dict] = {}   # reviewer_id -> {score, ts_iso, score_raw}
+    latest: Dict[str, Dict] = {}   # reviewer_id -> {score, last_updated}
     order: List[str] = []          # to preserve "last write wins" if no timestamp
 
     with scores_path.open("r") as f:
@@ -271,30 +278,24 @@ def reviewer_leaderboard(limit: int = Query(10, ge=1, le=100)):
                 continue
 
             score = rec.get("score", None)
-            # Accept either numeric unix timestamp or ISO string fields
             ts = rec.get("timestamp", rec.get("updated_at"))
             ts_iso: Optional[str] = None
             if isinstance(ts, (int, float)):
                 ts_iso = datetime.utcfromtimestamp(ts).isoformat() + "Z"
             elif isinstance(ts, str):
-                # assume already iso-like
                 ts_iso = ts
 
-            # last write wins by default; explicit timestamp replaces prior if newer
             if rid not in latest:
                 order.append(rid)
                 latest[rid] = {"score": score, "last_updated": ts_iso}
             else:
-                # Prefer newer timestamp if both present, else overwrite (keeps last occurrence)
                 prev_ts = latest[rid].get("last_updated")
                 if ts_iso and prev_ts:
-                    # string compare works for ISO; otherwise just overwrite
                     if ts_iso >= prev_ts:
                         latest[rid] = {"score": score, "last_updated": ts_iso}
                 else:
                     latest[rid] = {"score": score, "last_updated": ts_iso}
 
-    # Build rows and compute banded weights
     rows = []
     for rid in order:
         if rid not in latest:
