@@ -1,71 +1,119 @@
 # src/consensus_dashboard_router.py
 
 import json
-from typing import Dict, List
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Dict, List, Optional
+
 from fastapi import APIRouter
-from src.paths import RETRAINING_LOG_PATH, REVIEWER_SCORES_PATH
 
-router = APIRouter()
+router = APIRouter(prefix="/internal")
 
-RETRAINING_THRESHOLD = 2.5
+CONSENSUS_THRESHOLD = 2.5
+DAYS_BACK = 7
 
-@router.get("/internal/consensus-dashboard")
+
+def _score_to_weight(score: Optional[float]) -> float:
+    """Map raw reviewer score to consensus weight bands."""
+    if score is None:
+        return 1.0
+    if score >= 0.75:
+        return 1.25
+    if score >= 0.5:
+        return 1.0
+    return 0.75
+
+
+@router.get("/consensus-dashboard")
 def consensus_dashboard():
-    now = datetime.utcnow()
-    seven_days_ago = now - timedelta(days=7)
+    """
+    Returns a summary of signals flagged for retraining in the last N days,
+    with deduped reviewers, banded fallback weights, total_weight, and trigger flag.
+    """
+    # Import paths inside the function so pytest's reload(src.paths) is respected
+    import src.paths as paths
 
-    # Load reviewer scores for fallback
-    scores = {}
-    scores_path = Path(REVIEWER_SCORES_PATH)
+    retraining_path = Path(paths.RETRAINING_LOG_PATH)
+    scores_path = Path(paths.REVIEWER_SCORES_PATH)
+
+    # Load fallback scores (raw); band them when used
+    raw_scores: Dict[str, float] = {}
     if scores_path.exists():
-        with open(scores_path, "r") as f:
+        with scores_path.open("r") as f:
             for line in f:
-                entry = json.loads(line)
-                scores[entry["reviewer_id"]] = entry.get("score", 1.0)
-
-    # Parse retraining logs
-    signals: Dict[str, Dict] = {}
-    log_path = Path(RETRAINING_LOG_PATH)
-    if log_path.exists():
-        with open(log_path, "r") as f:
-            for line in f:
-                entry = json.loads(line)
-                ts = datetime.utcfromtimestamp(entry["timestamp"])
-                if ts < seven_days_ago:
+                if not line.strip():
                     continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rid = rec.get("reviewer_id")
+                if rid:
+                    raw_scores[rid] = rec.get("score")
 
-                sid = entry["signal_id"]
-                rid = entry["reviewer_id"]
-                weight = entry.get("reviewer_weight", None)
+    # If no retraining log, return empty list
+    if not retraining_path.exists():
+        return []
 
-                if sid not in signals:
-                    signals[sid] = {
-                        "signal_id": sid,
-                        "reviewers": {},
-                        "last_flagged_timestamp": ts,
-                    }
+    cutoff = datetime.utcnow().timestamp() - DAYS_BACK * 24 * 3600
 
-                if rid not in signals[sid]["reviewers"]:
-                    w = weight if weight is not None else scores.get(rid, 1.0)
-                    signals[sid]["reviewers"][rid] = w
+    # Aggregate flags by signal_id with deduped reviewers (first flag counts)
+    signals: Dict[str, Dict] = {}
+    with retraining_path.open("r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-                # Update last flagged time
-                if ts > signals[sid]["last_flagged_timestamp"]:
-                    signals[sid]["last_flagged_timestamp"] = ts
+            ts = entry.get("timestamp")
+            if not isinstance(ts, (int, float)):
+                # if missing/invalid timestamp, include it (tests usually write now())
+                ts = datetime.utcnow().timestamp()
+            if ts < cutoff:
+                continue
 
-    results = []
-    for s in signals.values():
-        reviewers = [{"id": rid, "weight": w} for rid, w in s["reviewers"].items()]
-        total = sum(w["weight"] for w in reviewers)
+            sig = entry.get("signal_id")
+            rid = entry.get("reviewer_id")
+            if not sig or not rid:
+                continue
+
+            bucket = signals.setdefault(sig, {
+                "signal_id": sig,
+                "reviewers": [],            # list of {"id","weight"}
+                "seen": set(),              # internal
+                "total_weight": 0.0,
+                "last_flagged_ts": ts
+            })
+            # Track last flagged time
+            if ts > bucket["last_flagged_ts"]:
+                bucket["last_flagged_ts"] = ts
+
+            if rid in bucket["seen"]:
+                continue  # only first flag from reviewer counts
+
+            # Resolve weight
+            weight = entry.get("reviewer_weight")
+            if weight is None:
+                weight = _score_to_weight(raw_scores.get(rid))
+
+            bucket["seen"].add(rid)
+            bucket["reviewers"].append({"id": rid, "weight": weight})
+            bucket["total_weight"] += weight
+
+    # Build sorted results
+    results: List[Dict] = []
+    for sig, bucket in signals.items():
         results.append({
-            "signal_id": s["signal_id"],
-            "reviewers": reviewers,
-            "total_weight": total,
-            "triggered": total >= RETRAINING_THRESHOLD,
-            "last_flagged_timestamp": s["last_flagged_timestamp"].isoformat(),
+            "signal_id": sig,
+            "reviewers": bucket["reviewers"],
+            "total_weight": bucket["total_weight"],
+            "triggered": bucket["total_weight"] >= CONSENSUS_THRESHOLD,
+            "last_flagged_timestamp": datetime.utcfromtimestamp(bucket["last_flagged_ts"]).isoformat() + "Z",
         })
 
-    results.sort(key=lambda x: x["total_weight"], reverse=True)
+    # Sort by total_weight desc
+    results.sort(key=lambda x: (-x["total_weight"], x["signal_id"]))
     return results
