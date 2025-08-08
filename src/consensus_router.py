@@ -1,6 +1,7 @@
 # src/consensus_router.py
 
 import json
+import os
 from fastapi import APIRouter, HTTPException, Query
 from pathlib import Path
 from typing import Dict, Optional, List
@@ -28,7 +29,7 @@ def consensus_debug(signal_id: str):
     """
     Audit trail for a single signal. Fallback uses RAW score (no banding).
     """
-    # Import paths inside the function so pytest's reload() is respected
+    # Import inside to respect per-test reload of src.paths
     import src.paths as paths
 
     log_path = Path(paths.RETRAINING_LOG_PATH)
@@ -43,8 +44,11 @@ def consensus_debug(signal_id: str):
             for line in f:
                 if not line.strip():
                     continue
-                rec = json.loads(line)
-                raw_scores[rec["reviewer_id"]] = rec.get("score", 1.0)
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                raw_scores[rec.get("reviewer_id")] = rec.get("score", 1.0)
 
     all_flags = []
     seen_reviewers = set()
@@ -63,16 +67,25 @@ def consensus_debug(signal_id: str):
             if entry.get("signal_id") != signal_id:
                 continue
 
-            reviewer_id = entry["reviewer_id"]
+            reviewer_id = entry.get("reviewer_id")
+            if not reviewer_id:
+                continue
+
             weight = entry.get("reviewer_weight")
             if weight is None:
                 weight = raw_scores.get(reviewer_id, 1.0)  # RAW for debug
 
             is_duplicate = reviewer_id in seen_reviewers
+            ts = entry.get("timestamp")
+            if isinstance(ts, (int, float)):
+                ts_iso = datetime.fromtimestamp(ts).isoformat()
+            else:
+                ts_iso = datetime.utcnow().isoformat()
+
             all_flags.append({
                 "reviewer_id": reviewer_id,
                 "reviewer_weight": weight,
-                "timestamp": datetime.fromtimestamp(entry["timestamp"]).isoformat(),
+                "timestamp": ts_iso,
                 "duplicate": is_duplicate
             })
 
@@ -119,8 +132,11 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
             for line in f:
                 if not line.strip():
                     continue
-                rec = json.loads(line)
-                raw_scores[rec["reviewer_id"]] = rec.get("score")
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                raw_scores[rec.get("reviewer_id")] = rec.get("score")
 
     seen = set()
     total_weight = 0.0
@@ -138,8 +154,8 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
             if entry.get("signal_id") != signal_id:
                 continue
 
-            reviewer_id = entry["reviewer_id"]
-            if reviewer_id in seen:
+            reviewer_id = entry.get("reviewer_id")
+            if not reviewer_id or reviewer_id in seen:
                 continue
 
             weight = entry.get("reviewer_weight")
@@ -152,7 +168,7 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
 
     triggered = total_weight >= CONSENSUS_THRESHOLD
 
-    # Write trigger log if threshold met
+    # Durable trigger log write if threshold met
     if triggered:
         trig_path = Path(paths.RETRAINING_TRIGGERED_LOG_PATH)
         trig_path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,10 +177,13 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
             "total_weight": total_weight,
             "threshold": CONSENSUS_THRESHOLD,
             "reviewers": [{"id": r, "weight": reviewer_weights[r]} for r in seen],
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat() + "Z",
         }
+        # Append, then flush and fsync so tests immediately see the line
         with trig_path.open("a") as f:
             f.write(json.dumps(log_entry) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
     return {
         "signal_id": signal_id,
@@ -205,8 +224,11 @@ def consensus_simulate(signal_id: str, threshold: Optional[float] = None):
             for line in f:
                 if not line.strip():
                     continue
-                rec = json.loads(line)
-                raw_scores[rec["reviewer_id"]] = rec.get("score")
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                raw_scores[rec.get("reviewer_id")] = rec.get("score")
 
     seen = set()
     counted = []
@@ -224,8 +246,8 @@ def consensus_simulate(signal_id: str, threshold: Optional[float] = None):
             if entry.get("signal_id") != signal_id:
                 continue
 
-            rid = entry["reviewer_id"]
-            if rid in seen:
+            rid = entry.get("reviewer_id")
+            if not rid or rid in seen:
                 continue
             seen.add(rid)
 
