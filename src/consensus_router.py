@@ -4,7 +4,7 @@ import json
 import os
 from fastapi import APIRouter, HTTPException, Query
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple, Any
 from datetime import datetime
 
 CONSENSUS_THRESHOLD = 2.5
@@ -48,7 +48,9 @@ def consensus_debug(signal_id: str):
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                raw_scores[rec.get("reviewer_id")] = rec.get("score", 1.0)
+                rid = rec.get("reviewer_id")
+                if rid:
+                    raw_scores[rid] = rec.get("score", 1.0)
 
     all_flags = []
     seen_reviewers = set()
@@ -77,10 +79,11 @@ def consensus_debug(signal_id: str):
 
             is_duplicate = reviewer_id in seen_reviewers
             ts = entry.get("timestamp")
-            if isinstance(ts, (int, float)):
-                ts_iso = datetime.fromtimestamp(ts).isoformat()
-            else:
-                ts_iso = datetime.utcnow().isoformat()
+            ts_iso = (
+                datetime.fromtimestamp(ts).isoformat()
+                if isinstance(ts, (int, float))
+                else datetime.utcnow().isoformat()
+            )
 
             all_flags.append({
                 "reviewer_id": reviewer_id,
@@ -136,7 +139,9 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                raw_scores[rec.get("reviewer_id")] = rec.get("score")
+                rid = rec.get("reviewer_id")
+                if rid:
+                    raw_scores[rid] = rec.get("score")
 
     seen = set()
     total_weight = 0.0
@@ -179,7 +184,6 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
             "reviewers": [{"id": r, "weight": reviewer_weights[r]} for r in seen],
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
-        # Append, then flush and fsync so tests immediately see the line
         with trig_path.open("a") as f:
             f.write(json.dumps(log_entry) + "\n")
             f.flush()
@@ -228,7 +232,9 @@ def consensus_simulate(signal_id: str, threshold: Optional[float] = None):
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                raw_scores[rec.get("reviewer_id")] = rec.get("score")
+                rid = rec.get("reviewer_id")
+                if rid:
+                    raw_scores[rid] = rec.get("score")
 
     seen = set()
     counted = []
@@ -284,7 +290,7 @@ def reviewer_leaderboard(limit: int = Query(10, ge=1, le=100)):
         return {"leaderboard": []}
 
     latest: Dict[str, Dict] = {}   # reviewer_id -> {score, last_updated}
-    order: List[str] = []          # to preserve "last write wins" if no timestamp
+    order: List[str] = []          # preserve "last write wins" if no timestamp
 
     with scores_path.open("r") as f:
         for line in f:
@@ -333,9 +339,97 @@ def reviewer_leaderboard(limit: int = Query(10, ge=1, le=100)):
 
     # Sort: weight desc, then score desc (None goes last)
     def sort_key(row):
-        score = row["score"]
-        score_sort = score if isinstance(score, (int, float)) else -1
-        return (-row["weight"], -score_sort)
+        s = row["score"]
+        s_sort = s if isinstance(s, (int, float)) else -1
+        return (-row["weight"], -s_sort)
 
     rows.sort(key=sort_key)
     return {"leaderboard": rows[:limit]}
+
+
+# ---------- REVIEWER ANOMALIES ----------
+@router.get("/reviewer-anomalies")
+def reviewer_anomalies(
+    limit: int = Query(10, ge=1, le=100),
+    min_score: float = Query(0.6)
+):
+    """
+    Identify reviewers with low scores or large recent drops.
+    - Reads reviewer_scores.jsonl
+    - For each reviewer, use most recent score; compute score_change vs previous if present
+    - Include if (score < min_score) OR (score_change <= -0.15)
+    - Sort ascending by current score (worst first)
+    """
+    import src.paths as paths
+
+    scores_path = Path(paths.REVIEWER_SCORES_PATH)
+    if not scores_path.exists():
+        return {"anomalies": []}
+
+    # Track last and previous entries per reviewer (by occurrence order if no timestamp)
+    history: Dict[str, List[Dict[str, Any]]] = {}
+
+    with scores_path.open("r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            rid = rec.get("reviewer_id")
+            if not rid:
+                continue
+            # Normalize timestamp to ISO if present, else None
+            ts = rec.get("timestamp", rec.get("updated_at"))
+            ts_iso: Optional[str] = None
+            if isinstance(ts, (int, float)):
+                ts_iso = datetime.utcfromtimestamp(ts).isoformat() + "Z"
+            elif isinstance(ts, str):
+                ts_iso = ts
+
+            entry = {
+                "score": rec.get("score"),
+                "last_updated": ts_iso
+            }
+            history.setdefault(rid, []).append(entry)
+
+    anomalies: List[Dict[str, Any]] = []
+    for rid, entries in history.items():
+        if not entries:
+            continue
+        # Latest is last occurrence; previous is second last if available
+        latest = entries[-1]
+        prev = entries[-2] if len(entries) >= 2 else None
+
+        score = latest.get("score")
+        # Skip if we don't even have a numeric score; "graceful handling"
+        if not isinstance(score, (int, float)):
+            # Still allow inclusion via score_change if previous existed and both numeric?
+            score_change = None
+            if prev and isinstance(prev.get("score"), (int, float)):
+                score_change = None  # can't compute change without current numeric
+            continue
+
+        weight = _score_to_weight(score)
+
+        score_change: Optional[float] = None
+        if prev and isinstance(prev.get("score"), (int, float)):
+            score_change = score - prev["score"]
+
+        include = (score < min_score) or (score_change is not None and score_change <= -0.15)
+        if not include:
+            continue
+
+        anomalies.append({
+            "reviewer_id": rid,
+            "score": score,
+            "weight": weight,
+            "last_updated": latest.get("last_updated"),
+            "score_change": score_change
+        })
+
+    # Sort ascending by score (worst first). Tie-break by reviewer_id for stability.
+    anomalies.sort(key=lambda r: (r["score"], r["reviewer_id"]))
+    return {"anomalies": anomalies[:limit]}
