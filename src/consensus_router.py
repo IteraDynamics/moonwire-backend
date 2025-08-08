@@ -3,7 +3,7 @@
 import json
 from fastapi import APIRouter, HTTPException
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 from datetime import datetime
 
 import src.paths as paths  # dynamic so tests can monkeypatch
@@ -13,7 +13,7 @@ CONSENSUS_THRESHOLD = 2.5
 router = APIRouter(prefix="/internal")
 
 
-def _score_to_weight(score):
+def _score_to_weight(score: Optional[float]) -> float:
     """Map raw reviewer score to consensus weight bands."""
     if score is None:
         return 1.0
@@ -147,7 +147,7 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
 
     triggered = total_weight >= CONSENSUS_THRESHOLD
 
-    # 🔐 Write trigger log if threshold met
+    # Write trigger log if threshold met
     if triggered:
         trig_path = Path(paths.RETRAINING_TRIGGERED_LOG_PATH)
         trig_path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,4 +167,71 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
         "triggered": triggered,
         "threshold": CONSENSUS_THRESHOLD,
         "reviewers": [{"id": r, "weight": reviewer_weights[r]} for r in seen]
+    }
+
+
+@router.get("/consensus-simulate/{signal_id}")
+def consensus_simulate(signal_id: str, threshold: Optional[float] = None):
+    """
+    Read-only replay: dedupe by reviewer, resolve weights using BANDING fallback,
+    sum, and compare to provided threshold (or system default).
+    """
+    thr = threshold if threshold is not None else CONSENSUS_THRESHOLD
+
+    log_path = Path(paths.RETRAINING_LOG_PATH)
+    if not log_path.exists():
+        # No log file: empty result, no trigger
+        return {
+            "signal_id": signal_id,
+            "threshold_tested": thr,
+            "total_weight": 0.0,
+            "would_trigger": False,
+            "counted_reviewers": []
+        }
+
+    # Load reviewer scores (raw), band when missing reviewer_weight
+    scores_path = Path(paths.REVIEWER_SCORES_PATH)
+    raw_scores: Dict[str, float] = {}
+    if scores_path.exists():
+        with scores_path.open("r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                raw_scores[rec["reviewer_id"]] = rec.get("score")
+
+    seen = set()
+    counted = []
+    total_weight = 0.0
+
+    with log_path.open("r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if entry.get("signal_id") != signal_id:
+                continue
+
+            rid = entry["reviewer_id"]
+            if rid in seen:
+                continue
+            seen.add(rid)
+
+            weight = entry.get("reviewer_weight")
+            if weight is None:
+                weight = _score_to_weight(raw_scores.get(rid))
+
+            counted.append({"reviewer_id": rid, "weight": weight})
+            total_weight += weight
+
+    return {
+        "signal_id": signal_id,
+        "threshold_tested": thr,
+        "total_weight": total_weight,
+        "would_trigger": total_weight >= thr,
+        "counted_reviewers": counted
     }
