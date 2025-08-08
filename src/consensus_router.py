@@ -1,9 +1,9 @@
 # src/consensus_router.py
 
 import json
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from datetime import datetime
 
 import src.paths as paths  # dynamic so tests can monkeypatch
@@ -24,6 +24,7 @@ def _score_to_weight(score: Optional[float]) -> float:
     return 0.75
 
 
+# ---------- DEBUG (raw score fallback) ----------
 @router.get("/consensus-debug/{signal_id}")
 def consensus_debug(signal_id: str):
     """
@@ -92,6 +93,7 @@ def consensus_debug(signal_id: str):
     }
 
 
+# ---------- EVALUATE (banded fallback) ----------
 @router.post("/evaluate-consensus-retraining")
 def evaluate_consensus_retraining(payload: Dict[str, str]):
     """
@@ -170,6 +172,7 @@ def evaluate_consensus_retraining(payload: Dict[str, str]):
     }
 
 
+# ---------- SIMULATE (banded fallback, read-only) ----------
 @router.get("/consensus-simulate/{signal_id}")
 def consensus_simulate(signal_id: str, threshold: Optional[float] = None):
     """
@@ -235,3 +238,81 @@ def consensus_simulate(signal_id: str, threshold: Optional[float] = None):
         "would_trigger": total_weight >= thr,
         "counted_reviewers": counted
     }
+
+
+# ---------- NEW: REVIEWER LEADERBOARD ----------
+@router.get("/reviewer-leaderboard")
+def reviewer_leaderboard(limit: int = Query(10, ge=1, le=100)):
+    """
+    Return the top reviewers by trust-weight (banded from score).
+    - Reads reviewer_scores.jsonl
+    - Dedupes by reviewer_id using the most recent entry (last occurrence wins)
+    - Sorts high→low by weight, then score
+    - last_updated is ISO8601 if timestamp/updated_at present; otherwise null
+    """
+    scores_path = Path(paths.REVIEWER_SCORES_PATH)
+    if not scores_path.exists():
+        return {"leaderboard": []}
+
+    latest: Dict[str, Dict] = {}   # reviewer_id -> {score, ts_iso, score_raw}
+    order: List[str] = []          # to preserve "last write wins" if no timestamp
+
+    with scores_path.open("r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            rid = rec.get("reviewer_id")
+            if not rid:
+                continue
+
+            score = rec.get("score", None)
+            # Accept either numeric unix timestamp or ISO string fields
+            ts = rec.get("timestamp", rec.get("updated_at"))
+            ts_iso: Optional[str] = None
+            if isinstance(ts, (int, float)):
+                ts_iso = datetime.utcfromtimestamp(ts).isoformat() + "Z"
+            elif isinstance(ts, str):
+                # assume already iso-like
+                ts_iso = ts
+
+            # last write wins by default; explicit timestamp replaces prior if newer
+            if rid not in latest:
+                order.append(rid)
+                latest[rid] = {"score": score, "last_updated": ts_iso}
+            else:
+                # Prefer newer timestamp if both present, else overwrite (keeps last occurrence)
+                prev_ts = latest[rid].get("last_updated")
+                if ts_iso and prev_ts:
+                    # string compare works for ISO; otherwise just overwrite
+                    if ts_iso >= prev_ts:
+                        latest[rid] = {"score": score, "last_updated": ts_iso}
+                else:
+                    latest[rid] = {"score": score, "last_updated": ts_iso}
+
+    # Build rows and compute banded weights
+    rows = []
+    for rid in order:
+        if rid not in latest:
+            continue
+        score = latest[rid].get("score")
+        weight = _score_to_weight(score)
+        rows.append({
+            "reviewer_id": rid,
+            "score": score,
+            "weight": weight,
+            "last_updated": latest[rid].get("last_updated")
+        })
+
+    # Sort: weight desc, then score desc (None goes last)
+    def sort_key(row):
+        score = row["score"]
+        score_sort = score if isinstance(score, (int, float)) else -1
+        return (-row["weight"], -score_sort)
+
+    rows.sort(key=sort_key)
+    return {"leaderboard": rows[:limit]}
