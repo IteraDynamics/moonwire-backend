@@ -2,9 +2,14 @@
 
 import json
 import pytest
-from src.paths import RETRAINING_TRIGGERED_LOG_PATH
 
 def read_trigger_log():
+    # Resolve the path dynamically so it respects per-test LOGS_DIR monkeypatching
+    import importlib
+    import src.paths
+    importlib.reload(src.paths)
+    from src.paths import RETRAINING_TRIGGERED_LOG_PATH
+
     if RETRAINING_TRIGGERED_LOG_PATH.exists():
         with RETRAINING_TRIGGERED_LOG_PATH.open("r") as f:
             return [json.loads(line) for line in f if line.strip()]
@@ -53,6 +58,6 @@ def test_log_written_on_trigger(client, write_flag):
     r = client.post("/internal/evaluate-consensus-retraining", json={"signal_id": "sig-log"})
     assert r.status_code == 200
     assert r.json()["triggered"] is True
+
     logs = read_trigger_log()
-    found = any(entry["signal_id"] == "sig-log" for entry in logs)
-    assert found
+    assert any(entry["signal_id"] == "sig-log" for entry in logs)
