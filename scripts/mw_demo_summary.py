@@ -31,11 +31,15 @@ ART.mkdir(exist_ok=True)
 
 DEFAULT_THRESHOLD = 2.5  # keep in sync with app config
 SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 110  # memory‑safe 16:9 for social
-DEMO_MODE = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes", "on")
 # ------------------------------------------------
 
 
 # -------------------- helpers --------------------
+def _demo_mode() -> bool:
+    """Evaluate DEMO_MODE at call time (important for tests that set env after import)."""
+    return os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes", "on")
+
+
 def red(s: str) -> str:
     """Redact any ID to a short sha1 prefix."""
     if not s:
@@ -117,7 +121,8 @@ def generate_demo_data_if_needed(*args, **kwargs) -> Tuple[List[Dict[str, Any]],
         flag_times = kwargs.get("flag_times")
         now = kwargs.get("now")
 
-    if reviewers or not DEMO_MODE:
+    # 🔑 DEMO_MODE must be checked at call time (not import time)
+    if reviewers or not _demo_mode():
         return reviewers, []
 
     now = now or datetime.now(timezone.utc)
@@ -253,7 +258,7 @@ def _render_social(fig_data: Dict[str, Any], social_png: Path):
     status = "TRIGGERED" if fig_data["would_trigger"] else "NO TRIGGER"
     status_col = ok if fig_data["would_trigger"] else warn
     subtitle_bits = [f"Signal {red(fig_data['sig_id'])}"]
-    if DEMO_MODE and not fig_data["sig_rows"]:
+    if _demo_mode() and not fig_data["sig_rows"]:
         subtitle_bits.append("DEMO MODE (seeded)")
     subtitle = " • ".join(subtitle_bits)
     ax_title.text(0.0, 0.65, "MoonWire — Consensus Check",
@@ -322,7 +327,7 @@ def _render_social(fig_data: Dict[str, Any], social_png: Path):
 
     # ---------- Footer ----------
     fig.text(0.015, 0.02,
-             f"moonwire • {'demo mode • ' if DEMO_MODE else ''}{fig_data['now']}",
+             f"moonwire • {'demo mode • ' if _demo_mode() else ''}{fig_data['now']}",
              color=muted, fontsize=11)
 
     fig.savefig(social_png, dpi=DPI, facecolor=bg, bbox_inches="tight")
@@ -359,7 +364,7 @@ md.append(f"- **Signal:** `{red(sig_id)}`")
 md.append(f"- **Unique reviewers:** {len(reviewers)}")
 md.append(f"- **Combined weight:** **{total_weight}**")
 md.append(f"- **Threshold:** **{threshold}**  → **{would}**")
-if DEMO_MODE and not sig_rows and reviewers:
+if _demo_mode() and not sig_rows and reviewers:
     md.append(f"- **Mode:** DEMO (seeded reviewers)")
 if triggered_log:
     last = max(triggered_log, key=lambda x: _ts_as_epoch(x.get("timestamp")))
