@@ -31,13 +31,17 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
 
-      # --- Demo summary & artifacts ---
+      # --- Demo summary & artifacts (read-only, post-tests) ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
 
       - name: Build demo summary (read-only)
         if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DEMO_MODE: "true"          # <- enable demo seeding when no reviewers present
+          MPLBACKEND: "Agg"          # <- safe, headless matplotlib backend
         run: python scripts/mw_demo_summary.py
 
       - name: Show artifacts (debug)
