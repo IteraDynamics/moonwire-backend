@@ -1,18 +1,19 @@
 # src/paths.py
-
-import os
 from pathlib import Path
+import os
 
-# Base project directory
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Allow tests (and prod) to override logs directory via env var.
-# Falls back to the repo's logs/ directory.
-DEFAULT_LOGS_DIR = BASE_DIR / "logs"
-LOGS_DIR = Path(os.getenv("LOGS_DIR", str(DEFAULT_LOGS_DIR)))
+# Allow tests to override via env var
+LOGS_DIR = Path(os.getenv("LOGS_DIR", str(BASE_DIR / "logs")))
 
-# Core logs used across features
+# Existing logs
 REVIEWER_IMPACT_LOG_PATH = LOGS_DIR / "reviewer_impact_log.jsonl"
 REVIEWER_SCORES_PATH = LOGS_DIR / "reviewer_scores.jsonl"
+
+# Consensus / retraining logs
 RETRAINING_LOG_PATH = LOGS_DIR / "retraining_log.jsonl"
 RETRAINING_TRIGGERED_LOG_PATH = LOGS_DIR / "retraining_triggered.jsonl"
+
+# NEW: historical time-series for reviewer scores
+REVIEWER_SCORES_HISTORY_PATH = LOGS_DIR / "reviewer_scores_history.jsonl"

@@ -4,8 +4,8 @@ import json
 import os
 from fastapi import APIRouter, HTTPException, Query
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple, Any
-from datetime import datetime
+from typing import Dict, Optional, List, Any
+from datetime import datetime, timedelta
 
 CONSENSUS_THRESHOLD = 2.5
 
@@ -29,7 +29,6 @@ def consensus_debug(signal_id: str):
     """
     Audit trail for a single signal. Fallback uses RAW score (no banding).
     """
-    # Import inside to respect per-test reload of src.paths
     import src.paths as paths
 
     log_path = Path(paths.RETRAINING_LOG_PATH)
@@ -366,7 +365,6 @@ def reviewer_anomalies(
     if not scores_path.exists():
         return {"anomalies": []}
 
-    # Track last and previous entries per reviewer (by occurrence order if no timestamp)
     history: Dict[str, List[Dict[str, Any]]] = {}
 
     with scores_path.open("r") as f:
@@ -381,7 +379,6 @@ def reviewer_anomalies(
             rid = rec.get("reviewer_id")
             if not rid:
                 continue
-            # Normalize timestamp to ISO if present, else None
             ts = rec.get("timestamp", rec.get("updated_at"))
             ts_iso: Optional[str] = None
             if isinstance(ts, (int, float)):
@@ -389,31 +386,21 @@ def reviewer_anomalies(
             elif isinstance(ts, str):
                 ts_iso = ts
 
-            entry = {
-                "score": rec.get("score"),
-                "last_updated": ts_iso
-            }
+            entry = {"score": rec.get("score"), "last_updated": ts_iso}
             history.setdefault(rid, []).append(entry)
 
     anomalies: List[Dict[str, Any]] = []
     for rid, entries in history.items():
         if not entries:
             continue
-        # Latest is last occurrence; previous is second last if available
         latest = entries[-1]
         prev = entries[-2] if len(entries) >= 2 else None
 
         score = latest.get("score")
-        # Skip if we don't even have a numeric score; "graceful handling"
         if not isinstance(score, (int, float)):
-            # Still allow inclusion via score_change if previous existed and both numeric?
-            score_change = None
-            if prev and isinstance(prev.get("score"), (int, float)):
-                score_change = None  # can't compute change without current numeric
             continue
 
         weight = _score_to_weight(score)
-
         score_change: Optional[float] = None
         if prev and isinstance(prev.get("score"), (int, float)):
             score_change = score - prev["score"]
@@ -430,6 +417,82 @@ def reviewer_anomalies(
             "score_change": score_change
         })
 
-    # Sort ascending by score (worst first). Tie-break by reviewer_id for stability.
     anomalies.sort(key=lambda r: (r["score"], r["reviewer_id"]))
     return {"anomalies": anomalies[:limit]}
+
+
+# ---------- REVIEWER TRENDS (time series) ----------
+@router.get("/reviewer-trends/{reviewer_id}")
+def reviewer_trends(
+    reviewer_id: str,
+    days: int = Query(30, ge=1, le=365)
+):
+    """
+    Time-series of a reviewer's trust score over the last N days.
+    - Reads reviewer_scores_history.jsonl (append-only: {reviewer_id, score, timestamp})
+    - Filters by reviewer_id and time window
+    - Returns trend points sorted by timestamp asc
+    - If no history exists, fallback current_score from reviewer_scores.jsonl if available
+    """
+    import src.paths as paths
+    now = datetime.utcnow()
+    since = now - timedelta(days=days)
+
+    history_path = Path(paths.REVIEWER_SCORES_HISTORY_PATH)
+    trend: List[Dict[str, Any]] = []
+
+    if history_path.exists():
+        with history_path.open("r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("reviewer_id") != reviewer_id:
+                    continue
+                ts_raw = rec.get("timestamp")
+                if not isinstance(ts_raw, (int, float)):
+                    # if stored as iso string, try parsing-ish: skip if not numeric
+                    continue
+                ts = datetime.utcfromtimestamp(ts_raw)
+                if ts >= since:
+                    score = rec.get("score")
+                    if isinstance(score, (int, float)):
+                        trend.append({
+                            "timestamp": ts.isoformat() + "Z",
+                            "score": score
+                        })
+
+    trend.sort(key=lambda x: x["timestamp"])
+
+    # Determine current_score: prefer latest in overall snapshot file
+    current_score: Optional[float] = None
+    scores_path = Path(paths.REVIEWER_SCORES_PATH)
+    if scores_path.exists():
+        with scores_path.open("r") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("reviewer_id") == reviewer_id:
+                    val = rec.get("score")
+                    if isinstance(val, (int, float)):
+                        current_score = val  # last occurrence wins
+
+    # change_over_period: based on filtered trend
+    if len(trend) >= 2:
+        change_over_period = trend[-1]["score"] - trend[0]["score"]
+    else:
+        change_over_period = 0.0
+
+    return {
+        "reviewer_id": reviewer_id,
+        "trend_data": trend,
+        "current_score": current_score,
+        "change_over_period": change_over_period
+    }
