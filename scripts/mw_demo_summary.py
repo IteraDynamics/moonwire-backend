@@ -82,7 +82,7 @@ return None
 
 def generate_demo_data_if_needed(reviewers, flag_times=None):
 “””
-If DEMO_MODE=true and no reviewers present, return 3–5 seeded
+If DEMO_MODE=true and no reviewers present, return 3-5 seeded
 reviewers + seed timestamps (only for display). Never writes logs.
 
 ```
