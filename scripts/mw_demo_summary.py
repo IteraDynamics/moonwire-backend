@@ -5,15 +5,16 @@ MoonWire CI Demo Summary (read-only)
 Reads JSONL logs produced during tests and renders:
  - Markdown summary  -> artifacts/demo_summary.md
  - Small CI plot     -> artifacts/consensus.png
- - Social visual     -> artifacts/consensus_social.png
+ - Social visual     -> artifacts/consensus_social.png  (with sparkline timeline)
 
 No imports from app code; paths are plain ./logs/*.jsonl
 Safe to run only after tests pass.
 """
 
-import json, os, hashlib
+import json, hashlib
 from pathlib import Path
 from datetime import datetime, timezone
+from dateutil import parser as dtparser  # python-dateutil is common; if not present, add to requirements-dev.txt
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 
@@ -21,7 +22,9 @@ from matplotlib.patches import FancyBboxPatch
 LOGS_DIR = Path("logs")
 ART = Path("artifacts")
 DEFAULT_THRESHOLD = 2.5  # keep in sync with app config if it changes
-SOCIAL_W, SOCIAL_H, DPI = 1600, 900, 200  # 16:9 for X/Twitter
+
+# Social image: memory-safe HD
+SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 110  # 16:9
 # ----------------------------
 
 ART.mkdir(exist_ok=True)
@@ -35,11 +38,10 @@ def red(s: str) -> str:
 def load_jsonl(path: Path):
     if not path.exists():
         return []
-    lines = path.read_text().splitlines()
     out = []
-    for ln in lines:
+    for ln in path.read_text().splitlines():
         ln = ln.strip()
-        if not ln:
+        if not ln: 
             continue
         try:
             out.append(json.loads(ln))
@@ -75,7 +77,17 @@ def band_weight_from_score(score):
 
 seen = set()
 reviewers = []
+# also collect all-timestamps for sparkline (including duplicates, ordered)
+flag_times = []
 for r in sorted(sig_rows, key=lambda x: x.get("timestamp", "")):
+    # parse timestamps for sparkline
+    ts = r.get("timestamp")
+    try:
+        if ts:
+            flag_times.append(dtparser.isoparse(ts))
+    except Exception:
+        pass
+
     rid = r.get("reviewer_id", "")
     if rid in seen:
         continue
@@ -124,25 +136,26 @@ title = "MoonWire • Consensus Check"
 status = "TRIGGERED" if would_trigger else "NO TRIGGER"
 status_col = ok if would_trigger else warn
 
-plt.text(40, 820, title, color="white", fontsize=34, weight=600, ha="left", va="center")
+plt.text(40, 660, title, color="white", fontsize=32, weight=600, ha="left", va="center")
 bbox = dict(boxstyle="round,pad=0.35", fc=status_col, ec=status_col)
-plt.text(SOCIAL_W - 40, 820, status, color="white", fontsize=32, weight=700,
+plt.text(SOCIAL_W - 40, 660, status, color="white", fontsize=30, weight=700,
          ha="right", va="center", bbox=bbox)
 
 # Gauge track
-left, right, y = 120, SOCIAL_W - 120, 520
+left, right, y = 100, SOCIAL_W - 100, 440
 track_w = right - left
 ax.add_patch(FancyBboxPatch((left, y - 22), track_w, 44, boxstyle="round,pad=0.3",
                             linewidth=0, facecolor=frame))
 
 # Normalize scale so the bar is readable even when small
 cap = max(threshold, total_weight, 3.0)
+
 # threshold marker
 th_x = left + (threshold / cap) * track_w
 ax.add_patch(FancyBboxPatch((th_x - 2, y - 34), 4, 68, boxstyle="round,pad=0.0",
                             linewidth=0, facecolor=status_col))
-plt.text(th_x, y + 64, f"threshold {threshold:.2f}", color=status_col,
-         fontsize=18, ha="center", va="bottom")
+plt.text(th_x, y + 60, f"threshold {threshold:.2f}", color=status_col,
+         fontsize=16, ha="center", va="bottom")
 
 # fill to total weight
 fill_w = int((total_weight / cap) * track_w)
@@ -150,7 +163,7 @@ fill_w = max(0, min(track_w, fill_w))
 ax.add_patch(FancyBboxPatch((left, y - 18), fill_w, 36, boxstyle="round,pad=0.25",
                             linewidth=0, facecolor=accent))
 plt.text(left + fill_w + 10, y, f"{total_weight:.2f}", color=accent,
-         fontsize=24, ha="left", va="center")
+         fontsize=22, ha="left", va="center")
 
 # Stats blocks
 stats = [
@@ -159,22 +172,50 @@ stats = [
     f"Combined weight: {total_weight:.2f}",
     f"Threshold: {threshold:.2f}",
 ]
-plt.text(120, 360, "\n".join(stats), color="white", fontsize=22, va="top")
+plt.text(100, 320, "\n".join(stats), color="white", fontsize=20, va="top")
 
 rows = [f"• {red(r['id'])}: {r['weight']:.2f}" for r in reviewers[:8]]
 if len(reviewers) > 8:
     rows.append(f"… +{len(reviewers) - 8} more")
-plt.text(SOCIAL_W - 120, 360, "\n".join(rows) if rows else "No reviewers yet",
-         color=muted, fontsize=20, va="top", ha="right")
+plt.text(SOCIAL_W - 100, 320, "\n".join(rows) if rows else "No reviewers yet",
+         color=muted, fontsize=18, va="top", ha="right")
+
+# Sparkline timeline of flags (bottom)
+# Map timestamps to normalized 0..1 positions, then to pixel coords
+def draw_sparkline(times):
+    if not times:
+        return
+    times = sorted(times)
+    t0 = times[0]; t1 = times[-1]
+    # Avoid divide-by-zero for single timestamp
+    span = max((t1 - t0).total_seconds(), 1.0)
+    xs = []
+    for t in times:
+        x01 = (t - t0).total_seconds() / span
+        xs.append(left + x01 * track_w)
+    y_base = 170
+    # baseline
+    ax.add_patch(FancyBboxPatch((left, y_base - 2), track_w, 4,
+                                boxstyle="round,pad=0.2", linewidth=0, facecolor=frame))
+    # ticks / blips
+    for x in xs:
+        ax.add_patch(FancyBboxPatch((x - 2, y_base - 10), 4, 20,
+                                    boxstyle="round,pad=0.0", linewidth=0, facecolor=accent))
+    # label
+    lbl = "flag timeline" if len(times) > 1 else "single flag"
+    plt.text(left, y_base + 26, lbl, color=muted, fontsize=14, ha="left", va="bottom")
+
+draw_sparkline(flag_times)
 
 # watermark / timestamp
 stamp = f"moonwire • demo mode • {now}"
-plt.text(120, 110, stamp, color=muted, fontsize=16, ha="left")
+plt.text(100, 90, stamp, color=muted, fontsize=14, ha="left")
 
 plt.axis("off")
-plt.tight_layout(pad=0)
+# keep margins modest; no tight layout to avoid memory blowups
+fig.subplots_adjust(left=0.04, right=0.96, top=0.92, bottom=0.12)
 social_png = ART / "consensus_social.png"
-plt.savefig(social_png, dpi=DPI, facecolor=bg, bbox_inches="tight")
+plt.savefig(social_png, dpi=DPI, facecolor=bg)
 plt.close()
 
 # ---- markdown summary ----
