@@ -38,3 +38,20 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           python -m pytest tests/ --maxfail=1 --disable-warnings -q
+
+    - name: Build demo summary (read-only)
+      run: |
+        python scripts/mw_demo_summary.py
+
+    - name: Publish CI summary + upload artifact
+      run: |
+        echo "## MoonWire CI Demo Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        cat artifacts/demo_summary.md >> $GITHUB_STEP_SUMMARY
+      # upload the PNG + md for downloads / screenshot
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: moonwire-demo
+        path: artifacts/*
+
