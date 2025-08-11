@@ -1,155 +1,129 @@
 #!/usr/bin/env python3
 """
-MoonWire CI Demo Summary (read‑only)
+MoonWire CI Demo Summary (read-only)
 
 Outputs
- - artifacts/demo_summary.md
- - artifacts/consensus.png
- - artifacts/consensus_social.png
+ - artifacts/demo_summary.md             (markdown for CI summary)
+ - artifacts/consensus.png               (tiny bar used in the MD)
+ - artifacts/consensus_social.png        (1280x720 social image)
 
 Safe: reads ./logs/*.jsonl written by tests; does not import app code or mutate logs.
 """
 
 import os
 import json
-import uuid
-import random
 import hashlib
+import random
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import List, Tuple, Dict, Any, Optional
 
-from dateutil import parser as dtparser
+from dateutil import parser as dtparser  # in requirements-dev.txt
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
-import matplotlib.gridspec as gridspec
 
 # -------------------- config --------------------
 LOGS_DIR = Path("logs")
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 
-DEFAULT_THRESHOLD = 2.5
-SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 110
+DEFAULT_THRESHOLD = 2.5  # keep in sync with app config
+SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 110  # 16:9, crisp but memory-safe
 # ------------------------------------------------
 
-# -------------------- palette -------------------
-BG      = "#0B111B"
-PANEL   = "#111A28"
-TEXT    = "#E6EEF7"
-MUTED   = "#9AA8B4"
-GRID    = "#223047"
-ACCENT  = "#13C6F3"
-OK      = "#24D17E"
-WARN    = "#FF6B6F"
-# ------------------------------------------------
-
-
-# -------------------- helpers -------------------
-def _demo_mode() -> bool:
-    return os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes", "on")
-
+# ========== tiny helpers ==========
 def red(s: str) -> str:
-    if not s: return "000000"
+    """Redact any ID to a short sha1 prefix."""
+    if not s:
+        return "000000"
     return hashlib.sha1(s.encode()).hexdigest()[:6]
 
-def _read_jsonl(path: Path) -> List[dict]:
-    if not path.exists(): return []
+def load_jsonl(path: Path):
+    if not path.exists():
+        return []
     out = []
     for ln in path.read_text().splitlines():
         ln = ln.strip()
-        if not ln: continue
+        if not ln:
+            continue
         try:
             out.append(json.loads(ln))
         except Exception:
+            # tolerate malformed lines in CI
             pass
     return out
 
-def _ts_to_dt(ts) -> Optional[datetime]:
-    if ts is None: return None
-    try:
-        if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(float(ts), tz=timezone.utc)
-        return dtparser.isoparse(str(ts)).astimezone(timezone.utc)
-    except Exception:
-        return None
-
-def _ts_as_epoch(ts) -> float:
-    dt = _ts_to_dt(ts)
-    return dt.timestamp() if dt else 0.0
-
-def band_weight_from_score(score: Optional[float]) -> float:
+def band_weight_from_score(score):
     if score is None: return 1.0
     if score >= 0.75: return 1.25
     if score >= 0.50: return 1.0
     return 0.75
-# ------------------------------------------------
 
-
-# -------------------- demo seeding --------------------
-def generate_demo_data_if_needed(*args, **kwargs) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Accepts:
-      generate_demo_data_if_needed(reviewers)
-      generate_demo_data_if_needed(reviewers, flag_times, now=None)
-
-    Returns (display_reviewers, seeded_events)
-    """
-    reviewers: List[Dict[str, Any]] = []
-    flag_times: Optional[List[datetime]] = None
-    now: Optional[datetime] = None
-
-    if len(args) == 1:
-        reviewers = args[0]
-    elif len(args) >= 2:
-        reviewers, flag_times = args[0], args[1]
-        if len(args) >= 3:
-            now = args[2]
-    else:
-        reviewers = kwargs.get("reviewers", [])
-        flag_times = kwargs.get("flag_times")
-        now = kwargs.get("now")
-
-    if reviewers or not _demo_mode():
+# ========== DEMO MODE seeding (kept for tests) ==========
+def seed_reviewers_if_empty(reviewers, now=None):
+    """Return (compact_reviewers, seeded_events). Events have ISO timestamps."""
+    if reviewers:  # real data present → nothing to do
         return reviewers, []
-
     now = now or datetime.now(timezone.utc)
     n = random.randint(3, 5)
-    weights = [0.75, 1.0, 1.25]
+    choices = [0.75, 1.0, 1.25]
     seeded = []
     for _ in range(n):
-        w = random.choice(weights)
-        rid = f"demo-{uuid.uuid4().hex[:8]}"
-        ts = now - timedelta(minutes=random.randint(5, 55))
-        seeded.append({"id": rid, "weight": float(w), "timestamp": ts.isoformat()})
+        seeded.append({
+            "id": f"demo-{hashlib.sha1(os.urandom(8)).hexdigest()[:8]}",
+            "weight": random.choice(choices),
+            "timestamp": (now - timedelta(minutes=random.randint(3, 55))).isoformat()
+        })
+    compact = [{"id": r["id"], "weight": r["weight"]} for r in seeded]
+    return compact, seeded
 
-    display = [{"id": r["id"], "weight": r["weight"]} for r in seeded]
-    return display, seeded
-# ------------------------------------------------
+def generate_demo_data_if_needed(reviewers, flag_times=None):
+    """
+    Public helper used by tests.
+    Returns (reviewers, events). When DEMO_MODE=true and reviewers empty,
+    seeds 3–5 demo reviewers and events (read-only, not written to disk).
+    """
+    flag_times = flag_times or []
+    demo_on = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
+    if demo_on and not reviewers:
+        seeded_reviewers, seeded_events = seed_reviewers_if_empty(reviewers)
+        # extend caller's timeline (in-memory only)
+        for ev in seeded_events:
+            try:
+                flag_times.append(dtparser.isoparse(ev["timestamp"]))
+            except Exception:
+                pass
+        return seeded_reviewers, seeded_events
+    return reviewers, []
 
-
-# -------------------- load + assemble --------------------
-retrain_log   = _read_jsonl(LOGS_DIR / "retraining_log.jsonl")
-triggered_log = _read_jsonl(LOGS_DIR / "retraining_triggered.jsonl")
-scores_log    = _read_jsonl(LOGS_DIR / "reviewer_scores.jsonl")
+# ========== load logs ==========
+retrain_log   = load_jsonl(LOGS_DIR / "retraining_log.jsonl")
+triggered_log = load_jsonl(LOGS_DIR / "retraining_triggered.jsonl")
+scores_log    = load_jsonl(LOGS_DIR / "reviewer_scores.jsonl")
 score_by_id   = {r.get("reviewer_id"): r for r in scores_log}
 
+# latest signal
 if retrain_log:
-    latest = max(retrain_log, key=lambda r: _ts_as_epoch(r.get("timestamp")))
+    latest = max(retrain_log, key=lambda r: r.get("timestamp", ""))
     sig_id = latest.get("signal_id", "unknown")
     sig_rows = [r for r in retrain_log if r.get("signal_id") == sig_id]
 else:
     sig_id = "none"
     sig_rows = []
 
+# weights & timeline (dedupe by reviewer)
 seen = set()
-reviewers: List[Dict[str, Any]] = []
-flag_times: List[datetime] = []
+reviewers = []
+flag_times = []
+for r in sorted(sig_rows, key=lambda x: x.get("timestamp","")):
+    ts = r.get("timestamp")
+    if ts:
+        try:
+            flag_times.append(dtparser.isoparse(ts))
+        except Exception:
+            pass
 
-for r in sorted(sig_rows, key=lambda x: _ts_as_epoch(x.get("timestamp"))):
-    dt = _ts_to_dt(r.get("timestamp"))
-    if dt: flag_times.append(dt)
-    rid = r.get("reviewer_id", "")
-    if rid in seen: continue
+    rid = r.get("reviewer_id","")
+    if rid in seen:
+        continue
     seen.add(rid)
     w = r.get("reviewer_weight")
     if w is None:
@@ -157,166 +131,141 @@ for r in sorted(sig_rows, key=lambda x: _ts_as_epoch(x.get("timestamp"))):
         w = band_weight_from_score(sc)
     reviewers.append({"id": rid, "weight": round(float(w), 2)})
 
-# demo-mode, read-only augmentation
-reviewers, seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
-for ev in seeded_events:
-    dt = _ts_to_dt(ev.get("timestamp"))
-    if dt: flag_times.append(dt)
+# DEMO seeding (read-only)
+reviewers, _seeded = generate_demo_data_if_needed(reviewers, flag_times)
 
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
+last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
+                key=lambda x: x.get("timestamp",""), default=None)
 
-last_trig = max(
-    (t for t in triggered_log if t.get("signal_id") == sig_id),
-    key=lambda x: _ts_as_epoch(x.get("timestamp")),
-    default=None,
-)
+now_iso = datetime.now(timezone.utc).isoformat()
+demo_on = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
 
-# -------------------- visuals --------------------
-def _render_bar_chart(out_path: Path, total: float, thresh: float):
-    fig = plt.figure(figsize=(3.4, 2.0), dpi=220, facecolor=BG)
-    ax = fig.add_axes([0.14, 0.24, 0.78, 0.68], facecolor=PANEL)
+# ========== small bar for MD ==========
+plt.figure(figsize=(3.8, 2.1), dpi=220)
+plt.bar(["weight","threshold"], [total_weight, threshold])
+plt.title("Consensus vs threshold", pad=8)
+plt.tight_layout()
+small_png = ART / "consensus.png"
+plt.savefig(small_png, dpi=220)
+plt.close()
 
-    for sp in ax.spines.values():
-        sp.set_visible(False)
-    ax.set_axisbelow(True)
-    ax.grid(axis="y", color=GRID, alpha=0.55, linewidth=0.8)
+# ========== SOCIAL IMAGE (clean card layout) ==========
+bg="#0A0E1A"; accent="#00E5FF"; muted="#93A3B1"; ok="#24D17E"; warn="#FF5A5F"; frame="#162235"
+text="#FFFFFF"
 
-    bars = ax.bar(["weight", "threshold"], [total, thresh])
-    bars[0].set_color(ACCENT)
-    bars[1].set_color(OK if total >= thresh else WARN)
+fig = plt.figure(figsize=(SOCIAL_W/DPI, SOCIAL_H/DPI), dpi=DPI, facecolor=bg)
+F = fig.transFigure
 
-    ax.set_ylabel("weight", color=MUTED, fontsize=9)
-    ax.tick_params(colors=MUTED, labelsize=9)
-    ax.set_title("Consensus vs threshold", color=TEXT, fontsize=10, pad=8)
-
-    for rect in bars:
-        h = rect.get_height()
-        ax.text(rect.get_x() + rect.get_width() / 2, h + max(0.04, h * 0.03),
-                f"{h:.2f}", ha="center", va="bottom", color=TEXT, fontsize=9)
-
-    fig.savefig(out_path, dpi=220, facecolor=BG, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _render_social(payload: Dict[str, Any], out_path: Path):
-    fig = plt.figure(figsize=(SOCIAL_W / DPI, SOCIAL_H / DPI), dpi=DPI, facecolor=BG)
-    gs = gridspec.GridSpec(
-        3, 2, figure=fig,
-        height_ratios=[0.20, 0.50, 0.30],
-        width_ratios=[0.60, 0.40],
-        hspace=0.25, wspace=0.18
+def card(x, y, w, h, radius=0.02, fc=frame):
+    fig.patches.append(
+        FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0.012,rounding_size={radius}",
+                       linewidth=0, facecolor=fc, transform=F)
     )
 
-    # Title
-    ax_t = fig.add_subplot(gs[0, :]); ax_t.axis("off")
-    status = "TRIGGERED" if payload["would_trigger"] else "NO TRIGGER"
-    status_col = OK if payload["would_trigger"] else WARN
-    subtitle_bits = [f"Signal {red(payload['sig_id'])}"]
-    if _demo_mode() and not payload["sig_rows"]:
-        subtitle_bits.append("DEMO MODE (seeded)")
-    ax_t.text(0.00, 0.68, "MoonWire — Consensus Check",
-              color=TEXT, fontsize=24, weight=600, ha="left", va="center")
-    ax_t.text(0.00, 0.10, " • ".join(subtitle_bits),
-              color=MUTED, fontsize=13, ha="left", va="center")
-    ax_t.text(1.00, 0.55, f" {status} ",
-              color="white", fontsize=16, weight=700, ha="right", va="center",
-              bbox=dict(boxstyle="round,pad=0.35", fc=status_col, ec=status_col, lw=0))
+# Title row
+fig.text(0.06, 0.90, "MoonWire — Consensus Check", color=text, fontsize=28, weight=600,
+         ha="left", va="center", transform=F)
 
-    # Gauge
-    ax_g = fig.add_subplot(gs[1, 0], facecolor=PANEL)
-    for s in ax_g.spines.values(): s.set_visible(False)
-    ax_g.set_xticks([]); ax_g.set_yticks([])
-    cap = max(payload["threshold"], payload["total_weight"], 3.0) * 1.05
-    ax_g.set_xlim(0, cap)
-    ax_g.axhspan(0.35, 0.65, xmin=0.03, xmax=0.97, facecolor=GRID, linewidth=0)
-    ax_g.barh(0.5, payload["total_weight"], height=0.22, color=ACCENT)
-    ax_g.axvline(payload["threshold"], color=status_col, linewidth=2.6)
-    ax_g.text(payload["total_weight"], 0.83, f"{payload['total_weight']:.2f}",
-              color=ACCENT, fontsize=13, ha="right", va="bottom")
-    ax_g.text(payload["threshold"], 0.17, f"threshold {payload['threshold']:.2f}",
-              color=status_col, fontsize=12, ha="center", va="top")
-    ax_g.text(0.02, 0.98, "Consensus weight vs threshold",
-              color=MUTED, fontsize=11, ha="left", va="top", transform=ax_g.transAxes)
+status = "TRIGGERED" if would_trigger else "NO TRIGGER"
+status_col = ok if would_trigger else warn
+fig.text(0.94, 0.90, f" {status} ", color="white", fontsize=24, weight=700,
+         ha="right", va="center", transform=F,
+         bbox=dict(boxstyle="round,pad=0.35", fc=status_col, ec=status_col))
 
-    # Reviewers list
-    ax_r = fig.add_subplot(gs[1, 1], facecolor=PANEL); ax_r.axis("off")
-    ax_r.text(0.03, 0.95, "Reviewers (redacted)", color=TEXT, fontsize=14, weight=600,
-              ha="left", va="top")
-    rows = payload["reviewers"]
-    if not rows:
-        ax_r.text(0.03, 0.78, "No reviewers yet", color=MUTED, fontsize=12, ha="left", va="top")
-    else:
-        for i, r in enumerate(rows[:10]):
-            ax_r.text(0.03, 0.86 - i * 0.07,
-                      f"• {red(r['id'])}  —  {r['weight']:.2f}",
-                      color=MUTED, fontsize=12, ha="left", va="top")
-        if len(rows) > 10:
-            ax_r.text(0.03, 0.86 - 10 * 0.07, f"… +{len(rows) - 10} more",
-                      color=MUTED, fontsize=12, ha="left", va="top")
+# Subhead
+mode_note = " • DEMO MODE (seeded)" if demo_on and _seeded else ""
+fig.text(0.06, 0.86, f"Signal {red(sig_id)}{mode_note}",
+         color=muted, fontsize=14, ha="left", va="center", transform=F)
 
-    # Sparkline
-    ax_s = fig.add_subplot(gs[2, :], facecolor=PANEL)
-    for s in ax_s.spines.values(): s.set_visible(False)
-    ax_s.set_yticks([])
-    ax_s.grid(axis="x", color=GRID, linewidth=1, alpha=0.5)
-    ax_s.set_title("Flag timeline", color=MUTED, fontsize=12, pad=8)
-    times = payload["flag_times"]
-    if times:
-        t0, t1 = min(times), max(times)
-        if t0 == t1: t1 = t0 + timedelta(milliseconds=1)
-        xs = [(t - t0).total_seconds() for t in times]
-        ys = [0] * len(xs)
-        ax_s.plot(xs, ys, linewidth=1.6, color=ACCENT)
-        ax_s.scatter(xs, ys, s=22, color=ACCENT, zorder=3)
-        ax_s.set_xlim(min(xs), max(xs))
-    else:
-        ax_s.text(0.02, 0.55, "No flags this run", color=MUTED, fontsize=12,
-                  ha="left", va="center", transform=ax_s.transAxes)
+# --- Gauge card (left) ---
+g_x, g_y, g_w, g_h = 0.06, 0.60, 0.56, 0.18
+card(g_x, g_y, g_w, g_h)
 
-    # Footer
-    fig.text(0.015, 0.02,
-             f"moonwire • {'demo mode • ' if _demo_mode() else ''}{datetime.now(timezone.utc).isoformat()}",
-             color=MUTED, fontsize=11)
+# gauge track
+track_inset = 0.03
+track_x = g_x + track_inset
+track_y = g_y + track_inset
+track_w = g_w - track_inset*2
+track_h = g_h - track_inset*2
+fig.patches.append(FancyBboxPatch((track_x, track_y), track_w, track_h,
+                   boxstyle="round,pad=0.25", linewidth=0, facecolor="#122036", transform=F))
 
-    fig.savefig(out_path, dpi=DPI, facecolor=BG, bbox_inches="tight")
-    plt.close(fig)
-# ------------------------------------------------
+# bar fill (scaled against max(threshold, total_weight))
+cap = max(threshold, total_weight, 3.0)
+fill_w = track_w * max(0.0, min(1.0, total_weight / cap))
+if fill_w > 0:
+    fig.patches.append(FancyBboxPatch((track_x, track_y), fill_w, track_h,
+                       boxstyle="round,pad=0.25", linewidth=0, facecolor=accent, transform=F))
 
+# threshold line
+th_x = track_x + (threshold / cap) * track_w
+fig.patches.append(FancyBboxPatch((th_x-0.002, track_y-0.01), 0.004, track_h+0.02,
+                   boxstyle="round,pad=0.0", linewidth=0, facecolor=status_col, transform=F))
+fig.text(th_x, track_y+track_h+0.01, f"{threshold:.2f}", color=status_col, fontsize=12,
+         ha="center", va="bottom", transform=F)
+# total label above center of bar
+fig.text(track_x + min(fill_w, track_w)-0.005, track_y+track_h/2, f"{total_weight:.2f}",
+         color=accent, fontsize=16, ha="right", va="center", transform=F)
 
-# -------------------- render & write --------------------
-small_png = ART / "consensus.png"
-_render_bar_chart(small_png, total_weight, threshold)
+# --- Reviewers card (right) ---
+r_x, r_y, r_w, r_h = 0.66, 0.60, 0.28, 0.18
+card(r_x, r_y, r_w, r_h)
+fig.text(r_x+0.02, r_y+r_h-0.04, "Reviewers (redacted)", color=text, fontsize=14,
+         ha="left", va="top", transform=F)
+if reviewers:
+    rows = [f"• {red(r['id'])}  —  {r['weight']:.2f}" for r in reviewers[:6]]
+    fig.text(r_x+0.02, r_y+r_h-0.08, "\n".join(rows), color=muted, fontsize=12,
+             ha="left", va="top", transform=F)
+else:
+    fig.text(r_x+0.02, r_y+r_h-0.08, "No reviewers yet", color=muted, fontsize=12,
+             ha="left", va="top", transform=F)
+
+# --- Sparkline card (full width) ---
+s_x, s_y, s_w, s_h = 0.06, 0.30, 0.88, 0.18
+card(s_x, s_y, s_w, s_h)
+
+def draw_sparkline(times):
+    if not times:
+        fig.text(s_x+0.02, s_y+0.06, "No flags this run", color=muted, fontsize=13, transform=F)
+        return
+    times = sorted(times)
+    t0, t1 = times[0], times[-1]
+    span = max((t1 - t0).total_seconds(), 1.0)
+
+    # baseline
+    fig.patches.append(FancyBboxPatch((s_x+0.02, s_y+0.08), s_w-0.04, 0.006,
+                       boxstyle="round,pad=0.2", linewidth=0, facecolor="#122036", transform=F))
+    for t in times:
+        x01 = (t - t0).total_seconds()/span
+        x = s_x+0.02 + x01*(s_w-0.04)
+        fig.patches.append(FancyBboxPatch((x-0.003, s_y+0.07), 0.006, 0.028,
+                           boxstyle="round,pad=0.0", linewidth=0, facecolor=accent, transform=F))
+    fig.text(s_x+0.02, s_y+0.13, "Flag timeline", color=muted, fontsize=12, transform=F)
+
+draw_sparkline(flag_times)
+
+# footer
+fig.text(0.06, 0.08, f"moonwire • demo mode • {now_iso}", color=muted, fontsize=12, transform=F)
 
 social_png = ART / "consensus_social.png"
-_render_social(
-    {
-        "sig_id": sig_id,
-        "sig_rows": sig_rows,
-        "reviewers": reviewers,
-        "flag_times": flag_times,
-        "total_weight": total_weight,
-        "threshold": threshold,
-        "would_trigger": would_trigger,
-    },
-    social_png,
-)
+fig.savefig(social_png, dpi=DPI, facecolor=bg)
+plt.close(fig)
 
-would = "TRIGGERS" if would_trigger else "NO TRIGGER"
+# ========== Markdown summary ==========
 md = []
 md.append("# MoonWire CI Demo Summary")
 md.append("")
-md.append(f"MoonWire Demo Summary — {datetime.now(timezone.utc).isoformat()}")
+md.append(f"MoonWire Demo Summary — {now_iso}")
 md.append("")
-md.append("Pipeline proof (CI): end‑to‑end tests passed; consensus math reproduced on latest flagged signal.")
+md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.")
 md.append("")
 md.append(f"- **Signal:** `{red(sig_id)}`")
 md.append(f"- **Unique reviewers:** {len(reviewers)}")
 md.append(f"- **Combined weight:** **{total_weight}**")
-md.append(f"- **Threshold:** **{threshold}**  → **{would}**")
-if _demo_mode() and not sig_rows and reviewers:
-    md.append(f"- **Mode:** DEMO (seeded reviewers)")
+md.append(f"- **Threshold:** **{threshold}**  → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
 if last_trig:
     md.append(f"- **Last retrain trigger logged:** {last_trig.get('timestamp','')}")
 md.append("")
@@ -329,7 +278,8 @@ else:
 md.append("")
 md.append("![Consensus](consensus.png)")
 
-(md_path := ART / "demo_summary.md").write_text("\n".join(md))
+md_path = ART / "demo_summary.md"
+md_path.write_text("\n".join(md))
 
 print(f"Wrote: {md_path}")
 print(f"Wrote: {small_png}")
