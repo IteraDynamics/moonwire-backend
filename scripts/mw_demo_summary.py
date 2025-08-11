@@ -17,7 +17,7 @@ import random
 import hashlib
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import List, Tuple, Dict, Any, Optional, Iterable
+from typing import List, Tuple, Dict, Any, Optional
 
 from dateutil import parser as dtparser  # keep in requirements-dev.txt
 import matplotlib.pyplot as plt
@@ -89,20 +89,36 @@ def band_weight_from_score(score: Optional[float]) -> float:
 # ------------------------------------------------
 
 
-# -------------------- demo seeding --------------------
-def generate_demo_data_if_needed(
-    reviewers: List[Dict[str, Any]],
-    flag_times: List[datetime],
-    now: Optional[datetime] = None,
-) -> Tuple[List[Dict[str, Any]], List[datetime], List[Dict[str, Any]]]:
+# -------------------- demo seeding (test-compatible) --------------------
+def generate_demo_data_if_needed(*args, **kwargs) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Read‑only seeding used only for visualization when DEMO_MODE is on
-    and there are *no* reviewers for the latest signal.
+    Backwards‑compatible shim:
 
-    Returns (display_reviewers, updated_flag_times, seeded_events)
+    Accepts either:
+      generate_demo_data_if_needed(reviewers)
+      generate_demo_data_if_needed(reviewers, flag_times, now=None)
+
+    Returns (display_reviewers, seeded_events)
+      seeded_events: [{ "id": str, "weight": float, "timestamp": ISO8601 }, ...]
     """
+    # Unpack supported call shapes
+    reviewers: List[Dict[str, Any]] = []
+    flag_times: Optional[List[datetime]] = None
+    now: Optional[datetime] = None
+
+    if len(args) == 1:
+        reviewers = args[0]
+    elif len(args) >= 2:
+        reviewers, flag_times = args[0], args[1]
+        if len(args) >= 3:
+            now = args[2]
+    else:
+        reviewers = kwargs.get("reviewers", [])
+        flag_times = kwargs.get("flag_times")
+        now = kwargs.get("now")
+
     if reviewers or not DEMO_MODE:
-        return reviewers, flag_times, []
+        return reviewers, []
 
     now = now or datetime.now(timezone.utc)
     n = random.randint(3, 5)
@@ -115,10 +131,7 @@ def generate_demo_data_if_needed(
         seeded.append({"id": rid, "weight": float(w), "timestamp": ts.isoformat()})
 
     display = [{"id": r["id"], "weight": r["weight"]} for r in seeded]
-    seeded_times = [_ts_to_dt(r["timestamp"]) for r in seeded if r.get("timestamp")]
-    # extend timeline for sparkline
-    new_flag_times = list(flag_times) + [t for t in seeded_times if t]
-    return display, new_flag_times, seeded
+    return display, seeded
 # ------------------------------------------------
 
 
@@ -158,7 +171,12 @@ for r in sorted(sig_rows, key=lambda x: _ts_as_epoch(x.get("timestamp"))):
     reviewers.append({"id": rid, "weight": round(float(w), 2)})
 
 # Apply demo seeding (read‑only) if needed
-reviewers, flag_times, seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
+reviewers, seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
+# Extend sparkline with seeded timestamps (still in‑memory only)
+for ev in seeded_events:
+    dt = _ts_to_dt(ev.get("timestamp"))
+    if dt:
+        flag_times.append(dt)
 
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold = DEFAULT_THRESHOLD
@@ -175,9 +193,7 @@ now_iso = datetime.now(timezone.utc).isoformat()
 
 # -------------------- visuals --------------------
 def _render_bar_chart(consensus_png: Path, total: float, thresh: float):
-    """
-    Tidier mini bar: dark bg, subtle grid, tight labels.
-    """
+    """Tidier mini bar: dark panel, subtle grid, tight labels."""
     bg = "#0B111B"
     panel = "#141C2A"
     text = "#E6EEF7"
@@ -203,11 +219,10 @@ def _render_bar_chart(consensus_png: Path, total: float, thresh: float):
     ax.tick_params(colors=muted, labelsize=9)
     ax.set_title("Consensus vs Threshold", color=text, fontsize=10, pad=8)
 
-    # value labels
     for rect in bars:
         h = rect.get_height()
         ax.text(rect.get_x() + rect.get_width() / 2, h + max(0.04, h * 0.03),
-                f"{h:.2f}", ha="center", va="bottom", color=text, fontsize=9)
+            f"{h:.2f}", ha="center", va="bottom", color=text, fontsize=9)
 
     fig.savefig(consensus_png, dpi=220, facecolor=bg, bbox_inches="tight")
     plt.close(fig)
@@ -316,12 +331,9 @@ def _render_social(fig_data: Dict[str, Any], social_png: Path):
 
 
 # -------------------- render & write --------------------
-# mini bar
 small_png = ART / "consensus.png"
-_would = "TRIGGERS" if would_trigger else "NO TRIGGER"
 _render_bar_chart(small_png, total_weight, threshold)
 
-# social image
 social_png = ART / "consensus_social.png"
 fig_payload = {
     "sig_id": sig_id,
@@ -331,40 +343,39 @@ fig_payload = {
     "total_weight": total_weight,
     "threshold": threshold,
     "would_trigger": would_trigger,
-    "now": now_iso,
+    "now": datetime.now(timezone.utc).isoformat(),
 }
 _render_social(fig_payload, social_png)
 
-# markdown
-md_lines = []
-md_lines.append("# MoonWire CI Demo Summary")
-md_lines.append("")
-md_lines.append(f"MoonWire Demo Summary — {now_iso}")
-md_lines.append("")
-md_lines.append("Pipeline proof (CI): end‑to‑end tests passed; consensus math reproduced on latest flagged signal.")
-md_lines.append("")
-md_lines.append(f"- **Signal:** `{red(sig_id)}`")
-md_lines.append(f"- **Unique reviewers:** {len(reviewers)}")
-md_lines.append(f"- **Combined weight:** **{total_weight}**")
-md_lines.append(f"- **Threshold:** **{threshold}**  → **{_would}**")
+would = "TRIGGERS" if would_trigger else "NO TRIGGER"
+md = []
+md.append("# MoonWire CI Demo Summary")
+md.append("")
+md.append(f"MoonWire Demo Summary — {datetime.now(timezone.utc).isoformat()}")
+md.append("")
+md.append("Pipeline proof (CI): end‑to‑end tests passed; consensus math reproduced on latest flagged signal.")
+md.append("")
+md.append(f"- **Signal:** `{red(sig_id)}`")
+md.append(f"- **Unique reviewers:** {len(reviewers)}")
+md.append(f"- **Combined weight:** **{total_weight}**")
+md.append(f"- **Threshold:** **{threshold}**  → **{would}**")
 if DEMO_MODE and not sig_rows and reviewers:
-    md_lines.append(f"- **Mode:** DEMO (seeded reviewers)")
-# last trigger (best effort)
+    md.append(f"- **Mode:** DEMO (seeded reviewers)")
 if triggered_log:
     last = max(triggered_log, key=lambda x: _ts_as_epoch(x.get("timestamp")))
-    md_lines.append(f"- **Last retrain trigger logged:** {last.get('timestamp','')}")
-md_lines.append("")
-md_lines.append("**Reviewers (redacted):**")
+    md.append(f"- **Last retrain trigger logged:** {last.get('timestamp','')}")
+md.append("")
+md.append("**Reviewers (redacted):**")
 if reviewers:
     for r in reviewers:
-        md_lines.append(f"- `{red(r['id'])}` → weight {r['weight']}")
+        md.append(f"- `{red(r['id'])}` → weight {r['weight']}")
 else:
-    md_lines.append("- _none found in this run_")
-md_lines.append("")
-md_lines.append("![Consensus](consensus.png)")
+    md.append("- _none found in this run_")
+md.append("")
+md.append("![Consensus](consensus.png)")
 
 md_path = ART / "demo_summary.md"
-md_path.write_text("\n".join(md_lines))
+md_path.write_text("\n".join(md))
 
 print(f"Wrote: {md_path}")
 print(f"Wrote: {small_png}")
