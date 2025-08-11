@@ -10,12 +10,15 @@ Outputs
 Safe: reads ./logs/*.jsonl written by tests; does not import app code or mutate logs.
 """
 
+import os
 import json, hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 from dateutil import parser as dtparser  # add to requirements-dev.txt
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
+
+from src.demo_seed import seed_reviewers_if_empty
 
 # -------------------- config --------------------
 LOGS_DIR = Path("logs")
@@ -24,6 +27,14 @@ ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 DEFAULT_THRESHOLD = 2.5  # keep in sync with app config
 SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 110  # memory-safe 16:9 for social
 # ------------------------------------------------
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+DEMO_MODE = _bool_env("DEMO_MODE", False)
 
 def red(s: str) -> str:
     """Redact any ID to a short sha1 prefix."""
@@ -61,7 +72,7 @@ else:
     sig_id = "none"
     sig_rows = []
 
-# ---- weights & timeline ----
+# ---- weights & timeline (real data) ----
 def band_weight_from_score(score):
     if score is None: return 1.0
     if score >= 0.75: return 1.25
@@ -73,10 +84,17 @@ reviewers = []
 flag_times = []
 for r in sorted(sig_rows, key=lambda x: x.get("timestamp","")):
     ts = r.get("timestamp")
-    try:
-        if ts: flag_times.append(dtparser.isoparse(ts))
-    except Exception:
-        pass
+    # Accept either ISO string or epoch seconds for robustness
+    if isinstance(ts, (int, float)):
+        try:
+            flag_times.append(datetime.fromtimestamp(ts, tz=timezone.utc))
+        except Exception:
+            pass
+    else:
+        try:
+            if ts: flag_times.append(dtparser.isoparse(ts))
+        except Exception:
+            pass
 
     rid = r.get("reviewer_id","")
     if rid in seen:  # first flag counts
@@ -87,6 +105,17 @@ for r in sorted(sig_rows, key=lambda x: x.get("timestamp","")):
         sc = (score_by_id.get(rid) or {}).get("score")
         w = band_weight_from_score(sc)
     reviewers.append({"id": rid, "weight": round(float(w), 2)})
+
+# ---- DEMO MODE: non-mutating in-memory seeding when no reviewers ----
+seeded_events = []
+if DEMO_MODE and not reviewers:
+    reviewers, seeded_events = seed_reviewers_if_empty(reviewers)
+    # Include seeded timestamps in sparkline
+    for ev in seeded_events:
+        try:
+            flag_times.append(dtparser.isoparse(ev["timestamp"]))
+        except Exception:
+            pass
 
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold = DEFAULT_THRESHOLD
@@ -156,6 +185,8 @@ stats = [
     f"Combined weight: {total_weight:.2f}",
     f"Threshold: {threshold:.2f}",
 ]
+if DEMO_MODE and not sig_rows:
+    stats.append("Mode: DEMO (seeded reviewers)")
 fig.text(0.08, 0.48, "\n".join(stats), color="white", fontsize=18, va="top", transform=F)
 
 # Reviewers (right)
@@ -192,7 +223,7 @@ def draw_sparkline(times):
 draw_sparkline(flag_times)
 
 # watermark
-fig.text(0.08, 0.08, f"moonwire • demo mode • {now}", color=muted, fontsize=13, transform=F)
+fig.text(0.08, 0.08, f"moonwire • {'demo mode • ' if DEMO_MODE else ''}{now}", color=muted, fontsize=13, transform=F)
 
 social_png = ART / "consensus_social.png"
 fig.savefig(social_png, dpi=DPI, facecolor=bg)
@@ -210,6 +241,8 @@ md.append(f"- **Signal:** `{red(sig_id)}`")
 md.append(f"- **Unique reviewers:** {len(reviewers)}")
 md.append(f"- **Combined weight:** **{total_weight}**")
 md.append(f"- **Threshold:** **{threshold}**  → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
+if DEMO_MODE and not sig_rows:
+    md.append(f"- **Mode:** DEMO (no real reviewers found; seeded in-memory for visuals only)")
 if last_trig:
     md.append(f"- **Last retrain trigger logged:** {last_trig.get('timestamp','')}")
 md.append("")
