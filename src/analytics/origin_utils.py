@@ -49,9 +49,10 @@ def _parse_ts(v: Any) -> datetime | None:
 # --- JSONL streaming ---
 
 def _stream_jsonl(path: Path):
-    if not path or not Path(path).exists():
+    p = Path(path) if path is not None else None
+    if not p or not p.exists():
         return
-    with Path(path).open("r") as f:
+    with p.open("r") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -76,38 +77,58 @@ def compute_origin_breakdown(
       totals: {"flags": int, "triggers": int, "total_events": int}
     """
     if days < 1:
-        # router validates, but keep defensive
         days = 1
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=days)
 
-    # Per-origin counts across whichever streams are included
+    # Per-origin counts across included streams
     by_origin: Dict[str, int] = {}
+
+    # Keep separate tallies
     flags_count = 0
     triggers_count = 0
 
-    # Count flags
+    # Deduplicate per stream to avoid accidental duplicate log lines
+    seen_flags: set[tuple[str, str, float]] = set()
+    seen_trigs: set[tuple[str, str, float]] = set()
+
+    # ---- flags ----
     for rec in _stream_jsonl(flags_path):
-        ts = _parse_ts(rec.get("timestamp"))
-        if ts is None or ts < cutoff:
+        ts_dt = _parse_ts(rec.get("timestamp"))
+        if ts_dt is None or ts_dt < cutoff:
             continue
         origin = normalize_origin(rec.get("origin"))
+        signal_id = str(rec.get("signal_id", ""))
+        ts_key = ts_dt.timestamp()
+        key = (signal_id, origin, ts_key)
+        if key in seen_flags:
+            continue
+        seen_flags.add(key)
+
         by_origin[origin] = by_origin.get(origin, 0) + 1
         flags_count += 1
 
-    # Count triggers (only if requested)
+    # ---- triggers ----
     if include_triggers:
         for rec in _stream_jsonl(triggers_path):
-            ts = _parse_ts(rec.get("timestamp"))
-            if ts is None or ts < cutoff:
+            ts_dt = _parse_ts(rec.get("timestamp"))
+            if ts_dt is None or ts_dt < cutoff:
                 continue
             origin = normalize_origin(rec.get("origin"))
+            signal_id = str(rec.get("signal_id", ""))
+            ts_key = ts_dt.timestamp()
+            key = (signal_id, origin, ts_key)
+            if key in seen_trigs:
+                continue
+            seen_trigs.add(key)
+
             by_origin[origin] = by_origin.get(origin, 0) + 1
             triggers_count += 1
 
     total_events = flags_count + (triggers_count if include_triggers else 0)
 
+    # Build rows
     rows: List[Dict[str, Any]] = []
     for origin, count in by_origin.items():
         pct = (100.0 * count / total_events) if total_events > 0 else 0.0
@@ -117,7 +138,7 @@ def compute_origin_breakdown(
             "pct": round(pct, 2),
         })
 
-    # Sort: count desc, then origin asc
+    # Order: count desc, then origin asc
     rows.sort(key=lambda r: (-r["count"], r["origin"]))
 
     totals = {
