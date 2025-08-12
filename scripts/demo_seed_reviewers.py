@@ -54,8 +54,8 @@ def _pytest_sanitize_when_demo_off():
         pass
 
 def seed_once(
-    n_reviewers: int | None = None,          # <-- alias accepted by tests
-    num_reviewers: int | None = None,        # original name we used earlier
+    n_reviewers: int | None = None,          # alias expected by tests
+    num_reviewers: int | None = None,        # backward-compat alias
     signal_id: str | None = None,
 ) -> dict:
     """
@@ -120,6 +120,7 @@ def seed_once(
         "seeded": True,
         "signal_id": sid,
         "num_reviewers": n,
+        "reviewers": n,  # <-- test expects this key
     }
 
 if __name__ == "__main__":
