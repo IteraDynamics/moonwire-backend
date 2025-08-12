@@ -3,65 +3,48 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from pathlib import Path
 from typing import List, Dict, Any
 
-from src.paths import (
-    RETRAINING_LOG_PATH,
-    RETRAINING_TRIGGERED_LOG_PATH,
-)
+from pathlib import Path
+from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
 from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
 
-
-def _coerce_bool(val: bool | str | None, default: bool) -> bool:
-    if isinstance(val, bool):
-        return val
-    if val is None:
-        return default
-    s = str(val).lower()
-    return s in ("1", "true", "yes", "y", "on")
-
-
-@router.get("/signal-origins")
+@router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
-    days: int = Query(7, ge=1, description="Lookback window in days (>=1)"),
-    min_count: int = Query(1, ge=0, description="Drop origins below this count (after counting)"),
-    include_triggers: bool | str = Query(True, description="Include retraining triggers in counts"),
+    days: int = Query(7, ge=1, description="Lookback window in days"),
+    min_count: int = Query(1, ge=0, description="Drop origins below this count"),
+    include_triggers: bool = Query(True, description="Include retraining triggers"),
 ) -> Dict[str, Any]:
     """
-    Return counts and percentages of events by origin over a lookback window.
-    Flags always counted; triggers included when include_triggers=true.
+    Returns counts and percentage share for signal origins over the given window.
+    Reads:
+      - RETRAINING_LOG_PATH (flags)
+      - RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
     """
-    include_triggers_bool = _coerce_bool(include_triggers, True)
+    try:
+        rows, totals = compute_origin_breakdown(
+            Path(RETRAINING_LOG_PATH),
+            Path(RETRAINING_TRIGGERED_LOG_PATH),
+            days=days,
+            include_triggers=include_triggers,
+        )
+    except Exception as e:
+        # Keep internal endpoint resilient
+        raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Compute raw breakdown/totals
-    origins_list, totals = compute_origin_breakdown(
-        flags_path=Path(RETRAINING_LOG_PATH),
-        triggers_path=Path(RETRAINING_TRIGGERED_LOG_PATH),
-        days=days,
-        include_triggers=include_triggers_bool,
-    )
+    # Apply min_count filter AFTER aggregating (do not alter totals)
+    if min_count > 1:
+        rows = [r for r in rows if r["count"] >= min_count]
 
-    # Apply min_count filter ONLY to the per-origin rows (NOT to totals)
-    if min_count > 0:
-        filtered = [row for row in origins_list if row["count"] >= min_count]
-    else:
-        filtered = origins_list
-
-    # Sort is already handled in compute_origin_breakdown, but re-assert order after filter
-    filtered.sort(key=lambda x: (-x["count"], x["origin"]))
-
-    # Build response
-    response = {
+    # Already sorted by utils (count desc, origin asc)
+    return {
         "window_days": days,
-        "total_events": totals.get("total_events", 0),
-        "origins": filtered,
+        "total_events": totals["total_events"],
+        "origins": rows,
         "included": {
-            # Use raw totals from the aggregator; do NOT recompute here
-            "flags": totals.get("flags", 0),
-            "triggers": totals.get("triggers", 0),
+            "flags": totals["flags"],
+            "triggers": totals["triggers"],
         },
     }
-    return response
