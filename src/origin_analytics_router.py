@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from fastapi import APIRouter, Query
 
-# We still import the module for fallback defaults
+# Fallback defaults come from the module (works with your repo)
 import src.paths as paths_mod
 from src.analytics.origin_utils import compute_origin_breakdown
 
@@ -19,7 +19,6 @@ def _resolve_paths() -> tuple[Path, Path]:
     if env_logs:
         base = Path(env_logs)
         return base / "retraining_log.jsonl", base / "retraining_triggered.jsonl"
-    # Fallback to module constants (already Path objects in your repo)
     return Path(paths_mod.RETRAINING_LOG_PATH), Path(paths_mod.RETRAINING_TRIGGERED_LOG_PATH)
 
 @router.get("/signal-origins")
@@ -33,14 +32,17 @@ def signal_origins(
     """
     flags_path, triggers_path = _resolve_paths()
 
+    # IMPORTANT: if include_triggers is false, pass None so the helper processes flags only.
+    triggers_arg = triggers_path if include_triggers else None
+
     origins, totals = compute_origin_breakdown(
-        flags_path,
-        triggers_path,
+        flags_path=flags_path,
+        triggers_path=triggers_arg,
         days=days,
         include_triggers=include_triggers,
     )
 
-    # Apply min_count filter AFTER computing totals/pct
+    # Apply min_count AFTER counting/pct calc
     filtered = [o for o in origins if o["count"] >= min_count]
 
     return {
