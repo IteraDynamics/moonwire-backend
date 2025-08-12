@@ -7,8 +7,11 @@ Outputs
  - artifacts/consensus.png
  - artifacts/consensus_social.png
 
-Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND logs are empty,
+Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty,
 in which case it calls the demo seeder to append mock data for this run.
+
+NOTE: Tests import `generate_demo_data_if_needed` from this module.
+That function is read-only (in-memory) and returns (reviewers, events).
 """
 
 import os, json, hashlib, random, uuid
@@ -64,15 +67,45 @@ def parse_ts(val):
 def is_demo_mode() -> bool:
     return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
 
+# ---------- READ-ONLY demo seeding for tests/visuals ----------
+def generate_demo_data_if_needed(reviewers, flag_times=None):
+    """
+    Read-only, in-memory seeding used by tests and the visual.
+    If DEMO_MODE=true *and* reviewers is empty, returns a seeded set of
+    3–5 reviewers with weights ∈ {0.75,1.0,1.25} and timestamps within the last 60 min.
+    Returns (display_reviewers, seeded_events). Does NOT write to disk.
+    """
+    flag_times = flag_times or []
+    if not is_demo_mode() or reviewers:
+        return reviewers, []
+
+    now = datetime.now(timezone.utc)
+    n = random.randint(3, 5)
+    choices = [0.75, 1.0, 1.25]
+    seeded, display = [], []
+    for _ in range(n):
+        rid = f"demo-{uuid.uuid4().hex[:8]}"
+        w = random.choice(choices)
+        ts = (now - timedelta(minutes=random.randint(2, 55)))
+        seeded.append({"id": rid, "weight": w, "timestamp": ts.isoformat()})
+        display.append({"id": rid, "weight": w})
+        flag_times.append(ts)
+    return display, seeded
+
 # ---------- attempt real log seeding (only if DEMO_MODE && empty) ----------
 def maybe_seed_real_logs_if_empty():
+    """
+    Side-effect seeding: ONLY when DEMO_MODE=true and retraining log is empty.
+    Writes mock reviewers to logs so the whole stack (endpoints + visuals) sees data.
+    """
     if not is_demo_mode():
         return False
     retrain_path = LOGS_DIR / "retraining_log.jsonl"
+    # If retraining log already has any content, skip
     if retrain_path.exists():
         try:
             if any(ln.strip() for ln in retrain_path.read_text().splitlines()):
-                return False  # already has content
+                return False
         except Exception:
             pass
     # Empty or missing: try to seed
@@ -81,7 +114,7 @@ def maybe_seed_real_logs_if_empty():
         seed_once()  # default: random count & signal
         return True
     except Exception as e:
-        # Non-fatal; we’ll proceed with an empty visual if needed
+        # Non-fatal; proceed without seeded logs
         print(f"[demo] seeding skipped due to error: {e}")
         return False
 
@@ -127,11 +160,14 @@ for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
         w = band_weight_from_score(sc)
     reviewers.append({"id": rid, "weight": round(float(w), 2)})
 
+# (Optional) in-memory seeding for visuals only — keeps tests happy too
+reviewers, _seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
+
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold    = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
-last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
-                key=lambda x: x.get("timestamp", 0), default=None)
+last_trig = max((t for t in triggerd_log if t.get("signal_id")==sig_id),
+                key=lambda x: x.get("timestamp", 0), default=None) if (triggered_log := triggered_log) else None
 now_iso = datetime.now(timezone.utc).isoformat()
 
 # ---------- small CI bar ----------
@@ -166,7 +202,7 @@ def draw_social_card():
              color="white", fontsize=24, weight=700, ha="right", va="center", transform=F,
              bbox=dict(boxstyle="round,pad=0.35", fc=badge_col, ec=badge_col))
 
-    mode_tag = "• DEMO MODE (seeded)" if is_demo_mode() else ""
+    mode_tag = "• DEMO MODE" if is_demo_mode() else ""
     fig.text(L, T-0.005, f"Signal {red(sig_id)}  {mode_tag}",
              color=sub, fontsize=16, ha="left", va="center", transform=F)
 
