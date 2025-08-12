@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-“””
+"""
 MoonWire CI Demo Summary (read-only)
 
 Outputs
@@ -9,7 +9,7 @@ Outputs
 - artifacts/consensus_social.png
 
 Reads ./logs/*.jsonl; never mutates logs.
-“””
+"""
 
 import os, json, hashlib, random, uuid
 from pathlib import Path
@@ -32,7 +32,7 @@ SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120  # 16:9 stable card
 # ––––––– helpers —————–
 
 def red(s: str) -> str:
-“”“Redact any ID to a short sha1 prefix (6 chars).”””
+"""Redact any ID to a short sha1 prefix (6 chars)."""
 return “000000” if not s else hashlib.sha1(s.encode()).hexdigest()[:6]
 
 def load_jsonl(path: Path):
@@ -81,7 +81,7 @@ return None
 # —— demo seeding (read-only) ––––
 
 def generate_demo_data_if_needed(reviewers, flag_times=None):
-“””
+"""
 If DEMO_MODE=true and no reviewers present, return 3-5 seeded
 reviewers + seed timestamps (only for display). Never writes logs.
 
