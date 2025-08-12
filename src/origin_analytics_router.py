@@ -1,68 +1,40 @@
-# src/origin_analytics_router.py
+from __future__ import annotations
+
 from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
+from typing import List, Dict, Any
 from pathlib import Path
+from datetime import datetime, timezone
 
 from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
-from src.analytics.origin_utils import aggregate_origins, build_breakdown
+from src.analytics.origin_utils import compute_origin_breakdown, normalize_origin
 
 router = APIRouter(prefix="/internal")
 
 @router.get("/signal-origins")
 def signal_origins(
     days: int = Query(7, ge=1, description="Lookback window in days"),
-    min_count: int = Query(1, ge=1, description="Drop origins below this count"),
-    include_triggers: bool = Query(True, description="Include retraining triggers"),
+    min_count: int = Query(1, ge=1, description="Drop origins with fewer than this count"),
+    include_triggers: bool = Query(True, description="Include retraining triggers in counts"),
 ):
-    # guard
-    if days <= 0:
-        raise HTTPException(status_code=400, detail="days must be > 0")
-
-    counts, flags_included, triggers_included = aggregate_origins(
+    """
+    Return origin breakdown over the window.
+    """
+    origins, totals = compute_origin_breakdown(
         Path(RETRAINING_LOG_PATH),
         Path(RETRAINING_TRIGGERED_LOG_PATH),
         days=days,
         include_triggers=include_triggers,
     )
 
-    # If include_triggers=false we still pass triggers=0
-    if not include_triggers:
-        triggers_included = 0
+    # Apply min_count filter AFTER computing totals/pct
+    filtered = [o for o in origins if o["count"] >= min_count]
 
-    return build_breakdown(
-        counts=counts,
-        flags_included=flags_included,
-        triggers_included=triggers_included,
-        min_count=min_count,
-        window_days=days,
-    )
-
-# Optional: tiny plotting payload for dashboards
-@router.get("/signal-origins/chart")
-def signal_origins_chart(
-    days: int = Query(7, ge=1),
-    min_count: int = Query(1, ge=1),
-    include_triggers: bool = Query(True),
-):
-    counts, flags_included, triggers_included = aggregate_origins(
-        Path(RETRAINING_LOG_PATH),
-        Path(RETRAINING_TRIGGERED_LOG_PATH),
-        days=days,
-        include_triggers=include_triggers,
-    )
-    breakdown = build_breakdown(
-        counts=counts,
-        flags_included=flags_included,
-        triggers_included=(triggers_included if include_triggers else 0),
-        min_count=min_count,
-        window_days=days,
-    )
-    labels = [row["origin"] for row in breakdown["origins"]]
-    values = [row["count"] for row in breakdown["origins"]]
     return {
-        "window_days": breakdown["window_days"],
-        "labels": labels,
-        "counts": values,
-        "included": breakdown["included"],
-        "total_events": breakdown["total_events"],
+        "window_days": days,
+        "total_events": totals.get("total_events", 0),
+        "origins": filtered,
+        "included": {
+            "flags": totals.get("flags", 0),
+            "triggers": totals.get("triggers", 0) if include_triggers else 0,
+        },
     }
