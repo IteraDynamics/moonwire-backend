@@ -1,56 +1,135 @@
 from __future__ import annotations
 
-import os
+import json
 from pathlib import Path
-from fastapi import APIRouter, Query
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Iterable, Tuple, Optional
 
-# Fallback defaults come from the module (works with your repo)
-import src.paths as paths_mod
-from src.analytics.origin_utils import compute_origin_breakdown
+# --- Normalization map: add aliases here as needed ---
+_ORIGIN_ALIASES = {
+    "twitter_api": "twitter",
+    "twitterapi": "twitter",
+    "twitter": "twitter",
+    "reddit": "reddit",
+    "rss": "rss_news",
+    "rss_news": "rss_news",
+    "market": "market_feed",
+    "market_feed": "market_feed",
+}
 
-router = APIRouter(prefix="/internal")
 
-def _resolve_paths() -> tuple[Path, Path]:
+def _norm_origin(raw: object) -> str:
+    if raw is None:
+        return "unknown"
+    s = str(raw).strip().lower()
+    if not s:
+        return "unknown"
+    return _ORIGIN_ALIASES.get(s, s)
+
+
+def _parse_ts(val: object) -> Optional[datetime]:
     """
-    Resolve log file paths at request time, preferring LOGS_DIR env var
-    (used by tests to isolate state). Falls back to src.paths constants.
+    Accepts:
+      - float / int epoch seconds
+      - numeric strings of epoch seconds
+      - ISO-8601 strings, with or without 'Z'
+    Returns timezone-aware UTC datetime or None on failure.
     """
-    env_logs = os.getenv("LOGS_DIR")
-    if env_logs:
-        base = Path(env_logs)
-        return base / "retraining_log.jsonl", base / "retraining_triggered.jsonl"
-    return Path(paths_mod.RETRAINING_LOG_PATH), Path(paths_mod.RETRAINING_TRIGGERED_LOG_PATH)
+    if val is None:
+        return None
 
-@router.get("/signal-origins")
-def signal_origins(
-    days: int = Query(7, ge=1, description="Lookback window in days"),
-    min_count: int = Query(1, ge=1, description="Drop origins with fewer than this count"),
-    include_triggers: bool = Query(True, description="Include retraining triggers in counts"),
-):
+    # epoch numbers or numeric strings
+    try:
+        if isinstance(val, (int, float)):
+            return datetime.fromtimestamp(float(val), tz=timezone.utc)
+        sval = str(val).strip()
+        if sval.replace(".", "", 1).isdigit():  # "1691060400" or "1691060400.123"
+            return datetime.fromtimestamp(float(sval), tz=timezone.utc)
+    except Exception:
+        pass
+
+    # ISO strings
+    try:
+        s = str(val).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        # Ensure timezone-aware
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _iter_jsonl(path: Path) -> Iterable[dict]:
+    if not path or not Path(path).exists():
+        return
+    with Path(path).open("r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except Exception:
+                # Skip malformed lines
+                continue
+
+
+def compute_origin_breakdown(
+    flags_path: Path,
+    triggers_path: Optional[Path],
+    days: int,
+    include_triggers: bool,
+) -> Tuple[list, Dict[str, int]]:
     """
-    Origin breakdown over the window. Paths are resolved per request to respect test isolation.
+    Returns:
+      origins: list of {"origin": str, "count": int, "pct": float}
+      totals:  {"total_events": int, "flags": int, "triggers": int}
     """
-    flags_path, triggers_path = _resolve_paths()
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
 
-    # IMPORTANT: if include_triggers is false, pass None so the helper processes flags only.
-    triggers_arg = triggers_path if include_triggers else None
+    counts: Dict[str, int] = {}
+    flags_count = 0
+    triggers_count = 0
 
-    origins, totals = compute_origin_breakdown(
-        flags_path=flags_path,
-        triggers_path=triggers_arg,
-        days=days,
-        include_triggers=include_triggers,
-    )
+    # ---- Process flags ----
+    for rec in _iter_jsonl(flags_path):
+        ts = _parse_ts(rec.get("timestamp"))
+        if ts is None or ts < cutoff:
+            continue
+        origin = _norm_origin(rec.get("origin"))
+        counts[origin] = counts.get(origin, 0) + 1
+        flags_count += 1
 
-    # Apply min_count AFTER counting/pct calc
-    filtered = [o for o in origins if o["count"] >= min_count]
+    # ---- Process triggers if requested and path provided ----
+    if include_triggers and triggers_path is not None:
+        for rec in _iter_jsonl(triggers_path):
+            ts = _parse_ts(rec.get("timestamp"))
+            if ts is None or ts < cutoff:
+                continue
+            origin = _norm_origin(rec.get("origin"))
+            counts[origin] = counts.get(origin, 0) + 1
+            triggers_count += 1
 
-    return {
-        "window_days": days,
-        "total_events": totals.get("total_events", 0),
-        "origins": filtered,
-        "included": {
-            "flags": totals.get("flags", 0),
-            "triggers": totals.get("triggers", 0) if include_triggers else 0,
-        },
+    total_events = sum(counts.values())
+
+    # Build sorted list
+    origins_list = []
+    for origin, cnt in counts.items():
+        pct = round(100.0 * cnt / total_events, 2) if total_events > 0 else 0.0
+        origins_list.append({"origin": origin, "count": cnt, "pct": pct})
+
+    # Sort by count desc, then origin asc for stability
+    origins_list.sort(key=lambda x: (-x["count"], x["origin"]))
+
+    totals = {
+        "total_events": total_events,
+        "flags": flags_count,
+        "triggers": triggers_count,
     }
+    return origins_list, totals
