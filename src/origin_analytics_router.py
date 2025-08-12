@@ -1,15 +1,26 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
-from typing import List, Dict, Any
+import os
 from pathlib import Path
+from fastapi import APIRouter, Query
 
-# IMPORTANT: import the module, not the constants, so monkeypatched reloads are seen
+# We still import the module for fallback defaults
 import src.paths as paths_mod
-
 from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
+
+def _resolve_paths() -> tuple[Path, Path]:
+    """
+    Resolve log file paths at request time, preferring LOGS_DIR env var
+    (used by tests to isolate state). Falls back to src.paths constants.
+    """
+    env_logs = os.getenv("LOGS_DIR")
+    if env_logs:
+        base = Path(env_logs)
+        return base / "retraining_log.jsonl", base / "retraining_triggered.jsonl"
+    # Fallback to module constants (already Path objects in your repo)
+    return Path(paths_mod.RETRAINING_LOG_PATH), Path(paths_mod.RETRAINING_TRIGGERED_LOG_PATH)
 
 @router.get("/signal-origins")
 def signal_origins(
@@ -18,11 +29,9 @@ def signal_origins(
     include_triggers: bool = Query(True, description="Include retraining triggers in counts"),
 ):
     """
-    Return origin breakdown over the window.
-    Resolves paths at request time to respect tests that monkeypatch/reload src.paths.
+    Origin breakdown over the window. Paths are resolved per request to respect test isolation.
     """
-    flags_path = Path(paths_mod.RETRAINING_LOG_PATH)
-    triggers_path = Path(paths_mod.RETRAINING_TRIGGERED_LOG_PATH)
+    flags_path, triggers_path = _resolve_paths()
 
     origins, totals = compute_origin_breakdown(
         flags_path,
