@@ -23,15 +23,14 @@ def signal_origins(
       - src.paths.RETRAINING_LOG_PATH (flags)
       - src.paths.RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
 
-    NOTE: We import src.paths at call time to honor pytest fixtures that
-    monkeypatch/reload paths per test (e.g., isolated_logs).
+    NOTE: We resolve paths at call-time so pytest fixtures that monkeypatch/reload
+    src.paths take effect for each test (no stale constants from import-time).
     """
     try:
-        # import paths dynamically to pick up fixture overrides
-        from src import paths as paths_mod  # local import on purpose
-
-        flags_path = Path(paths_mod.RETRAINING_LOG_PATH)
-        triggers_path = Path(paths_mod.RETRAINING_TRIGGERED_LOG_PATH)
+        # Resolve paths at request time (critical for tests using monkeypatched paths)
+        from src import paths as p  # do NOT move to module top
+        flags_path = Path(p.RETRAINING_LOG_PATH)
+        triggers_path = Path(p.RETRAINING_TRIGGERED_LOG_PATH)
 
         rows, totals = compute_origin_breakdown(
             flags_path,
@@ -42,15 +41,14 @@ def signal_origins(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Apply min_count filter AFTER aggregating (do not alter totals)
+    # Apply min_count AFTER counting (don't alter totals)
     if min_count > 1:
         rows = [r for r in rows if r["count"] >= min_count]
 
-    # rows are already sorted by the utility
     return {
         "window_days": days,
         "total_events": totals["total_events"],
-        "origins": rows,
+        "origins": rows,  # already sorted by utils
         "included": {
             "flags": totals["flags"],
             "triggers": totals["triggers"],
