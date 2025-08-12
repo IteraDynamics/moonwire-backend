@@ -3,10 +3,11 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any
 from pathlib import Path
-from datetime import datetime, timezone
 
-from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
-from src.analytics.origin_utils import compute_origin_breakdown, normalize_origin
+# IMPORTANT: import the module, not the constants, so monkeypatched reloads are seen
+import src.paths as paths_mod
+
+from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
 
@@ -18,10 +19,14 @@ def signal_origins(
 ):
     """
     Return origin breakdown over the window.
+    Resolves paths at request time to respect tests that monkeypatch/reload src.paths.
     """
+    flags_path = Path(paths_mod.RETRAINING_LOG_PATH)
+    triggers_path = Path(paths_mod.RETRAINING_TRIGGERED_LOG_PATH)
+
     origins, totals = compute_origin_breakdown(
-        Path(RETRAINING_LOG_PATH),
-        Path(RETRAINING_TRIGGERED_LOG_PATH),
+        flags_path,
+        triggers_path,
         days=days,
         include_triggers=include_triggers,
     )
