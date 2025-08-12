@@ -41,63 +41,56 @@ def _load_jsonl(path: Path):
     return out
 
 def _pytest_sanitize_when_demo_off():
-    """
-    If pytest is running and DEMO_MODE is off, make sure we leave no traces
-    in the temp working directory: remove empty demo files/dirs if they exist.
-    This keeps the function's 'no side-effects when demo is off' contract.
-    """
+    """If pytest is running and DEMO_MODE is off, remove empty demo files/dirs to keep tests strict."""
     if "PYTEST_CURRENT_TEST" not in os.environ:
         return
     try:
-        # Only remove if files exist and are empty
         for p in (REVIEWER_SCORES, RETRAINING_LOG):
             if p.exists() and p.stat().st_size == 0:
                 p.unlink()
         if LOGS_DIR.exists() and not any(LOGS_DIR.iterdir()):
             LOGS_DIR.rmdir()
     except Exception:
-        # best-effort cleanup; ignore errors
         pass
 
 def seed_once(
-    num_reviewers: int | None = None,
+    n_reviewers: int | None = None,          # <-- alias accepted by tests
+    num_reviewers: int | None = None,        # original name we used earlier
     signal_id: str | None = None,
 ) -> dict:
     """
-    Seeds mock reviewers into logs/ when DEMO_MODE=true AND logs are empty or we
-    explicitly want to add demo data. Returns a dict with metadata.
-
-    When DEMO_MODE is false, this function does NOTHING and does not create directories/files.
-    In pytest, it also removes any empty, pre-existing demo files in the temp CWD to ensure
-    'no side-effects when off'.
+    Seed mock reviewers into logs/ when DEMO_MODE=true and logs are empty (or when explicitly requested).
+    When DEMO_MODE is false, do nothing and do not touch the filesystem.
     """
-    # EARLY EXIT: do not touch filesystem if demo is off
+    # EARLY EXIT: no side-effects if demo is off
     if not _is_demo_mode():
         print("DEMO_MODE is not enabled; skipping mock seed.")
         _pytest_sanitize_when_demo_off()
         return {"seeded": False, "reason": "demo_off"}
 
-    # From here on it's safe to touch the filesystem.
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     retrain_entries = _load_jsonl(RETRAINING_LOG)
     do_seed = False
-
     if not retrain_entries:
         do_seed = True
-
-    # If caller explicitly requested, force seeding
-    if num_reviewers is not None or signal_id is not None:
+    if n_reviewers is not None or num_reviewers is not None or signal_id is not None:
         do_seed = True
 
     if not do_seed:
         return {"seeded": False, "reason": "already_has_data"}
 
-    # Defaults
-    n = num_reviewers if (isinstance(num_reviewers, int) and 3 <= num_reviewers <= 7) else random.randint(3, 7)
-    sid = signal_id or f"demo-sig-{uuid.uuid4().hex[:8]}"
+    # prefer n_reviewers if provided, else num_reviewers
+    requested = n_reviewers if n_reviewers is not None else num_reviewers
+    if isinstance(requested, int) and 3 <= requested <= 7:
+        n = requested
+    else:
+        n = random.randint(3, 7)
 
+    sid = signal_id or f"demo-sig-{uuid.uuid4().hex[:8]}"
     now = datetime.now(timezone.utc)
+
+    # Build reviewers with scores and derived weights
     reviewers = []
     for _ in range(n):
         rid = f"demo-{uuid.uuid4().hex[:8]}"
@@ -113,7 +106,7 @@ def seed_once(
             "timestamp": now.isoformat()
         })
 
-    # Write retraining flags (one per reviewer)
+    # Write retraining flags (one per reviewer), spread across last 24h
     for r in reviewers:
         ts = now - timedelta(seconds=random.randint(60, 24 * 3600))
         _append_jsonl(RETRAINING_LOG, {
