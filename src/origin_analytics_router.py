@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from typing import List, Dict, Any
-
+from typing import Dict, Any
 from pathlib import Path
-from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+
 from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
+
 
 @router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
@@ -22,27 +22,36 @@ def signal_origins(
     Reads:
       - RETRAINING_LOG_PATH (flags)
       - RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
+
+    NOTE: We resolve src.paths at request-time so tests that monkeypatch/reload
+    paths (e.g., isolated_logs) are respected.
     """
     try:
+        # Resolve paths dynamically at request time
+        from src import paths as _paths  # defer import so monkeypatch/reload takes effect
+
+        flags_path = Path(_paths.RETRAINING_LOG_PATH)
+        triggers_path = Path(_paths.RETRAINING_TRIGGERED_LOG_PATH)
+
         rows, totals = compute_origin_breakdown(
-            Path(RETRAINING_LOG_PATH),
-            Path(RETRAINING_TRIGGERED_LOG_PATH),
+            flags_path,
+            triggers_path,
             days=days,
             include_triggers=include_triggers,
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        # Keep internal endpoint resilient
         raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Apply min_count filter AFTER aggregating (do not alter totals)
+    # Apply min_count filter AFTER computing totals (so included counts stay correct)
     if min_count > 1:
         rows = [r for r in rows if r["count"] >= min_count]
 
-    # Already sorted by utils (count desc, origin asc)
     return {
         "window_days": days,
         "total_events": totals["total_events"],
-        "origins": rows,
+        "origins": rows,  # already sorted in utils
         "included": {
             "flags": totals["flags"],
             "triggers": totals["triggers"],
