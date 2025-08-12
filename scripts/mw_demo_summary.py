@@ -7,11 +7,10 @@ Outputs
  - artifacts/consensus.png
  - artifacts/consensus_social.png
 
-Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty,
-in which case it calls the demo seeder to append mock data for this run.
+Reads ./logs/*.jsonl; never mutates logs.
 
-NOTE: Tests import `generate_demo_data_if_needed` from this module.
-That function is read-only (in-memory) and returns (reviewers, events).
+This version also computes a Signal Origin Breakdown (last 7 days, flags+triggers)
+and surfaces it in both the social image and the markdown summary.
 """
 
 import os, json, hashlib, random, uuid
@@ -26,7 +25,10 @@ LOGS_DIR = Path("logs")
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 
 DEFAULT_THRESHOLD = 2.5
-SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120  # stable 16:9; slightly higher DPI
+SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120
+ORIGIN_WINDOW_DAYS = 7      # lookback window for the summary card
+INCLUDE_TRIGGERS = True     # include retraining_triggered.jsonl in origin counts
+TOP_ORIGINS = 5             # how many origins to show on the card
 # ----------------------------
 
 # ---------- helpers ----------
@@ -43,6 +45,18 @@ def load_jsonl(path: Path):
         except Exception: pass
     return out
 
+def stream_jsonl(path: Path):
+    """Generator to stream JSONL safely."""
+    if not path.exists(): return
+    with path.open("r") as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                yield json.loads(line)
+            except Exception:
+                continue
+
 def band_weight_from_score(score):
     if score is None: return 1.0
     if score >= 0.75: return 1.25
@@ -55,119 +69,139 @@ def weight_to_label(w: float) -> str:
     return "Low"
 
 def parse_ts(val):
+    """Return aware UTC datetime from epoch seconds or ISO string; None on fail."""
     if val is None: return None
+    # epoch seconds (int/float) or numeric string
     try:
-        ts = float(val); return datetime.fromtimestamp(ts, tz=timezone.utc)
-    except Exception: pass
+        ts = float(val)
+        # if it's suspiciously huge/small, let ISO fall-through handle
+        if 0 < ts < 10_000_000_000:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except Exception:
+        pass
+    # ISO-ish string
     try:
-        s = str(val);  s = s[:-1] + "+00:00" if s.endswith("Z") else s
+        s = str(val)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
         return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception: return None
+    except Exception:
+        return None
 
-def is_demo_mode() -> bool:
-    return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
+# ---------- origin analytics ----------
+_ORIGIN_ALIASES = {
+    "twitter_api": "twitter",
+    "twitterapi": "twitter",
+    "tweet": "twitter",
+    "rss": "rss_news",
+    "news": "rss_news",
+    "reddit_api": "reddit",
+    "markets": "market_feed",
+    "market": "market_feed",
+}
 
-# ---------- READ-ONLY demo seeding for tests/visuals ----------
+def normalize_origin(raw) -> str:
+    if not raw: return "unknown"
+    s = str(raw).strip().lower()
+    return _ORIGIN_ALIASES.get(s, s)
+
+def collect_origin_breakdown(days=7, include_triggers=True):
+    """
+    Return (origins_list, totals) where origins_list = [{origin,count,pct}, ...]
+    and totals = {"flags": X, "triggers": Y, "total_events": X+Y}
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max(0, days))
+
+    flags = 0
+    triggers = 0
+    counts = {}
+
+    # flags from retraining_log.jsonl
+    for rec in stream_jsonl(LOGS_DIR / "retraining_log.jsonl"):
+        ts = parse_ts(rec.get("timestamp"))
+        if not ts or ts < cutoff:
+            continue
+        origin = normalize_origin(rec.get("origin"))
+        counts[origin] = counts.get(origin, 0) + 1
+        flags += 1
+
+    # triggers from retraining_triggered.jsonl
+    if include_triggers:
+        for rec in stream_jsonl(LOGS_DIR / "retraining_triggered.jsonl"):
+            ts = parse_ts(rec.get("timestamp"))
+            if not ts or ts < cutoff:
+                continue
+            origin = normalize_origin(rec.get("origin"))
+            counts[origin] = counts.get(origin, 0) + 1
+            triggers += 1
+
+    total = flags + triggers
+    if total == 0:
+        return [], {"flags": 0, "triggers": 0, "total_events": 0}
+
+    items = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    origins = [{"origin": k, "count": v, "pct": round(100.0 * v / total, 2)} for k, v in items]
+    return origins, {"flags": flags, "triggers": triggers, "total_events": total}
+
+# ---------- demo seeding (in-memory only for card) ----------
 def generate_demo_data_if_needed(reviewers, flag_times=None):
     """
-    Read-only, in-memory seeding used by tests and the visual.
-    If DEMO_MODE=true *and* reviewers is empty, returns a seeded set of
-    3–5 reviewers with weights ∈ {0.75,1.0,1.25} and timestamps within the last 60 min.
-    Returns (display_reviewers, seeded_events). Does NOT write to disk.
+    Tests import this symbol—keep signature stable.
+    When DEMO_MODE=true and no reviewers exist, seed 3–5 mock reviewers
+    in-memory (not written to logs) and extend flag_times with recent stamps.
     """
     flag_times = flag_times or []
-    if not is_demo_mode() or reviewers:
-        return reviewers, []
-
+    demo_on = os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
+    if not demo_on or reviewers: return reviewers, []
     now = datetime.now(timezone.utc)
-    n = random.randint(3, 5)
-    choices = [0.75, 1.0, 1.25]
+    n = random.randint(3,5); choices = [0.75,1.0,1.25]
     seeded, display = [], []
     for _ in range(n):
         rid = f"demo-{uuid.uuid4().hex[:8]}"
         w = random.choice(choices)
-        ts = (now - timedelta(minutes=random.randint(2, 55)))
+        ts = (now - timedelta(minutes=random.randint(2,55)))
         seeded.append({"id": rid, "weight": w, "timestamp": ts.isoformat()})
         display.append({"id": rid, "weight": w})
         flag_times.append(ts)
     return display, seeded
 
-# ---------- attempt real log seeding (only if DEMO_MODE && empty) ----------
-def maybe_seed_real_logs_if_empty():
-    """
-    Side-effect seeding: ONLY when DEMO_MODE=true and retraining log is empty.
-    Writes mock reviewers to logs so the whole stack (endpoints + visuals) sees data.
-    """
-    if not is_demo_mode():
-        return False
-    retrain_path = LOGS_DIR / "retraining_log.jsonl"
-    # If retraining log already has any content, skip
-    if retrain_path.exists():
-        try:
-            if any(ln.strip() for ln in retrain_path.read_text().splitlines()):
-                return False
-        except Exception:
-            pass
-    # Empty or missing: try to seed
-    try:
-        from scripts.demo_seed_reviewers import seed_once
-        seed_once()  # default: random count & signal
-        return True
-    except Exception as e:
-        # Non-fatal; proceed without seeded logs
-        print(f"[demo] seeding skipped due to error: {e}")
-        return False
-
-# ---- maybe seed first, then load logs ----
-_ = maybe_seed_real_logs_if_empty()
-
+# ---------- load logs ----------
 retrain_log   = load_jsonl(LOGS_DIR / "retraining_log.jsonl")
 triggered_log = load_jsonl(LOGS_DIR / "retraining_triggered.jsonl")
 scores_log    = load_jsonl(LOGS_DIR / "reviewer_scores.jsonl")
 score_by_id   = {r.get("reviewer_id"): r for r in scores_log}
 
-# ---- latest signal in retraining log ----
+# latest signal
 if retrain_log:
-    # timestamp may be epoch or iso-ish; prefer numeric when available
-    def _key(r):
-        t = r.get("timestamp", 0)
-        try:
-            return float(t)
-        except Exception:
-            return 0.0
-    latest = max(retrain_log, key=_key)
+    latest = max(retrain_log, key=lambda r: r.get("timestamp", 0))
     sig_id = latest.get("signal_id", "unknown")
-    sig_rows = [r for r in retrain_log if r.get("signal_id") == sig_id]
+    sig_rows = [r for r in retrain_log if r.get("signal_id")==sig_id]
 else:
-    sig_id = "none"
-    sig_rows = []
+    sig_id = "none"; sig_rows = []
 
-# ---- weights & timeline ----
-seen = set()
-reviewers = []
-flag_times = []
+# weights & timeline
+seen, reviewers, flag_times = set(), [], []
 for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
     t = parse_ts(r.get("timestamp"))
     if t: flag_times.append(t)
-
     rid = r.get("reviewer_id","")
-    if rid in seen:  # first flag counts
-        continue
+    if rid in seen: continue
     seen.add(rid)
     w = r.get("reviewer_weight")
     if w is None:
         sc = (score_by_id.get(rid) or {}).get("score")
         w = band_weight_from_score(sc)
-    reviewers.append({"id": rid, "weight": round(float(w), 2)})
+    reviewers.append({"id": rid, "weight": round(float(w),2)})
 
-# (Optional) in-memory seeding for visuals only — keeps tests happy too
-reviewers, _seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
+# seed (display-only) if needed
+reviewers, seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
 
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold    = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
-last_trig = max((t for t in triggerd_log if t.get("signal_id")==sig_id),
-                key=lambda x: x.get("timestamp", 0), default=None) if (triggered_log := triggered_log) else None
+last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
+                key=lambda x: x.get("timestamp", 0), default=None)
 now_iso = datetime.now(timezone.utc).isoformat()
 
 # ---------- small CI bar ----------
@@ -178,6 +212,13 @@ plt.tight_layout()
 small_png = ART / "consensus.png"
 plt.savefig(small_png, dpi=200)
 plt.close()
+
+# ---------- compute origin breakdown (last 7d, with triggers) ----------
+origins_list, origin_totals = collect_origin_breakdown(
+    days=ORIGIN_WINDOW_DAYS,
+    include_triggers=INCLUDE_TRIGGERS
+)
+top_origins = origins_list[:TOP_ORIGINS]
 
 # ---------- social card ----------
 def draw_social_card():
@@ -202,7 +243,7 @@ def draw_social_card():
              color="white", fontsize=24, weight=700, ha="right", va="center", transform=F,
              bbox=dict(boxstyle="round,pad=0.35", fc=badge_col, ec=badge_col))
 
-    mode_tag = "• DEMO MODE" if is_demo_mode() else ""
+    mode_tag = "• DEMO MODE (seeded)" if seeded_events else ""
     fig.text(L, T-0.005, f"Signal {red(sig_id)}  {mode_tag}",
              color=sub, fontsize=16, ha="left", va="center", transform=F)
 
@@ -226,9 +267,9 @@ def draw_social_card():
 
     # consensus bar (left column)
     left_x = card_x + 0.03
-    bar_w = 0.52 * card_w
+    bar_w = 0.50 * card_w
     bar_h = 0.11
-    bar_y = card_y + card_h*0.56
+    bar_y = card_y + card_h*0.60
 
     fig.text(left_x, bar_y + bar_h + 0.03, "Consensus vs Threshold",
              color=sub, fontsize=16, ha="left", va="bottom", transform=F)
@@ -252,7 +293,7 @@ def draw_social_card():
     fig.text(th_x, bar_y + bar_h + 0.005, f"{threshold:.2f}",
              color=th_col, fontsize=16, weight=600, ha="center", va="bottom", transform=F)
 
-    # reviewer panel (right column)
+    # reviewer panel (right, top)
     box_x = left_x + bar_w + 0.04
     box_w = card_x + card_w - box_x - 0.03
     box_h = bar_h + 0.14
@@ -260,7 +301,7 @@ def draw_social_card():
 
     fig.patches.append(FancyBboxPatch((box_x, box_y), box_w, box_h,
                         boxstyle="round,pad=0.02,rounding_size=0.012",
-                        linewidth=0, facecolor=line, transform=F))
+                        linewidth=0, facecolor="#121e32", transform=F))
     fig.text(box_x + 0.02, box_y + box_h - 0.035, "Reviewers (redacted)",
              color=sub, fontsize=14, ha="left", va="top", transform=F)
 
@@ -274,11 +315,45 @@ def draw_social_card():
         fig.text(box_x + 0.02, box_y + box_h - 0.07, "No reviewers yet",
                  color=text, fontsize=15, ha="left", va="top", transform=F)
 
-    # timeline
-    tl_x = left_x; tl_w = card_w - 0.06; tl_h = 0.11; tl_y = card_y + 0.20
+    # origin breakdown (right, bottom)
+    obox_w, obox_h = box_w, 0.16
+    obox_x, obox_y = box_x, card_y + 0.24
+    fig.patches.append(FancyBboxPatch((obox_x, obox_y), obox_w, obox_h,
+                        boxstyle="round,pad=0.02,rounding_size=0.012",
+                        linewidth=0, facecolor="#121e32", transform=F))
+    fig.text(obox_x + 0.02, obox_y + obox_h - 0.035,
+             f"Signal origins (last {ORIGIN_WINDOW_DAYS}d, {'flags+triggers' if INCLUDE_TRIGGERS else 'flags'})",
+             color=sub, fontsize=14, ha="left", va="top", transform=F)
+
+    if top_origins:
+        # simple horizontal bars within the box
+        max_count = max(o["count"] for o in top_origins)
+        base_x = obox_x + 0.02
+        base_y = obox_y + obox_h - 0.07
+        row_h  = 0.028
+        bar_span = obox_w - 0.25  # leave room for labels
+
+        for i, o in enumerate(top_origins):
+            y = base_y - i*row_h
+            label = f"{o['origin']}"
+            fig.text(base_x, y, label, color=text, fontsize=12, ha="left", va="center", transform=F)
+            # bar
+            if max_count > 0:
+                w01 = o["count"] / max_count
+                fig.patches.append(Rectangle((base_x + 0.12, y-0.009), w01 * bar_span, 0.018,
+                                             linewidth=0, facecolor="#3BA1FF", transform=F))
+            # value
+            fig.text(base_x + 0.12 + bar_span + 0.01, y, f"{o['count']} ({o['pct']}%)",
+                     color=sub, fontsize=12, ha="left", va="center", transform=F)
+    else:
+        fig.text(obox_x + 0.02, obox_y + 0.06, "No recent events",
+                 color=sub, fontsize=13, ha="left", va="center", transform=F)
+
+    # timeline (full width below)
+    tl_x = left_x; tl_w = card_w - 0.06; tl_h = 0.11; tl_y = card_y + 0.08
     fig.patches.append(FancyBboxPatch((tl_x, tl_y), tl_w, tl_h,
                         boxstyle="round,pad=0.02,rounding_size=0.012",
-                        linewidth=0, facecolor=line, transform=F))
+                        linewidth=0, facecolor="#121e32", transform=F))
     fig.text(tl_x + 0.015, tl_y + tl_h + 0.01, "Flag timeline (last run)",
              color=sub, fontsize=14, ha="left", va="bottom", transform=F)
 
@@ -302,8 +377,7 @@ def draw_social_card():
              color=sub, fontsize=12, ha="left", va="top", transform=F)
 
     out = ART / "consensus_social.png"
-    # IMPORTANT: no bbox_inches="tight" to avoid random cropping/letterboxing
-    fig.savefig(out, dpi=DPI, facecolor=bg)
+    fig.savefig(out, dpi=DPI, facecolor=bg)   # no tight bbox → stable layout
     plt.close(fig)
     return out
 
@@ -330,6 +404,20 @@ if reviewers:
         md.append(f"- `{red(r['id'])}` → {weight_to_label(r['weight'])}")
 else:
     md.append("- _none found in this run_")
+
+# Origin breakdown in markdown
+md.append("")
+md.append(f"**Signal origins** (last {ORIGIN_WINDOW_DAYS}d, {'flags+triggers' if INCLUDE_TRIGGERS else 'flags'}):")
+if origins_list:
+    total_ev = origin_totals.get("total_events", 0)
+    md.append(f"- Total events: **{total_ev}**  (flags: {origin_totals.get('flags',0)}, triggers: {origin_totals.get('triggers',0)})")
+    for o in origins_list[:TOP_ORIGINS]:
+        md.append(f"  - **{o['origin']}** — {o['count']} ({o['pct']}%)")
+    if len(origins_list) > TOP_ORIGINS:
+        md.append(f"  - … +{len(origins_list) - TOP_ORIGINS} more")
+else:
+    md.append("- _no recent events in window_")
+
 md.append("")
 md.append("![Consensus](consensus.png)")
 
