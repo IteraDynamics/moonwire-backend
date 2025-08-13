@@ -1,92 +1,94 @@
+#!/usr/bin/env python3
 import json
+import os
 from datetime import datetime, timedelta
-from pathlib import Path
 from collections import Counter
 
-from src.paths import REVIEWER_IMPACT_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
-from src.paths import REVIEWER_SCORES_PATH, REVIEWER_SCORES_HISTORY_PATH
-from src.paths import LOGS_DIR
+from tabulate import tabulate
 
-SUMMARY_TITLE = "MoonWire CI Demo Summary"
+DEMO_DATA_FILE = "demo_data.json"
 
 
-def load_jsonl(path: Path):
-    """Load a JSONL file, returning a list of dicts (empty if missing)."""
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
-def format_reviewer_list(reviewers):
-    """Format reviewers in the 'abc123 -> rating' style."""
-    return "\n".join(
-        f"- `{r['reviewer_id']}` → {r['rating']}" for r in reviewers
-    )
-
-
-def format_origin_breakdown(days=7):
+def generate_demo_data_if_needed():
     """
-    Return a breakdown of signal origins over the last `days` days.
-    Reads from REVIEWER_IMPACT_LOG_PATH because that's where test flags write.
+    Ensures demo data exists. If not, generates some fake data for testing/demo purposes.
+    This function is imported by tests/test_demo_seed.py, so its signature must remain.
     """
-    entries = load_jsonl(REVIEWER_IMPACT_LOG_PATH)
-    if not entries:
-        return "- *no origins logged in last 7 days*"
+    if os.path.exists(DEMO_DATA_FILE):
+        return
 
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    origins = [
-        (e.get("origin") or "unknown")
-        for e in entries
-        if "ts" in e and datetime.fromisoformat(e["ts"]) >= cutoff
-    ]
+    now = datetime.utcnow()
+    data = {
+        "signal": "demo-signal",
+        "reviewers": [
+            {"id": "abc123", "rating": "High"},
+            {"id": "def456", "rating": "Low"},
+            {"id": "ghi789", "rating": "Med"},
+        ],
+        "origins": [
+            {"origin": "twitter", "timestamp": (now - timedelta(days=1)).isoformat()},
+            {"origin": "reddit", "timestamp": (now - timedelta(days=2)).isoformat()},
+            {"origin": "rss_news", "timestamp": (now - timedelta(days=3)).isoformat()},
+        ],
+    }
+    with open(DEMO_DATA_FILE, "w") as f:
+        json.dump(data, f)
 
-    if not origins:
-        return "- *no origins logged in last 7 days*"
 
-    counts = Counter(origins)
-    total = sum(counts.values())
-
-    # Markdown table formatting for readability
-    header = "| Origin | Count | Percent |"
-    sep = "|---|---:|---:|"
-    rows = [
-        f"| {origin} | {count} | {count / total:.1%} |"
-        for origin, count in sorted(counts.items(), key=lambda x: (-x[1], x[0]))
-    ]
-    return "\n".join([header, sep] + rows)
+def load_demo_data():
+    """
+    Loads the demo data from file, generating it first if necessary.
+    """
+    generate_demo_data_if_needed()
+    with open(DEMO_DATA_FILE) as f:
+        return json.load(f)
 
 
 def generate_summary():
-    # Latest reviewer scores
-    reviewer_scores = load_jsonl(REVIEWER_SCORES_PATH)
-    latest_signal = reviewer_scores[-1]["signal"] if reviewer_scores else None
-    unique_reviewers = len({r["reviewer_id"] for r in reviewer_scores})
-    combined_weight = sum(r["weight"] for r in reviewer_scores)
-    threshold = 2.5  # hardcoded threshold from your tests
+    """
+    Generates and prints a demo summary, including a simple table breakdown of signal origins.
+    """
+    data = load_demo_data()
 
-    # Build markdown summary
-    parts = []
-    parts.append(f"# {SUMMARY_TITLE}\n")
-    parts.append(f"MoonWire Demo Summary — {datetime.utcnow().isoformat()}Z\n")
-    parts.append(
-        "Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.\n"
+    # Basic info
+    print("MoonWire CI Demo Summary")
+    print(f"MoonWire Demo Summary — {datetime.utcnow().isoformat()}Z\n")
+    print("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.\n")
+
+    print(f"- Signal: {data['signal']}")
+    print(f"- Unique reviewers: {len(data['reviewers'])}")
+    # Fake combined weight & threshold
+    combined_weight = sum(
+        {"Low": 1, "Med": 1.5, "High": 2}.get(r["rating"], 1) for r in data["reviewers"]
     )
-    if latest_signal:
-        parts.append(f"- **Signal:** `{latest_signal}`")
-    parts.append(f"- **Unique reviewers:** {unique_reviewers}")
-    parts.append(f"- **Combined weight:** {combined_weight}")
-    parts.append(f"- **Threshold:** {threshold} → **TRIGGERS**\n")
+    print(f"- Combined weight: {combined_weight}")
+    print(f"- Threshold: 2.5 → TRIGGERS\n")
 
-    if reviewer_scores:
-        parts.append("**Reviewers (redacted):**\n")
-        parts.append(format_reviewer_list(reviewer_scores) + "\n")
+    # Reviewers
+    print("Reviewers (redacted):")
+    for r in data["reviewers"]:
+        print(f"• {r['id']} → {r['rating']}")
+    print()
 
-    parts.append("**Signal origin breakdown (last 7 days):**\n")
-    parts.append(format_origin_breakdown(days=7))
-
-    return "\n".join(parts)
+    # Signal origin breakdown for the last 7 days
+    print("Signal origin breakdown (last 7 days):")
+    cutoff = datetime.utcnow() - timedelta(days=7)
+    recent_origins = [
+        o["origin"]
+        for o in data.get("origins", [])
+        if datetime.fromisoformat(o["timestamp"]) >= cutoff
+    ]
+    if not recent_origins:
+        print("- no origins logged in last 7 days")
+    else:
+        counts = Counter(recent_origins)
+        total = sum(counts.values())
+        table = [
+            [origin, count, f"{(count/total)*100:.1f}%"]
+            for origin, count in counts.items()
+        ]
+        print(tabulate(table, headers=["Origin", "Count", "Percent"], tablefmt="github"))
 
 
 if __name__ == "__main__":
-    print(generate_summary())
+    generate_summary()
