@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 from typing import Dict, Any
+import importlib
 
-from src.paths import (
-    RETRAINING_LOG_PATH,
-    RETRAINING_TRIGGERED_LOG_PATH,
-)
+import src.paths as _paths  # module, not constants
 from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
@@ -24,10 +22,16 @@ def signal_origins(
       - retraining_triggered.jsonl (triggers, optional)
     """
 
+    # IMPORTANT: Re-resolve paths at request time so tests that monkeypatch LOGS_DIR
+    # (and reload src.paths) are respected here, avoiding stale import-time constants.
+    paths = importlib.reload(_paths)
+    flags_path = paths.RETRAINING_LOG_PATH
+    trig_path = paths.RETRAINING_TRIGGERED_LOG_PATH
+
     try:
         rows, totals = compute_origin_breakdown(
-            flags_path=RETRAINING_LOG_PATH,
-            triggers_path=RETRAINING_TRIGGERED_LOG_PATH,
+            flags_path=flags_path,
+            triggers_path=trig_path,
             days=days,
             include_triggers=include_triggers,
         )
@@ -40,6 +44,6 @@ def signal_origins(
     return {
         "window_days": days,
         "total_events": totals["total_events"],
-        "origins": rows,
+        "origins": rows,  # already sorted by utils
         "included": {"flags": totals["flags"], "triggers": totals["triggers"]},
     }
