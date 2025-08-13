@@ -1,76 +1,59 @@
 # src/origin_analytics_router.py
-
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from typing import Any, Dict
-import importlib
+from typing import Dict, Any
 from pathlib import Path
 
 from src.analytics.origin_utils import compute_origin_breakdown
 
-# NOTE:
-# We DO NOT set a router-level prefix here.
-# The route path below includes "/internal/...".
-# In main.py, include this router WITHOUT an extra prefix to avoid "/internal/internal/...".
-router = APIRouter()
+router = APIRouter(prefix="/internal")
 
-
-def _paths():
+def _resolve_paths() -> tuple[Path, Path]:
     """
-    Resolve src.paths at call time so tests that reload/monkeypatch it
-    (e.g., override LOGS_DIR) are honored here.
+    Resolve current log paths at request time.
+    This avoids freezing old paths that were imported before tests
+    changed LOGS_DIR and reloaded src.paths.
     """
-    return importlib.import_module("src.paths")
+    from src import paths as P  # import inside to pick up reloaded module
+    return Path(P.RETRAINING_LOG_PATH), Path(P.RETRAINING_TRIGGERED_LOG_PATH)
 
-
-@router.get("/internal/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
+@router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
     days: int = Query(7, ge=1, description="Lookback window in days"),
     min_count: int = Query(1, ge=0, description="Drop origins below this count"),
-    include_triggers: bool = Query(True, description="Include retraining triggers in counts"),
+    include_triggers: bool = Query(True, description="Include retraining triggers"),
 ) -> Dict[str, Any]:
     """
     Returns counts and percentage share for signal origins over the given window.
-
     Reads:
-      - logs/retraining_log.jsonl (flags)
-      - logs/retraining_triggered.jsonl (triggers, if include_triggers=True)
-
-    The underlying utils handle:
-      - epoch-second timestamps
-      - origin normalization (aliases -> canonical names)
-      - skipping malformed lines safely
-      - sorting by count desc, then origin asc
+      - retraining_log.jsonl (flags) — always counted
+      - retraining_triggered.jsonl (triggers) — added when include_triggers=True
     """
     try:
-        p = _paths()
-        flags_path: Path = Path(p.RETRAINING_LOG_PATH)
-        trig_path: Path = Path(p.RETRAINING_TRIGGERED_LOG_PATH)
-
+        flags_path, triggers_path = _resolve_paths()
         rows, totals = compute_origin_breakdown(
-            flags_path=flags_path,
-            triggers_path=trig_path,
+            flags_path,
+            triggers_path,
             days=days,
             include_triggers=include_triggers,
         )
     except ValueError as ve:
-        # For invalid params (e.g. days <= 0) raise 400
+        # e.g., days <= 0
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        # Keep the internal endpoint resilient and debuggable
         raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Apply min_count AFTER aggregation; do not change totals
+    # Apply min_count AFTER aggregating so totals stay correct
     if min_count > 1:
-        rows = [r for r in rows if r.get("count", 0) >= min_count]
+        rows = [r for r in rows if r["count"] >= min_count]
 
     return {
         "window_days": days,
-        "total_events": totals.get("total_events", 0),
-        "origins": rows,  # already sorted by utils
+        "total_events": totals["total_events"],
+        "origins": rows,  # already sorted in utils by count desc, origin asc
         "included": {
-            "flags": totals.get("flags", 0),
-            "triggers": totals.get("triggers", 0),
+            "flags": totals["flags"],
+            "triggers": totals["triggers"],
         },
     }
