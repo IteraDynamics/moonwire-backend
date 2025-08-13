@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Dict, Any, Tuple, List, Optional, Iterable
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 # --- alias map / normalization ---
 _ALIAS = {
@@ -26,9 +26,7 @@ _ALIAS = {
 def _normalize_origin(raw: Optional[str]) -> str:
     if not raw:
         return "unknown"
-    key = str(raw).strip()
-    # be lenient with case
-    low = key.lower()
+    low = str(raw).strip().lower()
     return _ALIAS.get(low, low)
 
 def _extract_origin(rec: dict) -> str:
@@ -60,7 +58,6 @@ def _parse_timestamp(ts_val: Any) -> Optional[float]:
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            # assume UTC if naive
             dt = dt.replace(tzinfo=timezone.utc)
         else:
             dt = dt.astimezone(timezone.utc)
@@ -105,7 +102,10 @@ def compute_origin_breakdown(
     flags_total = 0
     for rec in _stream_jsonl(flags_path):
         ts = _parse_timestamp(rec.get("timestamp"))
-        if ts is None or ts < cutoff:
+        # Treat missing/unparsable timestamp as "now" (internal analytics tolerance)
+        if ts is None:
+            ts = now_ts
+        if ts < cutoff:
             continue
         origin = _extract_origin(rec)
         flags_by_origin[origin] = flags_by_origin.get(origin, 0) + 1
@@ -117,7 +117,9 @@ def compute_origin_breakdown(
     if include_triggers:
         for rec in _stream_jsonl(triggers_path):
             ts = _parse_timestamp(rec.get("timestamp"))
-            if ts is None or ts < cutoff:
+            if ts is None:
+                ts = now_ts
+            if ts < cutoff:
                 continue
             origin = _extract_origin(rec)
             triggers_by_origin[origin] = triggers_by_origin.get(origin, 0) + 1
@@ -134,7 +136,6 @@ def compute_origin_breakdown(
             pct = round(100.0 * c / total_events, 2)
             rows.append({"origin": origin, "count": c, "pct": pct})
         rows.sort(key=lambda r: (-r["count"], r["origin"]))
-    # else rows stays empty
 
     totals = {
         "flags": flags_total,
