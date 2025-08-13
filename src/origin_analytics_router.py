@@ -10,6 +10,14 @@ from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
 
+# --- small indirection helpers (tests monkeypatch these) ---
+def _resolve_flags_path() -> Path:
+    return Path(RETRAINING_LOG_PATH)
+
+def _resolve_triggers_path() -> Path:
+    return Path(RETRAINING_TRIGGERED_LOG_PATH)
+# -----------------------------------------------------------
+
 
 @router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
@@ -25,9 +33,12 @@ def signal_origins(
     - Sorting by count desc, then origin asc.
     """
     try:
+        flags_path = _resolve_flags_path()
+        triggers_path = _resolve_triggers_path()
+
         rows, totals = compute_origin_breakdown(
-            Path(RETRAINING_LOG_PATH),
-            Path(RETRAINING_TRIGGERED_LOG_PATH),
+            flags_path,
+            triggers_path,
             days=days,
             include_triggers=include_triggers,
         )
