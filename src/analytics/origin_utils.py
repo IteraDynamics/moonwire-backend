@@ -1,29 +1,40 @@
 # src/analytics/origin_utils.py
+
 from __future__ import annotations
 
 import json
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict, Any, Iterable, Tuple, List
+from typing import Dict, Iterable, List, Tuple
 
+# --- origin normalization ---
 
-# ----- Origin normalization -----
-_ALIASES = {
+_ALIAS_MAP = {
     "twitter_api": "twitter",
     "Twitter": "twitter",
+    "reddit_api": "reddit",
     "rss": "rss_news",
     "news": "rss_news",
 }
-def _norm(origin: str | None) -> str:
-    if not origin:
+
+def normalize_origin(origin: object) -> str:
+    if origin is None:
         return "unknown"
-    o = str(origin).strip()
-    return _ALIASES.get(o, o.lower())
+    s = str(origin).strip()
+    if not s:
+        return "unknown"
+    # first pass through alias map (case sensitive for known variants)
+    s = _ALIAS_MAP.get(s, s)
+    # then lowercase (keeps already mapped stable)
+    s = s.lower()
+    # map again in case the lowercase hits an alias key
+    return _ALIAS_MAP.get(s, s)
 
 
-# ----- JSONL helpers -----
+# --- parsing & window filter ---
+
 def _iter_jsonl(path: Path) -> Iterable[dict]:
-    """Yield parsed objects from a JSONL file, skipping malformed lines."""
     if not path.exists():
         return
     with path.open("r") as f:
@@ -34,82 +45,95 @@ def _iter_jsonl(path: Path) -> Iterable[dict]:
             try:
                 yield json.loads(line)
             except Exception:
-                # tolerate bad lines
+                # skip malformed
                 continue
 
-
-def _to_epoch(ts_val: Any) -> float | None:
-    """Accept float epoch or ISO8601 (with optional Z); return epoch seconds or None."""
-    # float/epoch
+def _ts_in_window(ts_val: object, window_start: float) -> bool:
+    """
+    Accepts numeric epoch seconds or ISO8601 strings (with/without Z).
+    """
+    if ts_val is None:
+        return False
+    # numeric?
     try:
-        return float(ts_val)
+        ts = float(ts_val)
+        return ts >= window_start
     except Exception:
         pass
-    # ISO string
+    # iso?
     try:
         s = str(ts_val)
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s).timestamp()
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.timestamp() >= window_start
     except Exception:
-        return None
+        return False
 
 
-def _count_by_origin(path: Path, cutoff_epoch: float) -> Tuple[Dict[str, int], int]:
-    counts: Dict[str, int] = {}
-    total = 0
-    for row in _iter_jsonl(path):
-        ts = _to_epoch(row.get("timestamp"))
-        if ts is None or ts < cutoff_epoch:
-            continue
-        origin = _norm(row.get("origin"))
-        counts[origin] = counts.get(origin, 0) + 1
-        total += 1
-    return counts, total
+# --- main API ---
 
-
-# ----- Public API -----
 def compute_origin_breakdown(
     flags_path: Path,
     triggers_path: Path,
     *,
     days: int,
     include_triggers: bool,
-) -> tuple[List[dict], dict]:
+) -> Tuple[List[Dict], Dict[str, int]]:
     """
-    Return (rows, totals) for origin analytics.
+    Returns (rows, totals) where:
+      rows: [{"origin": str, "count": int, "pct": float}, ...] sorted by count desc, origin asc
+      totals: {"flags": int, "triggers": int, "total_events": int}
+    """
 
-    rows: [{"origin": str, "count": int, "pct": float}], sorted by count desc then origin asc
-    totals: {"flags": int, "triggers": int, "total_events": int}
-    """
-    if days < 1:
-        raise ValueError("days must be >= 1")
+    if days <= 0:
+        # let the router handle 400; keep util pure/simple
+        return [], {"flags": 0, "triggers": 0, "total_events": 0}
 
     now = datetime.now(timezone.utc).timestamp()
-    cutoff = now - days * 86400
+    window_start = now - days * 86400
 
-    # Count each stream independently (prevents double counting)
-    flag_counts, flags_total = _count_by_origin(flags_path, cutoff)
-    trig_counts, triggers_total = _count_by_origin(triggers_path, cutoff)
+    # --- collect flags (only from flags_path) ---
+    flag_events: List[dict] = []
+    for rec in _iter_jsonl(flags_path):
+        if _ts_in_window(rec.get("timestamp"), window_start):
+            flag_events.append(rec)
 
-    total_events = flags_total + (triggers_total if include_triggers else 0)
+    flags_count = len(flag_events)
 
-    # Merge for display only (flags + optional triggers)
-    combined: Dict[str, int] = dict(flag_counts)
+    # --- collect triggers if requested (only from triggers_path) ---
+    trigger_events: List[dict] = []
     if include_triggers:
-        for k, v in trig_counts.items():
-            combined[k] = combined.get(k, 0) + v
+        for rec in _iter_jsonl(triggers_path):
+            if _ts_in_window(rec.get("timestamp"), window_start):
+                trigger_events.append(rec)
 
-    rows: List[dict] = []
-    for origin, cnt in combined.items():
-        pct = 0.0 if total_events == 0 else round(100.0 * cnt / total_events, 2)
-        rows.append({"origin": origin, "count": cnt, "pct": pct})
+    triggers_count = len(trigger_events)
 
+    # --- aggregate by origin over the combined set ---
+    combined = flag_events + trigger_events
+    by_origin: Dict[str, int] = defaultdict(int)
+    for rec in combined:
+        origin = normalize_origin(rec.get("origin"))
+        by_origin[origin] += 1
+
+    total_events = flags_count + triggers_count
+    # Build rows with pct (guard divide-by-zero)
+    rows: List[Dict] = []
+    for origin, count in by_origin.items():
+        pct = round(100.0 * count / total_events, 2) if total_events > 0 else 0.0
+        rows.append({"origin": origin, "count": count, "pct": pct})
+
+    # sort: count desc, then origin asc
     rows.sort(key=lambda r: (-r["count"], r["origin"]))
 
     totals = {
-        "flags": flags_total,
-        "triggers": triggers_total,
+        "flags": flags_count,
+        "triggers": triggers_count,
         "total_events": total_events,
     }
     return rows, totals
