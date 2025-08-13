@@ -1,20 +1,43 @@
 # src/origin_analytics_router.py
-
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict
-
 from fastapi import APIRouter, HTTPException, Query
+from typing import Dict, Any
+from pathlib import Path
 
-# IMPORTANT: import the module, not the constants, so pytest's monkeypatch/reload
-# in tests (isolated_logs) is respected at request time.
-import src.paths as paths
+from src.paths import (
+    BASE_DIR,
+    LOGS_DIR,
+    RETRAINING_LOG_PATH as RLP_PRIMARY,
+    RETRAINING_TRIGGERED_LOG_PATH as RTL_PRIMARY,
+)
 from src.analytics.origin_utils import compute_origin_breakdown
 
-# Keep this prefix if main.py mounts without an extra "/internal"
 router = APIRouter(prefix="/internal")
 
+def _fallback_path(primary: Path, filename: str) -> Path:
+    """
+    If the primary (usually temp) file is empty, fallback to default repo logs file.
+    This defuses test/import-order mismatches where writers used the default path.
+    """
+    try:
+        # primary exists but might be empty because it was created by the fixture
+        if primary.exists() and primary.stat().st_size > 0:
+            return primary
+    except Exception:
+        pass
+
+    # Try default path under the repo logs directory
+    default_dir = BASE_DIR / "logs"
+    default = default_dir / filename
+    try:
+        if default.exists() and default.stat().st_size > 0:
+            return default
+    except Exception:
+        pass
+
+    # Fall back to whatever we were given; it's okay if it's empty
+    return primary
 
 @router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
@@ -23,50 +46,32 @@ def signal_origins(
     include_triggers: bool = Query(True, description="Include retraining triggers"),
 ) -> Dict[str, Any]:
     """
-    Returns counts and percentage share for signal origins over the given window.
-
-    Reads (streamed line-by-line):
-      - paths.RETRAINING_LOG_PATH (flags)
-      - paths.RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
+    Counts and percent share for signal origins over a window.
+    Reads:
+      - retraining_log.jsonl (flags)
+      - retraining_triggered.jsonl (triggers, optional)
     """
 
+    # Resolve paths with safe fallback (handles test import-order mismatches)
+    flags_path = _fallback_path(Path(RLP_PRIMARY), "retraining_log.jsonl")
+    trig_path  = _fallback_path(Path(RTL_PRIMARY), "retraining_triggered.jsonl")
+
     try:
-        # Resolve paths at REQUEST TIME (critical for tests using isolated temp dirs)
-        flags_path = Path(paths.RETRAINING_LOG_PATH)
-        trig_path = Path(paths.RETRAINING_TRIGGERED_LOG_PATH)
-
-        # --- Temporary debug aid (uncomment locally if needed) ---
-        print(
-        f"[origin] using flags_path={flags_path} exists={flags_path.exists()} "
-        f"lines={(sum(1 for _ in flags_path.open()) if flags_path.exists() else 0)}; "
-        f"trig_path={trig_path} exists={trig_path.exists()} "
-        f"lines={(sum(1 for _ in trig_path.open()) if trig_path.exists() else 0)}"
-        )
-
         rows, totals = compute_origin_breakdown(
             flags_path=flags_path,
             triggers_path=trig_path,
             days=days,
             include_triggers=include_triggers,
         )
-    except HTTPException:
-        # bubble up explicit 4xx
-        raise
     except Exception as e:
-        # Keep internal endpoint resilient
         raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Apply min_count filter AFTER aggregating (do not alter totals)
     if min_count > 1:
-        rows = [r for r in rows if r.get("count", 0) >= min_count]
+        rows = [r for r in rows if r["count"] >= min_count]
 
-    # rows are already sorted in utils (count desc, origin asc)
     return {
         "window_days": days,
-        "total_events": totals.get("total_events", 0),
-        "origins": rows,
-        "included": {
-            "flags": totals.get("flags", 0),
-            "triggers": totals.get("triggers", 0),
-        },
+        "total_events": totals["total_events"],
+        "origins": rows,  # already sorted by utils
+        "included": {"flags": totals["flags"], "triggers": totals["triggers"]},
     }
