@@ -46,6 +46,17 @@ def write_trigger_with_origin():
 
 # 1) Happy path (flags only): 3 origins + unknown; pct sum ~100
 def test_flags_only_happy_path(client, write_flag_with_origin):
+    # DEBUG: Check time sources
+    import time
+    from datetime import datetime, timezone
+    
+    current_time_time = time.time()
+    current_datetime_utc = datetime.now(timezone.utc).timestamp()
+    
+    print(f"time.time(): {current_time_time}")
+    print(f"datetime.now(timezone.utc).timestamp(): {current_datetime_utc}")
+    print(f"Difference: {current_time_time - current_datetime_utc} seconds")
+    
     write_flag_with_origin("s1", "twitter")
     write_flag_with_origin("s2", "reddit")
     write_flag_with_origin("s3", "rss_news")
@@ -60,6 +71,13 @@ def test_flags_only_happy_path(client, write_flag_with_origin):
             print(f"File has {len(lines)} lines")
             for line in lines[-4:]:  # last 4 lines
                 print(f"Line: {line.strip()}")
+
+    # DEBUG: Check what path the router is using
+    from src.origin_analytics_router import _resolve_flags_path
+    router_path = _resolve_flags_path()
+    print(f"Router flags path: {router_path}")
+    print(f"Router path exists: {router_path.exists()}")
+    print(f"Paths match: {RETRAINING_LOG_PATH == router_path}")
 
     r = client.get("/internal/signal-origins?days=7&include_triggers=false")
     assert r.status_code == 200
