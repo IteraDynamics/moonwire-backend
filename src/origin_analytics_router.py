@@ -17,10 +17,10 @@ FLAGS_PATH_OVERRIDE: Optional[Path] = None
 TRIGGERS_PATH_OVERRIDE: Optional[Path] = None
 
 def _resolve_flags_path() -> Path:
-    return FLAGS_PATH_OVERRIDE or Path(paths.RETRAINING_LOG_PATH)
+    return FLAGS_PATH_OVERRIDE or paths.RETRAINING_LOG_PATH
 
 def _resolve_triggers_path() -> Path:
-    return TRIGGERS_PATH_OVERRIDE or Path(paths.RETRAINING_TRIGGERED_LOG_PATH)
+    return TRIGGERS_PATH_OVERRIDE or paths.RETRAINING_TRIGGERED_LOG_PATH
 
 @router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
