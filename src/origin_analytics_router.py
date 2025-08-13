@@ -2,13 +2,25 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from pathlib import Path
 
-from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+# IMPORTANT: import the module, not the values
+import src.paths as paths
 from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
+
+# Allow tests to monkeypatch these if they want to point at tmp files.
+# If left as None, we’ll fall back to paths.RETRAINING_LOG_PATH* at call time.
+FLAGS_PATH_OVERRIDE: Optional[Path] = None
+TRIGGERS_PATH_OVERRIDE: Optional[Path] = None
+
+def _resolve_flags_path() -> Path:
+    return FLAGS_PATH_OVERRIDE or Path(paths.RETRAINING_LOG_PATH)
+
+def _resolve_triggers_path() -> Path:
+    return TRIGGERS_PATH_OVERRIDE or Path(paths.RETRAINING_TRIGGERED_LOG_PATH)
 
 @router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
@@ -24,8 +36,8 @@ def signal_origins(
     """
     try:
         rows, totals = compute_origin_breakdown(
-            Path(RETRAINING_LOG_PATH),
-            Path(RETRAINING_TRIGGERED_LOG_PATH),
+            _resolve_flags_path(),
+            _resolve_triggers_path(),
             days=days,
             include_triggers=include_triggers,
         )
