@@ -51,9 +51,20 @@ def test_flags_only_happy_path(client, write_flag_with_origin):
     write_flag_with_origin("s3", "rss_news")
     write_flag_with_origin("s4", None)  # unknown
 
+    # DEBUG: Check if file was written
+    print(f"Flags file path: {RETRAINING_LOG_PATH}")
+    print(f"File exists: {RETRAINING_LOG_PATH.exists()}")
+    if RETRAINING_LOG_PATH.exists():
+        with open(RETRAINING_LOG_PATH) as f:
+            lines = f.readlines()
+            print(f"File has {len(lines)} lines")
+            for line in lines[-4:]:  # last 4 lines
+                print(f"Line: {line.strip()}")
+
     r = client.get("/internal/signal-origins?days=7&include_triggers=false")
     assert r.status_code == 200
     data = r.json()
+    print(f"Response data: {data}")  # DEBUG
     assert data["included"]["flags"] == 4
     assert data["included"]["triggers"] == 0
     # ensure all present
