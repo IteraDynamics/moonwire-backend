@@ -1,5 +1,3 @@
-# src/analytics/origin_utils.py
-
 from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Any, Iterable, Tuple, List
@@ -29,20 +27,28 @@ def _parse_ts(val: Any) -> datetime | None:
     """
     Accept:
       - float/int epoch seconds
+      - numeric strings (e.g., "1723558387.598")
       - ISO-8601 strings (with or without Z)
     Return timezone-aware UTC datetime or None on failure.
     """
     if val is None:
         return None
-    # Numeric epoch?
+
     if isinstance(val, (int, float)):
         try:
             return datetime.fromtimestamp(float(val), tz=timezone.utc)
         except Exception:
             return None
-    # String ISO?
+
     try:
-        s = str(val)
+        s = str(val).strip()
+        # NEW: accept numeric strings as epoch seconds
+        if s.replace(".", "", 1).isdigit():
+            try:
+                return datetime.fromtimestamp(float(s), tz=timezone.utc)
+            except Exception:
+                pass
+
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
