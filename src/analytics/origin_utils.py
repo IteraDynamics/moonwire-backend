@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Dict, Any, Tuple, List, Optional, Iterable
 from datetime import datetime, timezone
@@ -94,7 +95,7 @@ def compute_origin_breakdown(
     if days <= 0:
         return ([], {"flags": 0, "triggers": 0, "total_events": 0})
 
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = time.time()
     cutoff = now_ts - days * 86400
 
     # Count flags per origin
