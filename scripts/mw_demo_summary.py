@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
 MoonWire CI Demo Summary (read-only)
-
-Outputs
- - artifacts/demo_summary.md
- - artifacts/consensus.png
- - artifacts/consensus_social.png
-
-Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty,
-in which case it calls the demo seeder to append mock data for this run.
 """
 
 import os, json, hashlib, random, uuid
@@ -24,7 +16,7 @@ LOGS_DIR = Path("logs")
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 
 DEFAULT_THRESHOLD = 2.5
-SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120  # stable 16:9; slightly higher DPI
+SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120
 # ----------------------------
 
 # ---------- helpers ----------
@@ -65,11 +57,12 @@ def parse_ts(val):
 def is_demo_mode() -> bool:
     return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
 
-# ---------- READ-ONLY demo seeding for tests/visuals ----------
+# ---------- READ-ONLY demo seeding ----------
 def generate_demo_data_if_needed(reviewers, flag_times=None):
     flag_times = flag_times or []
     if not is_demo_mode() or reviewers:
         return reviewers, []
+
     now = datetime.now(timezone.utc)
     n = random.randint(3, 5)
     choices = [0.75, 1.0, 1.25]
@@ -83,7 +76,7 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         flag_times.append(ts)
     return display, seeded
 
-# ---------- maybe seed real logs ----------
+# ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
         return False
@@ -108,9 +101,11 @@ _ = maybe_seed_real_logs_if_empty()
 retrain_log   = load_jsonl(LOGS_DIR / "retraining_log.jsonl")
 triggered_log = load_jsonl(LOGS_DIR / "retraining_triggered.jsonl")
 scores_log    = load_jsonl(LOGS_DIR / "reviewer_scores.jsonl")
+origins_log   = load_jsonl(LOGS_DIR / "signal_origin_log.jsonl")
+
 score_by_id   = {r.get("reviewer_id"): r for r in scores_log}
 
-# ---- latest signal in retraining log ----
+# ---- latest signal ----
 if retrain_log:
     def _key(r):
         t = r.get("timestamp", 0)
@@ -132,6 +127,7 @@ flag_times = []
 for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
     t = parse_ts(r.get("timestamp"))
     if t: flag_times.append(t)
+
     rid = r.get("reviewer_id","")
     if rid in seen:
         continue
@@ -144,80 +140,64 @@ for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
 
 reviewers, _seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
 
+# ---- sort reviewers by weight desc, then ID ----
+weight_order = {"High": 3, "Med": 2, "Low": 1}
+reviewers.sort(key=lambda r: (-weight_order[weight_to_label(r["weight"])], red(r["id"])))
+
+# ---- total weight / trigger ----
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold    = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
-
-last_trig = None
-if triggered_log:
-    last_trig = max(
-        (t for t in triggered_log if t.get("signal_id")==sig_id),
-        key=lambda x: x.get("timestamp", 0),
-        default=None
-    )
-
+last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
+                key=lambda x: x.get("timestamp", 0), default=None) if triggered_log else None
 now_iso = datetime.now(timezone.utc).isoformat()
 
-# ---------- origin breakdown ----------
-origin_counts = Counter()
+# ---- origins breakdown ----
 cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-for r in retrain_log:
-    t = parse_ts(r.get("timestamp"))
-    if not t or t < cutoff:
-        continue
-    origin = r.get("origin") or "unknown"
-    origin_counts[origin] += 1
+origin_counts = Counter()
+for o in origins_log:
+    ts = parse_ts(o.get("timestamp"))
+    if ts and ts >= cutoff:
+        origin_counts[o.get("origin") or "unknown"] += 1
 
-total_recent_flags = sum(origin_counts.values())
+total_count = sum(origin_counts.values())
+origin_rows = []
+for origin, count in sorted(origin_counts.items(), key=lambda x: (-x[1], x[0])):
+    pct = (count / total_count * 100) if total_count else 0
+    origin_rows.append((origin, count, pct))
 
-# ---------- small CI bar ----------
-plt.figure(figsize=(3.8, 2.4), dpi=200)
-plt.title("Consensus Weight vs Threshold")
-plt.bar(["weight","threshold"], [total_weight, threshold])
-plt.tight_layout()
-small_png = ART / "consensus.png"
-plt.savefig(small_png, dpi=200)
-plt.close()
-
-# ---------- social card (unchanged) ----------
-def draw_social_card():
-    # ... unchanged existing draw_social_card code ...
-    pass  # keep your current implementation exactly
-
-social_png = draw_social_card()
-
-# ---------- markdown summary ----------
+# ---- markdown summary ----
 md = []
-md.append("# MoonWire CI Demo Summary\n")
-md.append(f"MoonWire Demo Summary — {now_iso}\n")
-md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.\n")
+md.append("# MoonWire CI Demo Summary")
+md.append("")
+md.append(f"MoonWire Demo Summary — {now_iso}")
+md.append("")
+md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.")
+md.append("")
 md.append(f"- **Signal:** `{red(sig_id)}`")
 md.append(f"- **Unique reviewers:** {len(reviewers)}")
 md.append(f"- **Combined weight:** **{total_weight}**")
-md.append(f"- **Threshold:** **{threshold}**  → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
+md.append(f"- **Threshold:** **{threshold}** → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
 if last_trig:
     md.append(f"- **Last retrain trigger logged:** {last_trig.get('timestamp','')}")
-md.append("\n**Reviewers (redacted):**")
+md.append("")
+md.append("**Reviewers (redacted):**")
 if reviewers:
     for r in reviewers:
         md.append(f"- `{red(r['id'])}` → {weight_to_label(r['weight'])}")
 else:
     md.append("- _none found in this run_")
-
-md.append("\n**Signal origin breakdown (last 7 days):**")
-if total_recent_flags > 0:
+md.append("")
+md.append("**Signal origin breakdown (last 7 days):**")
+if origin_rows:
+    md.append("")
     md.append("| Origin | Count | Percent |")
     md.append("|--------|-------|---------|")
-    for origin, count in sorted(origin_counts.items(), key=lambda x: (-x[1], x[0])):
-        pct = (count / total_recent_flags) * 100
+    for origin, count, pct in origin_rows:
         md.append(f"| {origin} | {count} | {pct:.1f}% |")
 else:
-    md.append("- _no recent flags_")
-
-md.append("\n![Consensus](consensus.png)")
+    md.append("- _no origins logged in last 7 days_")
 
 (ART / "demo_summary.md").write_text("\n".join(md))
 
 print(f"Wrote: {ART/'demo_summary.md'}")
-print(f"Wrote: {small_png}")
-print(f"Wrote: {social_png}")
