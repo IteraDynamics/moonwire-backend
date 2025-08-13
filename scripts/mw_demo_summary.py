@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """
-MoonWire CI Demo Summary (read-only)
+MoonWire CI Demo Summary
+
+Outputs:
+ - artifacts/demo_summary.md
+Reads ./logs/*.jsonl and produces a simple Markdown summary with:
+   - Signal info
+   - Reviewer breakdown
+   - Signal origin breakdown (last 7 days)
 """
 
 import os, json, hashlib, random, uuid
@@ -8,16 +15,11 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from collections import Counter
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, Rectangle
-
 # ---------- config ----------
 LOGS_DIR = Path("logs")
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 
 DEFAULT_THRESHOLD = 2.5
-SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120
-# ----------------------------
 
 # ---------- helpers ----------
 def red(s: str) -> str:
@@ -71,41 +73,18 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         rid = f"demo-{uuid.uuid4().hex[:8]}"
         w = random.choice(choices)
         ts = (now - timedelta(minutes=random.randint(2, 55)))
-        seeded.append({"id": rid, "weight": w, "timestamp": ts.isoformat()})
+        seeded.append({"id": rid, "weight": w, "timestamp": ts.isoformat(), "origin": "unknown"})
         display.append({"id": rid, "weight": w})
         flag_times.append(ts)
     return display, seeded
-
-# ---------- maybe seed logs ----------
-def maybe_seed_real_logs_if_empty():
-    if not is_demo_mode():
-        return False
-    retrain_path = LOGS_DIR / "retraining_log.jsonl"
-    if retrain_path.exists():
-        try:
-            if any(ln.strip() for ln in retrain_path.read_text().splitlines()):
-                return False
-        except Exception:
-            pass
-    try:
-        from scripts.demo_seed_reviewers import seed_once
-        seed_once()
-        return True
-    except Exception as e:
-        print(f"[demo] seeding skipped due to error: {e}")
-        return False
-
-_ = maybe_seed_real_logs_if_empty()
 
 # ---- load logs ----
 retrain_log   = load_jsonl(LOGS_DIR / "retraining_log.jsonl")
 triggered_log = load_jsonl(LOGS_DIR / "retraining_triggered.jsonl")
 scores_log    = load_jsonl(LOGS_DIR / "reviewer_scores.jsonl")
-origins_log   = load_jsonl(LOGS_DIR / "signal_origin_log.jsonl")
-
 score_by_id   = {r.get("reviewer_id"): r for r in scores_log}
 
-# ---- latest signal ----
+# ---- latest signal in retraining log ----
 if retrain_log:
     def _key(r):
         t = r.get("timestamp", 0)
@@ -120,7 +99,7 @@ else:
     sig_id = "none"
     sig_rows = []
 
-# ---- weights & timeline ----
+# ---- reviewers & flag times ----
 seen = set()
 reviewers = []
 flag_times = []
@@ -138,13 +117,9 @@ for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
         w = band_weight_from_score(sc)
     reviewers.append({"id": rid, "weight": round(float(w), 2)})
 
+# ---- in-memory seeding for demo mode ----
 reviewers, _seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
 
-# ---- sort reviewers by weight desc, then ID ----
-weight_order = {"High": 3, "Med": 2, "Low": 1}
-reviewers.sort(key=lambda r: (-weight_order[weight_to_label(r["weight"])], red(r["id"])))
-
-# ---- total weight / trigger ----
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold    = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
@@ -152,21 +127,18 @@ last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
                 key=lambda x: x.get("timestamp", 0), default=None) if triggered_log else None
 now_iso = datetime.now(timezone.utc).isoformat()
 
-# ---- origins breakdown ----
-cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+# ---- origin breakdown (last 7 days) ----
+seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
 origin_counts = Counter()
-for o in origins_log:
-    ts = parse_ts(o.get("timestamp"))
-    if ts and ts >= cutoff:
-        origin_counts[o.get("origin") or "unknown"] += 1
 
-total_count = sum(origin_counts.values())
-origin_rows = []
-for origin, count in sorted(origin_counts.items(), key=lambda x: (-x[1], x[0])):
-    pct = (count / total_count * 100) if total_count else 0
-    origin_rows.append((origin, count, pct))
+for r in retrain_log:
+    ts = parse_ts(r.get("timestamp"))
+    if not ts or ts < seven_days_ago:
+        continue
+    origin = r.get("origin") or "unknown"
+    origin_counts[origin] += 1
 
-# ---- markdown summary ----
+# ---------- markdown summary ----------
 md = []
 md.append("# MoonWire CI Demo Summary")
 md.append("")
@@ -176,10 +148,8 @@ md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduc
 md.append("")
 md.append(f"- **Signal:** `{red(sig_id)}`")
 md.append(f"- **Unique reviewers:** {len(reviewers)}")
-md.append(f"- **Combined weight:** **{total_weight}**")
-md.append(f"- **Threshold:** **{threshold}** → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
-if last_trig:
-    md.append(f"- **Last retrain trigger logged:** {last_trig.get('timestamp','')}")
+md.append(f"- **Combined weight:** {total_weight}")
+md.append(f"- **Threshold:** {threshold} → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
 md.append("")
 md.append("**Reviewers (redacted):**")
 if reviewers:
@@ -189,11 +159,13 @@ else:
     md.append("- _none found in this run_")
 md.append("")
 md.append("**Signal origin breakdown (last 7 days):**")
-if origin_rows:
+if origin_counts:
     md.append("")
     md.append("| Origin | Count | Percent |")
     md.append("|--------|-------|---------|")
-    for origin, count, pct in origin_rows:
+    total = sum(origin_counts.values())
+    for origin, count in origin_counts.items():
+        pct = (count / total) * 100
         md.append(f"| {origin} | {count} | {pct:.1f}% |")
 else:
     md.append("- _no origins logged in last 7 days_")
