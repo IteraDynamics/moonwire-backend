@@ -3,54 +3,27 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from typing import Dict, Any, Iterable, Tuple, List
 
 
-# ---- helpers ---------------------------------------------------------------
-
-def _parse_ts(raw) -> datetime | None:
-    """
-    Accepts epoch (int/float) or ISO string. Returns UTC datetime, or None if unparsable.
-    """
-    if raw is None:
-        return None
-    # epoch?
-    try:
-        return datetime.fromtimestamp(float(raw), tz=timezone.utc)
-    except Exception:
-        pass
-    # ISO?
-    try:
-        s = str(raw)
-        if s.endswith("Z"):
-            # datetime.fromisoformat doesn't accept 'Z'
-            s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception:
-        return None
-
-
-_ALIAS_MAP = {
+# ----- Origin normalization -----
+_ALIASES = {
     "twitter_api": "twitter",
-    "twitter": "twitter",
     "Twitter": "twitter",
     "rss": "rss_news",
-    "rss_news": "rss_news",
+    "news": "rss_news",
 }
-
-def normalize_origin(val: str | None) -> str:
-    if not val:
+def _norm(origin: str | None) -> str:
+    if not origin:
         return "unknown"
-    v = str(val).strip()
-    if not v:
-        return "unknown"
-    return _ALIAS_MAP.get(v, _ALIAS_MAP.get(v.lower(), v.lower()))
+    o = str(origin).strip()
+    return _ALIASES.get(o, o.lower())
 
 
-# ---- core -------------------------------------------------------------------
-
-def _stream_jsonl(path: Path):
+# ----- JSONL helpers -----
+def _iter_jsonl(path: Path) -> Iterable[dict]:
+    """Yield parsed objects from a JSONL file, skipping malformed lines."""
     if not path.exists():
         return
     with path.open("r") as f:
@@ -65,63 +38,78 @@ def _stream_jsonl(path: Path):
                 continue
 
 
+def _to_epoch(ts_val: Any) -> float | None:
+    """Accept float epoch or ISO8601 (with optional Z); return epoch seconds or None."""
+    # float/epoch
+    try:
+        return float(ts_val)
+    except Exception:
+        pass
+    # ISO string
+    try:
+        s = str(ts_val)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def _count_by_origin(path: Path, cutoff_epoch: float) -> Tuple[Dict[str, int], int]:
+    counts: Dict[str, int] = {}
+    total = 0
+    for row in _iter_jsonl(path):
+        ts = _to_epoch(row.get("timestamp"))
+        if ts is None or ts < cutoff_epoch:
+            continue
+        origin = _norm(row.get("origin"))
+        counts[origin] = counts.get(origin, 0) + 1
+        total += 1
+    return counts, total
+
+
+# ----- Public API -----
 def compute_origin_breakdown(
     flags_path: Path,
     triggers_path: Path,
     *,
-    days: int = 7,
-    include_triggers: bool = True,
-) -> Tuple[List[Dict], Dict[str, int]]:
+    days: int,
+    include_triggers: bool,
+) -> tuple[List[dict], dict]:
     """
-    Reads flags (retraining_log.jsonl) and optionally triggers (retraining_triggered.jsonl),
-    filters to last N days, aggregates per origin, and returns:
+    Return (rows, totals) for origin analytics.
 
-      rows: [{ "origin": str, "count": int, "pct": float }, ...]  (sorted)
-      totals: { "flags": int, "triggers": int, "total_events": int }
+    rows: [{"origin": str, "count": int, "pct": float}], sorted by count desc then origin asc
+    totals: {"flags": int, "triggers": int, "total_events": int}
     """
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=days)
+    if days < 1:
+        raise ValueError("days must be >= 1")
 
-    counts: Dict[str, int] = {}
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - days * 86400
 
-    # Count flags
-    flags_count = 0
-    for rec in _stream_jsonl(flags_path):
-        ts = _parse_ts(rec.get("timestamp"))
-        if ts is None or ts < cutoff:
-            continue
-        origin = normalize_origin(rec.get("origin"))
-        counts[origin] = counts.get(origin, 0) + 1
-        flags_count += 1
+    # Count each stream independently (prevents double counting)
+    flag_counts, flags_total = _count_by_origin(flags_path, cutoff)
+    trig_counts, triggers_total = _count_by_origin(triggers_path, cutoff)
 
-    # Count triggers (optional)
-    triggers_count = 0
+    total_events = flags_total + (triggers_total if include_triggers else 0)
+
+    # Merge for display only (flags + optional triggers)
+    combined: Dict[str, int] = dict(flag_counts)
     if include_triggers:
-        for rec in _stream_jsonl(triggers_path):
-            ts = _parse_ts(rec.get("timestamp"))
-            if ts is None or ts < cutoff:
-                continue
-            origin = normalize_origin(rec.get("origin"))
-            counts[origin] = counts.get(origin, 0) + 1
-            triggers_count += 1
+        for k, v in trig_counts.items():
+            combined[k] = combined.get(k, 0) + v
 
-    total_events = flags_count + (triggers_count if include_triggers else 0)
+    rows: List[dict] = []
+    for origin, cnt in combined.items():
+        pct = 0.0 if total_events == 0 else round(100.0 * cnt / total_events, 2)
+        rows.append({"origin": origin, "count": cnt, "pct": pct})
 
-    # Build rows w/ percentages
-    rows: List[Dict] = []
-    if total_events > 0:
-        for origin, cnt in counts.items():
-            pct = round(100.0 * cnt / total_events, 2)
-            rows.append({"origin": origin, "count": cnt, "pct": pct})
-
-        # sort: count desc, then origin asc
-        rows.sort(key=lambda r: (-r["count"], r["origin"]))
-    else:
-        rows = []
+    rows.sort(key=lambda r: (-r["count"], r["origin"]))
 
     totals = {
-        "flags": flags_count,
-        "triggers": triggers_count if include_triggers else 0,
+        "flags": flags_total,
+        "triggers": triggers_total,
         "total_events": total_events,
     }
     return rows, totals
