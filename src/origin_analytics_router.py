@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
+from typing import Dict, Any
 from pathlib import Path
-from typing import Any, Dict
 
 from src.analytics.origin_utils import compute_origin_breakdown
 
@@ -16,20 +16,16 @@ def signal_origins(
     include_triggers: bool = Query(True, description="Include retraining triggers"),
 ) -> Dict[str, Any]:
     """
-    Returns counts and percentage share for signal origins over the given window.
-    Reads:
-      - RETRAINING_LOG_PATH (flags)
-      - RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
-
-    IMPORTANT: resolve paths *at call time* so tests that monkeypatch LOGS_DIR
-    (via isolated_logs) are respected.
+    Counts events by origin over the window.
+    IMPORTANT: Resolve log paths at request time so test fixtures that reload
+    src.paths (and change LOGS_DIR) are honored.
     """
     try:
-        # Resolve the current paths dynamically to respect test fixtures that
-        # change LOGS_DIR after import time.
-        from src import paths as p  # local import on purpose
-        flags_path = Path(p.RETRAINING_LOG_PATH)
-        triggers_path = Path(p.RETRAINING_TRIGGERED_LOG_PATH)
+        # Late import so conftest's importlib.reload(src.paths) takes effect
+        from src import paths as _paths
+
+        flags_path = Path(_paths.RETRAINING_LOG_PATH)
+        triggers_path = Path(_paths.RETRAINING_TRIGGERED_LOG_PATH)
 
         rows, totals = compute_origin_breakdown(
             flags_path,
@@ -42,16 +38,16 @@ def signal_origins(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Apply min_count filter AFTER computing totals (do not alter included tallies)
+    # Apply min_count AFTER computing totals
     if min_count > 1:
         rows = [r for r in rows if r["count"] >= min_count]
 
     return {
         "window_days": days,
         "total_events": totals["total_events"],
-        "origins": rows,  # already sorted by utils
+        "origins": rows,  # already sorted in utils
         "included": {
-            "flags": totals["flags"],       # unique signal_ids from flags file
-            "triggers": totals["triggers"], # unique signal_ids from triggers file
+            "flags": totals["flags"],
+            "triggers": totals["triggers"],
         },
     }
