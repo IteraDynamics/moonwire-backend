@@ -97,7 +97,7 @@ app.include_router(trust_intelligence_router)
 app.include_router(signal_review_router)
 app.include_router(trust_asset_pulse_router)
 app.include_router(trust_volatility_spike_router)
-app.include_router(origin_analytics_router, prefix="/internal")
+app.include_router(origin_analytics_router)
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
