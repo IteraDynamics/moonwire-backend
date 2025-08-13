@@ -46,6 +46,7 @@ from src.trust_asset_pulse_router import router as trust_asset_pulse_router
 from src.trust_volatility_spike_router import router as trust_volatility_spike_router
 from src.reviewer_impact_scorer_router import router as reviewer_impact_scorer_router
 from src.consensus_dashboard_router import router as consensus_dashboard_router
+from src.origin_analytics_router import router as origin_analytics_router
 
 app = FastAPI()
 
@@ -96,6 +97,7 @@ app.include_router(trust_intelligence_router)
 app.include_router(signal_review_router)
 app.include_router(trust_asset_pulse_router)
 app.include_router(trust_volatility_spike_router)
+app.include_router(origin_analytics_router)
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
