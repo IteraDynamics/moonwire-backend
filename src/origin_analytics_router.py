@@ -2,25 +2,14 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from pathlib import Path
 
-# IMPORTANT: import the module, not the values
-import src.paths as paths
+from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
 from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
 
-# Allow tests to monkeypatch these if they want to point at tmp files.
-# If left as None, we’ll fall back to paths.RETRAINING_LOG_PATH* at call time.
-FLAGS_PATH_OVERRIDE: Optional[Path] = None
-TRIGGERS_PATH_OVERRIDE: Optional[Path] = None
-
-def _resolve_flags_path() -> Path:
-    return FLAGS_PATH_OVERRIDE or paths.RETRAINING_LOG_PATH
-
-def _resolve_triggers_path() -> Path:
-    return TRIGGERS_PATH_OVERRIDE or paths.RETRAINING_TRIGGERED_LOG_PATH
 
 @router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
@@ -29,22 +18,23 @@ def signal_origins(
     include_triggers: bool = Query(True, description="Include retraining triggers"),
 ) -> Dict[str, Any]:
     """
-    Returns counts and % share per origin for the given window.
-    Reads:
-      - RETRAINING_LOG_PATH (flags)
-      - RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
+    Counts events by origin over a window.
+    - Treats every line in retraining_log.jsonl as a flag.
+    - Treats every line in retraining_triggered.jsonl as a trigger (if include_triggers).
+    - Robust timestamp parsing and origin extraction; missing origin -> 'unknown'.
+    - Sorting by count desc, then origin asc.
     """
     try:
         rows, totals = compute_origin_breakdown(
-            _resolve_flags_path(),
-            _resolve_triggers_path(),
+            Path(RETRAINING_LOG_PATH),
+            Path(RETRAINING_TRIGGERED_LOG_PATH),
             days=days,
             include_triggers=include_triggers,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Apply min_count AFTER aggregation (does not change totals)
+    # Filter AFTER computing totals (so included.* remains correct)
     if min_count > 1:
         rows = [r for r in rows if r["count"] >= min_count]
 
