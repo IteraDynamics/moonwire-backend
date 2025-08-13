@@ -1,43 +1,15 @@
-# src/origin_analytics_router.py
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 from typing import Dict, Any
-from pathlib import Path
 
 from src.paths import (
-    BASE_DIR,
-    LOGS_DIR,
-    RETRAINING_LOG_PATH as RLP_PRIMARY,
-    RETRAINING_TRIGGERED_LOG_PATH as RTL_PRIMARY,
+    RETRAINING_LOG_PATH,
+    RETRAINING_TRIGGERED_LOG_PATH,
 )
 from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
-
-def _fallback_path(primary: Path, filename: str) -> Path:
-    """
-    If the primary (usually temp) file is empty, fallback to default repo logs file.
-    This defuses test/import-order mismatches where writers used the default path.
-    """
-    try:
-        # primary exists but might be empty because it was created by the fixture
-        if primary.exists() and primary.stat().st_size > 0:
-            return primary
-    except Exception:
-        pass
-
-    # Try default path under the repo logs directory
-    default_dir = BASE_DIR / "logs"
-    default = default_dir / filename
-    try:
-        if default.exists() and default.stat().st_size > 0:
-            return default
-    except Exception:
-        pass
-
-    # Fall back to whatever we were given; it's okay if it's empty
-    return primary
 
 @router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
@@ -52,14 +24,10 @@ def signal_origins(
       - retraining_triggered.jsonl (triggers, optional)
     """
 
-    # Resolve paths with safe fallback (handles test import-order mismatches)
-    flags_path = _fallback_path(Path(RLP_PRIMARY), "retraining_log.jsonl")
-    trig_path  = _fallback_path(Path(RTL_PRIMARY), "retraining_triggered.jsonl")
-
     try:
         rows, totals = compute_origin_breakdown(
-            flags_path=flags_path,
-            triggers_path=trig_path,
+            flags_path=RETRAINING_LOG_PATH,
+            triggers_path=RETRAINING_TRIGGERED_LOG_PATH,
             days=days,
             include_triggers=include_triggers,
         )
@@ -72,6 +40,6 @@ def signal_origins(
     return {
         "window_days": days,
         "total_events": totals["total_events"],
-        "origins": rows,  # already sorted by utils
+        "origins": rows,
         "included": {"flags": totals["flags"], "triggers": totals["triggers"]},
     }
