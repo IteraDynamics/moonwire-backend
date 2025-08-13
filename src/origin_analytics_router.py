@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Dict, Any
 from pathlib import Path
 
+# IMPORTANT: import the module, not the constants
+import src.paths as paths_module
 from src.analytics.origin_utils import compute_origin_breakdown
 
 router = APIRouter(prefix="/internal")
@@ -18,19 +20,15 @@ def signal_origins(
     include_triggers: bool = Query(True, description="Include retraining triggers"),
 ) -> Dict[str, Any]:
     """
-    Returns counts and percentage share for signal origins over the given window.
+    Counts per-origin across the lookback window.
     Reads:
-      - src.paths.RETRAINING_LOG_PATH (flags)
-      - src.paths.RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
-
-    NOTE: We resolve paths at call-time so pytest fixtures that monkeypatch/reload
-    src.paths take effect for each test (no stale constants from import-time).
+      - paths_module.RETRAINING_LOG_PATH (flags)
+      - paths_module.RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
+    Note: paths are resolved at request time so test fixtures that reload src.paths are honored.
     """
     try:
-        # Resolve paths at request time (critical for tests using monkeypatched paths)
-        from src import paths as p  # do NOT move to module top
-        flags_path = Path(p.RETRAINING_LOG_PATH)
-        triggers_path = Path(p.RETRAINING_TRIGGERED_LOG_PATH)
+        flags_path = Path(paths_module.RETRAINING_LOG_PATH)
+        triggers_path = Path(paths_module.RETRAINING_TRIGGERED_LOG_PATH)
 
         rows, totals = compute_origin_breakdown(
             flags_path,
@@ -41,14 +39,14 @@ def signal_origins(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Apply min_count AFTER counting (don't alter totals)
+    # Apply min_count AFTER computing totals (do not change included.*)
     if min_count > 1:
         rows = [r for r in rows if r["count"] >= min_count]
 
     return {
         "window_days": days,
         "total_events": totals["total_events"],
-        "origins": rows,  # already sorted by utils
+        "origins": rows,  # already sorted in utils
         "included": {
             "flags": totals["flags"],
             "triggers": totals["triggers"],
