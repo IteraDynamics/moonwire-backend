@@ -1,55 +1,56 @@
 # src/analytics/origin_utils.py
-
 from __future__ import annotations
 
 import json
-from collections import Counter
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, Tuple, Any, Optional
+from typing import Dict, Any, Tuple, List
+from datetime import datetime, timedelta, timezone
 
-# --- origin normalization ---
-_ALIAS = {
-    "twitter_api": "twitter",
-    "Twitter": "twitter",
-    "TWITTER": "twitter",
-    "rss": "rss_news",
-    "RSS": "rss_news",
-    "reddit_api": "reddit",
-    "Reddit": "reddit",
-}
+# --- helpers ------------------------------------------------------------
 
-def _norm_origin(s: Optional[str]) -> str:
-    if not s:
-        return "unknown"
-    s = str(s).strip()
-    if not s:
-        return "unknown"
-    return _ALIAS.get(s, s.lower())
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
-# --- timestamp parsing ---
-def _parse_ts(val: Any) -> Optional[datetime]:
-    if val is None:
+def _parse_ts(ts_raw) -> datetime | None:
+    """
+    Accepts float/int epoch seconds or ISO8601 string (with/without Z).
+    Returns aware UTC datetime or None if unparsable.
+    """
+    if ts_raw is None:
         return None
-    # epoch seconds (int/float or numeric string)
+    # numeric epoch
     try:
-        ts = float(val)
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
+        return datetime.fromtimestamp(float(ts_raw), tz=timezone.utc)
     except Exception:
         pass
-    # ISO 8601 (with optional trailing Z)
+    # ISO
     try:
-        s = str(val)
+        s = str(ts_raw)
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         return datetime.fromisoformat(s).astimezone(timezone.utc)
     except Exception:
         return None
 
-def _iter_jsonl(path: Path) -> Iterable[dict]:
-    if not path or not Path(path).exists():
+_ALIAS_MAP = {
+    "twitter_api": "twitter",
+    "Twitter": "twitter",
+    "reddit_api": "reddit",
+    "rss": "rss_news",
+}
+
+def _norm_origin(origin) -> str:
+    if origin is None:
+        return "unknown"
+    key = str(origin).strip()
+    if not key:
+        return "unknown"
+    return _ALIAS_MAP.get(key, key.lower())
+
+def _read_jsonl(path: Path):
+    if not path.exists():
         return
-    with Path(path).open("r") as f:
+    with path.open("r") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -57,71 +58,66 @@ def _iter_jsonl(path: Path) -> Iterable[dict]:
             try:
                 yield json.loads(line)
             except Exception:
-                # Skip malformed lines
+                # skip malformed
                 continue
 
-def _within_window(ts: Optional[datetime], cutoff: datetime) -> bool:
-    return bool(ts and ts >= cutoff)
+# --- core ---------------------------------------------------------------
 
 def compute_origin_breakdown(
     flags_path: Path,
     triggers_path: Path,
-    *,
     days: int = 7,
     include_triggers: bool = True,
-) -> Tuple[list, Dict[str, int]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, int | float]]:
     """
-    Aggregate per-origin counts over the given window.
+    Stream both logs and return (rows, totals).
 
-    Returns:
-      rows: list of {origin, count, pct}
-      totals: {"flags": int, "triggers": int, "total_events": int}
+    rows: list of {origin, count, pct}
+    totals: {"flags": int, "triggers": int, "total_events": int}
     """
     if days <= 0:
         raise ValueError("days must be >= 1")
 
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=days)
+    cutoff = _now_utc() - timedelta(days=days)
 
-    counts: Counter[str] = Counter()
-    flags_count = 0
-    triggers_count = 0
+    origin_counts: Dict[str, int] = {}
+    flag_count = 0
+    trig_count = 0
 
-    # ---- flags (always counted) ----
-    for rec in _iter_jsonl(flags_path):
-        ts = _parse_ts(rec.get("timestamp"))
-        if not _within_window(ts, cutoff):
+    # Count FLAGS
+    for row in _read_jsonl(flags_path):
+        ts = _parse_ts(row.get("timestamp"))
+        if ts is None or ts < cutoff:
             continue
-        origin = _norm_origin(rec.get("origin"))
-        counts[origin] += 1
-        flags_count += 1
+        origin = _norm_origin(row.get("origin"))
+        origin_counts[origin] = origin_counts.get(origin, 0) + 1
+        flag_count += 1
 
-    # ---- triggers (optional merge) ----
+    # Count TRIGGERS (optionally)
     if include_triggers:
-        for rec in _iter_jsonl(triggers_path):
-            ts = _parse_ts(rec.get("timestamp"))
-            if not _within_window(ts, cutoff):
+        for row in _read_jsonl(triggers_path):
+            ts = _parse_ts(row.get("timestamp"))
+            if ts is None or ts < cutoff:
                 continue
-            origin = _norm_origin(rec.get("origin"))
-            counts[origin] += 1
-            triggers_count += 1
+            origin = _norm_origin(row.get("origin"))
+            origin_counts[origin] = origin_counts.get(origin, 0) + 1
+            trig_count += 1
 
-    total_events = flags_count + (triggers_count if include_triggers else 0)
+    total_events = flag_count + (trig_count if include_triggers else 0)
 
-    # Convert to sorted rows
+    # Build rows with pct
     rows = []
     if total_events > 0:
-        for origin, cnt in counts.items():
-            pct = round(100.0 * cnt / total_events, 2)
-            rows.append({"origin": origin, "count": cnt, "pct": pct})
-        # sort: count desc, then origin asc
-        rows.sort(key=lambda r: (-r["count"], r["origin"]))
-    else:
-        rows = []
+        for origin, count in origin_counts.items():
+            pct = round(100.0 * count / total_events, 2)
+            rows.append({"origin": origin, "count": count, "pct": pct})
+        # sort by count desc, then origin asc for stability
+        rows.sort(key=lambda x: (-x["count"], x["origin"]))
+    # if no events, return empty rows
 
     totals = {
-        "flags": flags_count,
-        "triggers": (triggers_count if include_triggers else 0),
+        "flags": flag_count,
+        "triggers": (trig_count if include_triggers else 0),
         "total_events": total_events,
     }
     return rows, totals
