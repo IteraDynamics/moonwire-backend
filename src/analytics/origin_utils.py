@@ -76,12 +76,13 @@ def compute_origin_breakdown(
     include_triggers: bool,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
-    Stream both logs and compute:
-      - counts per origin across the window
-      - totals: flags, triggers, total_events
+    Compute counts and share per origin over a lookback window.
 
-    Dedupes *within* each stream by (signal_id, origin, ts) to avoid inflated totals
-    if files contain repeated rows for the same logical event.
+    Key behavior:
+    - Flags and triggers are tallied from their respective files only.
+    - Events outside the window are ignored.
+    - Deduplication is by (signal_id, origin) within each stream so repeated rows
+      for the same logical event don't inflate counts.
     """
     if days <= 0:
         raise ValueError("days must be >= 1")
@@ -94,9 +95,9 @@ def compute_origin_breakdown(
     flags_count = 0
     triggers_count = 0
 
-    # de-dup sets
-    seen_flags: set[Tuple[str, str, float]] = set()
-    seen_triggers: set[Tuple[str, str, float]] = set()
+    # de-dup sets (ignore timestamp; first event for a (signal_id, origin) wins)
+    seen_flags: set[Tuple[str, str]] = set()
+    seen_triggers: set[Tuple[str, str]] = set()
 
     # --- flags (ONLY from flags_path) ---
     for rec in _iter_jsonl(flags_path):
@@ -105,7 +106,7 @@ def compute_origin_breakdown(
             continue
         origin = normalize_origin(rec.get("origin"))
         sid = str(rec.get("signal_id", ""))
-        key = (sid, origin, ts)
+        key = (sid, origin)
         if key in seen_flags:
             continue
         seen_flags.add(key)
@@ -120,7 +121,7 @@ def compute_origin_breakdown(
                 continue
             origin = normalize_origin(rec.get("origin"))
             sid = str(rec.get("signal_id", ""))
-            key = (sid, origin, ts)
+            key = (sid, origin)
             if key in seen_triggers:
                 continue
             seen_triggers.add(key)
