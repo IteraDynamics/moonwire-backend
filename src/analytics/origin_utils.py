@@ -6,36 +6,17 @@ import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
-
-# --- origin normalization ---
-
-_ALIAS_MAP = {
-    "twitter_api": "twitter",
-    "Twitter": "twitter",
-    "reddit_api": "reddit",
-    "rss": "rss_news",
-    "news": "rss_news",
-}
-
-def normalize_origin(origin: object) -> str:
-    if origin is None:
-        return "unknown"
-    s = str(origin).strip()
-    if not s:
-        return "unknown"
-    # first pass through alias map (case sensitive for known variants)
-    s = _ALIAS_MAP.get(s, s)
-    # then lowercase (keeps already mapped stable)
-    s = s.lower()
-    # map again in case the lowercase hits an alias key
-    return _ALIAS_MAP.get(s, s)
+from typing import Any, Dict, Iterable, Iterator, List, Tuple
 
 
-# --- parsing & window filter ---
+# ----------------------- parsing & helpers -----------------------
 
-def _iter_jsonl(path: Path) -> Iterable[dict]:
-    if not path.exists():
+def _iter_jsonl(path: Path) -> Iterator[Dict[str, Any]]:
+    """
+    Stream a JSONL file line-by-line, yielding dicts.
+    Tolerates missing files and malformed lines.
+    """
+    if not path or not isinstance(path, Path) or not path.exists():
         return
     with path.open("r") as f:
         for line in f:
@@ -43,24 +24,30 @@ def _iter_jsonl(path: Path) -> Iterable[dict]:
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                rec = json.loads(line)
+                if isinstance(rec, dict):
+                    yield rec
             except Exception:
-                # skip malformed
+                # swallow malformed lines
                 continue
 
-def _ts_in_window(ts_val: object, window_start: float) -> bool:
+
+def _parse_ts(ts_val: Any) -> datetime | None:
     """
-    Accepts numeric epoch seconds or ISO8601 strings (with/without Z).
+    Accepts float/ints (epoch seconds) or ISO 8601 strings.
+    Returns aware UTC datetime, or None if unparseable.
     """
     if ts_val is None:
-        return False
-    # numeric?
+        return None
+
+    # epoch seconds (int/float or stringified)
     try:
-        ts = float(ts_val)
-        return ts >= window_start
+        tsf = float(ts_val)
+        return datetime.fromtimestamp(tsf, tz=timezone.utc)
     except Exception:
         pass
-    # iso?
+
+    # ISO strings; make 'Z' explicit UTC if present
     try:
         s = str(ts_val)
         if s.endswith("Z"):
@@ -68,68 +55,118 @@ def _ts_in_window(ts_val: object, window_start: float) -> bool:
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        return dt.timestamp() >= window_start
+        return dt.astimezone(timezone.utc)
     except Exception:
+        return None
+
+
+def _ts_in_window(ts_val: Any, window_start: datetime) -> bool:
+    dt = _parse_ts(ts_val)
+    if dt is None:
         return False
+    return dt >= window_start
 
 
-# --- main API ---
+# ----------------------- origin normalization -----------------------
+
+_ALIAS_MAP = {
+    # twitter
+    "twitter_api": "twitter",
+    "twitterapi": "twitter",
+    "twitter": "twitter",
+    "x": "twitter",
+    # reddit
+    "reddit_api": "reddit",
+    "redditapi": "reddit",
+    "reddit": "reddit",
+    # news / rss
+    "rss": "rss_news",
+    "rssnews": "rss_news",
+    "rss_news": "rss_news",
+    "news": "rss_news",
+    "rss-feed": "rss_news",
+    # markets
+    "market": "market_feed",
+    "markets": "market_feed",
+    "market_feed": "market_feed",
+    "marketfeed": "market_feed",
+}
+
+def normalize_origin(origin: Any) -> str:
+    if origin is None:
+        return "unknown"
+    key = str(origin).strip()
+    if not key:
+        return "unknown"
+    low = key.lower()
+    return _ALIAS_MAP.get(low, low)
+
+
+# ----------------------- main aggregation -----------------------
 
 def compute_origin_breakdown(
     flags_path: Path,
     triggers_path: Path,
     *,
-    days: int,
-    include_triggers: bool,
-) -> Tuple[List[Dict], Dict[str, int]]:
+    days: int = 7,
+    include_triggers: bool = True,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
-    Returns (rows, totals) where:
-      rows: [{"origin": str, "count": int, "pct": float}, ...] sorted by count desc, origin asc
-      totals: {"flags": int, "triggers": int, "total_events": int}
-    """
+    Compute per-origin counts within a lookback window and return:
+      - rows: [{origin, count, pct}, ...] sorted by count desc then origin asc
+      - totals: {"flags": <unique signals>, "triggers": <unique signals>, "total_events": sum}
 
+    NOTE:
+    - For 'included' tallies, we count UNIQUE signal_ids (what tests expect).
+    - For per-origin 'count', we aggregate per EVENT line (flags + triggers if included).
+    - Timestamps can be epoch seconds or ISO strings; unparsable lines are ignored.
+    """
+    now = datetime.now(timezone.utc)
     if days <= 0:
-        # let the router handle 400; keep util pure/simple
-        return [], {"flags": 0, "triggers": 0, "total_events": 0}
+        # router should validate, but keep util safe
+        days = 1
+    window_start = now - timedelta(days=days)
 
-    now = datetime.now(timezone.utc).timestamp()
-    window_start = now - days * 86400
-
-    # --- collect flags (only from flags_path) ---
-    flag_events: List[dict] = []
+    # ---- collect flags (from flags_path only) ----
+    flag_events: List[Dict[str, Any]] = []
     for rec in _iter_jsonl(flags_path):
         if _ts_in_window(rec.get("timestamp"), window_start):
             flag_events.append(rec)
 
-    flags_count = len(flag_events)
+    # Unique signal IDs for flags tallies
+    flag_ids = {rec.get("signal_id") for rec in flag_events if rec.get("signal_id") is not None}
+    flags_count = len(flag_ids)
 
-    # --- collect triggers if requested (only from triggers_path) ---
-    trigger_events: List[dict] = []
+    # ---- collect triggers if requested (from triggers_path only) ----
+    trigger_events: List[Dict[str, Any]] = []
     if include_triggers:
         for rec in _iter_jsonl(triggers_path):
             if _ts_in_window(rec.get("timestamp"), window_start):
                 trigger_events.append(rec)
 
-    triggers_count = len(trigger_events)
+    # Unique signal IDs for triggers tallies
+    trigger_ids = {rec.get("signal_id") for rec in trigger_events if rec.get("signal_id") is not None}
+    triggers_count = len(trigger_ids)
 
-    # --- aggregate by origin over the combined set ---
-    combined = flag_events + trigger_events
+    # ---- aggregate by origin (per event) ----
+    combined: List[Dict[str, Any]] = flag_events + (trigger_events if include_triggers else [])
     by_origin: Dict[str, int] = defaultdict(int)
     for rec in combined:
         origin = normalize_origin(rec.get("origin"))
         by_origin[origin] += 1
 
     total_events = flags_count + triggers_count
-    # Build rows with pct (guard divide-by-zero)
-    rows: List[Dict] = []
-    for origin, count in by_origin.items():
-        pct = round(100.0 * count / total_events, 2) if total_events > 0 else 0.0
-        rows.append({"origin": origin, "count": count, "pct": pct})
 
-    # sort: count desc, then origin asc
-    rows.sort(key=lambda r: (-r["count"], r["origin"]))
+    # Build rows with pct relative to included totals
+    rows: List[Dict[str, Any]] = []
+    if total_events > 0:
+        for origin, count in by_origin.items():
+            pct = round(100.0 * count / float(total_events), 2)
+            rows.append({"origin": origin, "count": count, "pct": pct})
+        # sort: count desc, then origin asc
+        rows.sort(key=lambda r: (-r["count"], r["origin"]))
+    else:
+        rows = []
 
     totals = {
         "flags": flags_count,
