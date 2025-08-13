@@ -1,22 +1,20 @@
 # src/origin_analytics_router.py
+
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
-from typing import Dict, Any
 from pathlib import Path
+from typing import Any, Dict
 
+from fastapi import APIRouter, HTTPException, Query
+
+# IMPORTANT: import the module, not the constants, so pytest's monkeypatch/reload
+# in tests (isolated_logs) is respected at request time.
+import src.paths as paths
 from src.analytics.origin_utils import compute_origin_breakdown
 
+# Keep this prefix if main.py mounts without an extra "/internal"
 router = APIRouter(prefix="/internal")
 
-def _resolve_paths() -> tuple[Path, Path]:
-    """
-    Resolve current log paths at request time.
-    This avoids freezing old paths that were imported before tests
-    changed LOGS_DIR and reloaded src.paths.
-    """
-    from src import paths as P  # import inside to pick up reloaded module
-    return Path(P.RETRAINING_LOG_PATH), Path(P.RETRAINING_TRIGGERED_LOG_PATH)
 
 @router.get("/signal-origins", summary="Origin breakdown of flags (and optional triggers)")
 def signal_origins(
@@ -26,34 +24,49 @@ def signal_origins(
 ) -> Dict[str, Any]:
     """
     Returns counts and percentage share for signal origins over the given window.
-    Reads:
-      - retraining_log.jsonl (flags) — always counted
-      - retraining_triggered.jsonl (triggers) — added when include_triggers=True
+
+    Reads (streamed line-by-line):
+      - paths.RETRAINING_LOG_PATH (flags)
+      - paths.RETRAINING_TRIGGERED_LOG_PATH (triggers, if include_triggers=True)
     """
+
     try:
-        flags_path, triggers_path = _resolve_paths()
+        # Resolve paths at REQUEST TIME (critical for tests using isolated temp dirs)
+        flags_path = Path(paths.RETRAINING_LOG_PATH)
+        trig_path = Path(paths.RETRAINING_TRIGGERED_LOG_PATH)
+
+        # --- Temporary debug aid (uncomment locally if needed) ---
+        print(
+        f"[origin] using flags_path={flags_path} exists={flags_path.exists()} "
+        f"lines={(sum(1 for _ in flags_path.open()) if flags_path.exists() else 0)}; "
+        f"trig_path={trig_path} exists={trig_path.exists()} "
+        f"lines={(sum(1 for _ in trig_path.open()) if trig_path.exists() else 0)}"
+        )
+
         rows, totals = compute_origin_breakdown(
-            flags_path,
-            triggers_path,
+            flags_path=flags_path,
+            triggers_path=trig_path,
             days=days,
             include_triggers=include_triggers,
         )
-    except ValueError as ve:
-        # e.g., days <= 0
-        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        # bubble up explicit 4xx
+        raise
     except Exception as e:
+        # Keep internal endpoint resilient
         raise HTTPException(status_code=500, detail=f"origin breakdown failed: {e}")
 
-    # Apply min_count AFTER aggregating so totals stay correct
+    # Apply min_count filter AFTER aggregating (do not alter totals)
     if min_count > 1:
-        rows = [r for r in rows if r["count"] >= min_count]
+        rows = [r for r in rows if r.get("count", 0) >= min_count]
 
+    # rows are already sorted in utils (count desc, origin asc)
     return {
         "window_days": days,
-        "total_events": totals["total_events"],
-        "origins": rows,  # already sorted in utils by count desc, origin asc
+        "total_events": totals.get("total_events", 0),
+        "origins": rows,
         "included": {
-            "flags": totals["flags"],
-            "triggers": totals["triggers"],
+            "flags": totals.get("flags", 0),
+            "triggers": totals.get("triggers", 0),
         },
     }
