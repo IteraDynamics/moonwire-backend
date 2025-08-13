@@ -1,175 +1,92 @@
-#!/usr/bin/env python3
-"""
-MoonWire CI Demo Summary
-
-Outputs:
- - artifacts/demo_summary.md
-Reads ./logs/*.jsonl and produces a simple Markdown summary with:
-   - Signal info
-   - Reviewer breakdown
-   - Signal origin breakdown (last 7 days)
-"""
-
-import os, json, hashlib, random, uuid
+import json
+from datetime import datetime, timedelta
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
 from collections import Counter
 
-# ---------- config ----------
-LOGS_DIR = Path("logs")
-ART = Path("artifacts"); ART.mkdir(exist_ok=True)
+from src.paths import REVIEWER_IMPACT_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+from src.paths import REVIEWER_SCORES_PATH, REVIEWER_SCORES_HISTORY_PATH
+from src.paths import LOGS_DIR
 
-DEFAULT_THRESHOLD = 2.5
+SUMMARY_TITLE = "MoonWire CI Demo Summary"
 
-# ---------- helpers ----------
-def red(s: str) -> str:
-    return "000000" if not s else hashlib.sha1(s.encode()).hexdigest()[:6]
 
 def load_jsonl(path: Path):
-    if not path.exists(): return []
-    out = []
-    for ln in path.read_text().splitlines():
-        ln = ln.strip()
-        if not ln: continue
-        try: out.append(json.loads(ln))
-        except Exception: pass
-    return out
+    """Load a JSONL file, returning a list of dicts (empty if missing)."""
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
 
-def band_weight_from_score(score):
-    if score is None: return 1.0
-    if score >= 0.75: return 1.25
-    if score >= 0.50: return 1.0
-    return 0.75
 
-def weight_to_label(w: float) -> str:
-    if w >= 1.20: return "High"
-    if w >= 0.90: return "Med"
-    return "Low"
+def format_reviewer_list(reviewers):
+    """Format reviewers in the 'abc123 -> rating' style."""
+    return "\n".join(
+        f"- `{r['reviewer_id']}` → {r['rating']}" for r in reviewers
+    )
 
-def parse_ts(val):
-    if val is None: return None
-    try:
-        ts = float(val); return datetime.fromtimestamp(ts, tz=timezone.utc)
-    except Exception: pass
-    try:
-        s = str(val);  s = s[:-1] + "+00:00" if s.endswith("Z") else s
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception: return None
 
-def is_demo_mode() -> bool:
-    return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
+def format_origin_breakdown(days=7):
+    """
+    Return a breakdown of signal origins over the last `days` days.
+    Reads from REVIEWER_IMPACT_LOG_PATH because that's where test flags write.
+    """
+    entries = load_jsonl(REVIEWER_IMPACT_LOG_PATH)
+    if not entries:
+        return "- *no origins logged in last 7 days*"
 
-# ---------- READ-ONLY demo seeding ----------
-def generate_demo_data_if_needed(reviewers, flag_times=None):
-    flag_times = flag_times or []
-    if not is_demo_mode() or reviewers:
-        return reviewers, []
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    origins = [
+        (e.get("origin") or "unknown")
+        for e in entries
+        if "ts" in e and datetime.fromisoformat(e["ts"]) >= cutoff
+    ]
 
-    now = datetime.now(timezone.utc)
-    n = random.randint(3, 5)
-    choices = [0.75, 1.0, 1.25]
-    seeded, display = [], []
-    for _ in range(n):
-        rid = f"demo-{uuid.uuid4().hex[:8]}"
-        w = random.choice(choices)
-        ts = (now - timedelta(minutes=random.randint(2, 55)))
-        seeded.append({"id": rid, "weight": w, "timestamp": ts.isoformat(), "origin": "unknown"})
-        display.append({"id": rid, "weight": w})
-        flag_times.append(ts)
-    return display, seeded
+    if not origins:
+        return "- *no origins logged in last 7 days*"
 
-# ---- load logs ----
-retrain_log   = load_jsonl(LOGS_DIR / "retraining_log.jsonl")
-triggered_log = load_jsonl(LOGS_DIR / "retraining_triggered.jsonl")
-scores_log    = load_jsonl(LOGS_DIR / "reviewer_scores.jsonl")
-score_by_id   = {r.get("reviewer_id"): r for r in scores_log}
+    counts = Counter(origins)
+    total = sum(counts.values())
 
-# ---- latest signal in retraining log ----
-if retrain_log:
-    def _key(r):
-        t = r.get("timestamp", 0)
-        try:
-            return float(t)
-        except Exception:
-            return 0.0
-    latest = max(retrain_log, key=_key)
-    sig_id = latest.get("signal_id", "unknown")
-    sig_rows = [r for r in retrain_log if r.get("signal_id") == sig_id]
-else:
-    sig_id = "none"
-    sig_rows = []
+    # Markdown table formatting for readability
+    header = "| Origin | Count | Percent |"
+    sep = "|---|---:|---:|"
+    rows = [
+        f"| {origin} | {count} | {count / total:.1%} |"
+        for origin, count in sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    ]
+    return "\n".join([header, sep] + rows)
 
-# ---- reviewers & flag times ----
-seen = set()
-reviewers = []
-flag_times = []
-for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
-    t = parse_ts(r.get("timestamp"))
-    if t: flag_times.append(t)
 
-    rid = r.get("reviewer_id","")
-    if rid in seen:
-        continue
-    seen.add(rid)
-    w = r.get("reviewer_weight")
-    if w is None:
-        sc = (score_by_id.get(rid) or {}).get("score")
-        w = band_weight_from_score(sc)
-    reviewers.append({"id": rid, "weight": round(float(w), 2)})
+def generate_summary():
+    # Latest reviewer scores
+    reviewer_scores = load_jsonl(REVIEWER_SCORES_PATH)
+    latest_signal = reviewer_scores[-1]["signal"] if reviewer_scores else None
+    unique_reviewers = len({r["reviewer_id"] for r in reviewer_scores})
+    combined_weight = sum(r["weight"] for r in reviewer_scores)
+    threshold = 2.5  # hardcoded threshold from your tests
 
-# ---- in-memory seeding for demo mode ----
-reviewers, _seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
+    # Build markdown summary
+    parts = []
+    parts.append(f"# {SUMMARY_TITLE}\n")
+    parts.append(f"MoonWire Demo Summary — {datetime.utcnow().isoformat()}Z\n")
+    parts.append(
+        "Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.\n"
+    )
+    if latest_signal:
+        parts.append(f"- **Signal:** `{latest_signal}`")
+    parts.append(f"- **Unique reviewers:** {unique_reviewers}")
+    parts.append(f"- **Combined weight:** {combined_weight}")
+    parts.append(f"- **Threshold:** {threshold} → **TRIGGERS**\n")
 
-total_weight = round(sum(r["weight"] for r in reviewers), 2)
-threshold    = DEFAULT_THRESHOLD
-would_trigger = total_weight >= threshold
-last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
-                key=lambda x: x.get("timestamp", 0), default=None) if triggered_log else None
-now_iso = datetime.now(timezone.utc).isoformat()
+    if reviewer_scores:
+        parts.append("**Reviewers (redacted):**\n")
+        parts.append(format_reviewer_list(reviewer_scores) + "\n")
 
-# ---- origin breakdown (last 7 days) ----
-seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
-origin_counts = Counter()
+    parts.append("**Signal origin breakdown (last 7 days):**\n")
+    parts.append(format_origin_breakdown(days=7))
 
-for r in retrain_log:
-    ts = parse_ts(r.get("timestamp"))
-    if not ts or ts < seven_days_ago:
-        continue
-    origin = r.get("origin") or "unknown"
-    origin_counts[origin] += 1
+    return "\n".join(parts)
 
-# ---------- markdown summary ----------
-md = []
-md.append("# MoonWire CI Demo Summary")
-md.append("")
-md.append(f"MoonWire Demo Summary — {now_iso}")
-md.append("")
-md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.")
-md.append("")
-md.append(f"- **Signal:** `{red(sig_id)}`")
-md.append(f"- **Unique reviewers:** {len(reviewers)}")
-md.append(f"- **Combined weight:** {total_weight}")
-md.append(f"- **Threshold:** {threshold} → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
-md.append("")
-md.append("**Reviewers (redacted):**")
-if reviewers:
-    for r in reviewers:
-        md.append(f"- `{red(r['id'])}` → {weight_to_label(r['weight'])}")
-else:
-    md.append("- _none found in this run_")
-md.append("")
-md.append("**Signal origin breakdown (last 7 days):**")
-if origin_counts:
-    md.append("")
-    md.append("| Origin | Count | Percent |")
-    md.append("|--------|-------|---------|")
-    total = sum(origin_counts.values())
-    for origin, count in origin_counts.items():
-        pct = (count / total) * 100
-        md.append(f"| {origin} | {count} | {pct:.1f}% |")
-else:
-    md.append("- _no origins logged in last 7 days_")
 
-(ART / "demo_summary.md").write_text("\n".join(md))
-
-print(f"Wrote: {ART/'demo_summary.md'}")
+if __name__ == "__main__":
+    print(generate_summary())
