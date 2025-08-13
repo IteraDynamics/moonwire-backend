@@ -2,59 +2,56 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
-from typing import Dict, Any, Tuple, List, Optional, Iterable
-from datetime import datetime, timezone
+from typing import Dict, Iterable, Tuple, Any, List
+from datetime import datetime, timedelta, timezone
 
-# --- alias map / normalization ---
-_ALIAS = {
+# ---------- Helpers ----------
+
+_ALIAS_MAP = {
     "twitter_api": "twitter",
-    "twitterapi":  "twitter",
-    "twitter":     "twitter",
-    "x":           "twitter",
-    "reddit_api":  "reddit",
-    "reddit":      "reddit",
-    "rss":         "rss_news",
-    "rssnews":     "rss_news",
-    "rss_news":    "rss_news",
-    "news":        "rss_news",
-    "market":      "market_feed",
-    "marketfeed":  "market_feed",
+    "twitterapi": "twitter",
+    "twitter": "twitter",
+    "reddit": "reddit",
+    "rss": "rss_news",
+    "rss_news": "rss_news",
+    "market": "market_feed",
     "market_feed": "market_feed",
 }
 
-def _normalize_origin(raw: Optional[str]) -> str:
-    if not raw:
+_ORIGIN_FIELDS = ("origin", "source", "provider", "channel")
+
+
+def normalize_origin(raw: Any) -> str:
+    if raw is None:
         return "unknown"
-    low = str(raw).strip().lower()
-    return _ALIAS.get(low, low)
+    try:
+        s = str(raw).strip().lower()
+    except Exception:
+        return "unknown"
+    return _ALIAS_MAP.get(s, s if s else "unknown")
 
-def _extract_origin(rec: dict) -> str:
-    """
-    Tolerate schema variants:
-      - origin / source / signal_origin (top-level)
-      - meta.origin / metadata.source (nested)
-    """
-    o = rec.get("origin") or rec.get("source") or rec.get("signal_origin")
-    if not o:
-        meta = rec.get("meta") or rec.get("metadata") or {}
-        o = meta.get("origin") or meta.get("source")
-    return _normalize_origin(o)
 
-# --- timestamp parsing that accepts epoch or ISO8601 (with/without Z) ---
-def _parse_timestamp(ts_val: Any) -> Optional[float]:
-    """Return POSIX seconds (float) or None if unusable."""
-    if ts_val is None:
+def parse_timestamp(val: Any) -> datetime | None:
+    """
+    Accept epoch seconds (int/float/str) or ISO8601 (with/without Z/offset).
+    Return timezone-aware UTC datetime or None if unparsable.
+    """
+    if val is None:
         return None
-    # numeric or numeric-like string
+
+    # Epoch-like
     try:
-        return float(ts_val)
-    except (TypeError, ValueError):
+        # common case: float/int or numeric string
+        ts = float(val)
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except Exception:
         pass
-    # ISO formats (with or without Z / timezone)
+
+    # ISO-like
     try:
-        s = str(ts_val)
+        s = str(val)
+        # naive or 'Z' → assume UTC
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         dt = datetime.fromisoformat(s)
@@ -62,23 +59,81 @@ def _parse_timestamp(ts_val: Any) -> Optional[float]:
             dt = dt.replace(tzinfo=timezone.utc)
         else:
             dt = dt.astimezone(timezone.utc)
-        return dt.timestamp()
+        return dt
     except Exception:
         return None
 
-def _stream_jsonl(path: Path) -> Iterable[dict]:
+
+def _iter_jsonl(path: Path) -> Iterable[dict]:
     if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8") as f:
+        return
+    with path.open("r") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    yield obj
             except Exception:
-                # skip malformed lines
+                # ignore malformed lines
                 continue
+
+
+def _extract_origin(row: dict) -> str:
+    for key in _ORIGIN_FIELDS:
+        if key in row:
+            return normalize_origin(row.get(key))
+    return "unknown"
+
+
+def aggregate_counts(
+    flags_path: Path,
+    triggers_path: Path | None,
+    *,
+    days: int,
+    include_triggers: bool,
+) -> Tuple[Dict[str, int], Dict[str, int], Dict[str, int]]:
+    """
+    Returns (flag_counts, trigger_counts, included_totals)
+      - flag_counts: origin -> count (flags only)
+      - trigger_counts: origin -> count (triggers only, possibly empty)
+      - included_totals: {"flags": int, "triggers": int, "total_events": int}
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
+
+    flag_counts: Dict[str, int] = {}
+    trigger_counts: Dict[str, int] = {}
+
+    # Every line in flags_path is a "flag" event.
+    for row in _iter_jsonl(flags_path):
+        ts = parse_timestamp(row.get("timestamp"))
+        if ts is None or ts < cutoff:
+            continue
+        origin = _extract_origin(row)
+        flag_counts[origin] = flag_counts.get(origin, 0) + 1
+
+    flags_total = sum(flag_counts.values())
+
+    triggers_total = 0
+    if include_triggers and triggers_path is not None:
+        for row in _iter_jsonl(triggers_path):
+            ts = parse_timestamp(row.get("timestamp"))
+            if ts is None or ts < cutoff:
+                continue
+            origin = _extract_origin(row)
+            trigger_counts[origin] = trigger_counts.get(origin, 0) + 1
+        triggers_total = sum(trigger_counts.values())
+
+    totals = {
+        "flags": flags_total,
+        "triggers": triggers_total,
+        "total_events": flags_total + (triggers_total if include_triggers else 0),
+    }
+    return flag_counts, trigger_counts, totals
+
 
 def compute_origin_breakdown(
     flags_path: Path,
@@ -88,59 +143,31 @@ def compute_origin_breakdown(
     include_triggers: bool,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
-    Returns (rows, totals)
-      rows: [{"origin": str, "count": int, "pct": float}, ...] sorted desc by count, asc by origin
-      totals: {"flags": int, "triggers": int, "total_events": int}
+    Builds a sorted list of {origin, count, pct} and a totals dict.
+
+    Sorting: count desc, then origin asc.
+    pct is based on total_events (flags + triggers if included).
     """
-    if days <= 0:
-        return ([], {"flags": 0, "triggers": 0, "total_events": 0})
+    flag_counts, trigger_counts, totals = aggregate_counts(
+        flags_path, triggers_path, days=days, include_triggers=include_triggers
+    )
 
-    now_ts = time.time()
-    cutoff = now_ts - days * 86400
-
-    # Count flags per origin
-    flags_by_origin: Dict[str, int] = {}
-    flags_total = 0
-    for rec in _stream_jsonl(flags_path):
-        ts = _parse_timestamp(rec.get("timestamp"))
-        # Treat missing/unparsable timestamp as "now" (internal analytics tolerance)
-        if ts is None:
-            ts = now_ts
-        if ts < cutoff:
-            continue
-        origin = _extract_origin(rec)
-        flags_by_origin[origin] = flags_by_origin.get(origin, 0) + 1
-        flags_total += 1
-
-    # Optionally count triggers per origin
-    triggers_by_origin: Dict[str, int] = {}
-    triggers_total = 0
+    # Merge counts if including triggers; otherwise flags only
+    combined: Dict[str, int] = dict(flag_counts)
     if include_triggers:
-        for rec in _stream_jsonl(triggers_path):
-            ts = _parse_timestamp(rec.get("timestamp"))
-            if ts is None:
-                ts = now_ts
-            if ts < cutoff:
-                continue
-            origin = _extract_origin(rec)
-            triggers_by_origin[origin] = triggers_by_origin.get(origin, 0) + 1
-            triggers_total += 1
+        for k, v in trigger_counts.items():
+            combined[k] = combined.get(k, 0) + v
 
-    # Merge for rows (but keep independent totals)
-    all_origins = set(flags_by_origin) | set(triggers_by_origin)
-    total_events = flags_total + (triggers_total if include_triggers else 0)
-
+    total_events = totals["total_events"]
     rows: List[Dict[str, Any]] = []
     if total_events > 0:
-        for origin in all_origins:
-            c = flags_by_origin.get(origin, 0) + (triggers_by_origin.get(origin, 0) if include_triggers else 0)
-            pct = round(100.0 * c / total_events, 2)
-            rows.append({"origin": origin, "count": c, "pct": pct})
-        rows.sort(key=lambda r: (-r["count"], r["origin"]))
+        for origin, cnt in combined.items():
+            pct = round(100.0 * cnt / total_events, 2)
+            rows.append({"origin": origin, "count": cnt, "pct": pct})
+    else:
+        # no events; return empty rows and zeros in totals
+        rows = []
 
-    totals = {
-        "flags": flags_total,
-        "triggers": triggers_total if include_triggers else 0,
-        "total_events": total_events,
-    }
+    # Sort by count desc, then origin asc
+    rows.sort(key=lambda r: (-r["count"], r["origin"]))
     return rows, totals
