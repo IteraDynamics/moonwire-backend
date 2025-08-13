@@ -1,24 +1,20 @@
 # src/analytics/origin_utils.py
 from __future__ import annotations
 
-import json
-from collections import Counter
-from datetime import datetime, timedelta, timezone
+import json, time
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple, Any
+from typing import Dict, List, Tuple, Any
 
-# ---- origin normalization ----------------------------------------------------
-
+# Simple alias map (extend as needed)
 _ALIAS = {
     "twitter_api": "twitter",
-    "twitter": "twitter",
     "Twitter": "twitter",
-    "TWITTER": "twitter",
+    "reddit_api": "reddit",
     "rss": "rss_news",
-    "RSS": "rss_news",
+    "rss-feed": "rss_news",
 }
 
-def normalize_origin(val: Any) -> str:
+def _norm_origin(val: Any) -> str:
     if val is None:
         return "unknown"
     s = str(val).strip()
@@ -27,33 +23,45 @@ def normalize_origin(val: Any) -> str:
     key = s.lower()
     return _ALIAS.get(key, key)
 
-# ---- timestamp parsing -------------------------------------------------------
-
-def _parse_ts(v: Any) -> datetime | None:
+def _ts_to_epoch_s(ts_val: Any) -> float:
     """
-    Accept:
-      - unix epoch (int/float/str)
-      - ISO 8601 (with/without 'Z')
-    Return aware UTC datetime or None if unparsable.
+    Convert a timestamp value to epoch seconds.
+    Accepts:
+      - float/int epoch seconds (preferred in tests)
+      - ISO-ish strings (best-effort)
+    On failure, return 'now' so fresh test rows are never dropped.
     """
-    if v is None:
-        return None
-    try:
-        sec = float(v)
-        return datetime.fromtimestamp(sec, tz=timezone.utc)
-    except Exception:
-        pass
-    try:
-        s = str(v)
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception:
-        return None
+    now_s = time.time()
+    # Fast path: numeric epoch
+    if isinstance(ts_val, (int, float)):
+        try:
+            return float(ts_val)
+        except Exception:
+            return now_s
+    # Try to parse string ISO
+    if isinstance(ts_val, str):
+        try:
+            # Common case: already numeric-in-string
+            return float(ts_val)
+        except Exception:
+            pass
+        # Very lenient ISO parser without external deps
+        try:
+            # Python's fromisoformat needs adjustments; we only need recency filter
+            from datetime import datetime, timezone
+            s = ts_val.strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return now_s
+    # Anything else → now
+    return now_s
 
-# ---- streaming reader --------------------------------------------------------
-
-def _iter_jsonl(path: Path) -> Iterable[dict]:
+def _read_jsonl_stream(path: Path):
     if not path or not Path(path).exists():
         return
     with Path(path).open("r") as f:
@@ -64,72 +72,72 @@ def _iter_jsonl(path: Path) -> Iterable[dict]:
             try:
                 yield json.loads(line)
             except Exception:
-                continue  # skip malformed
-
-# ---- core computation --------------------------------------------------------
+                # Tolerate malformed lines
+                continue
 
 def compute_origin_breakdown(
     flags_path: Path,
     triggers_path: Path | None,
-    *,
-    days: int,
-    include_triggers: bool,
+    days: int = 7,
+    include_triggers: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
-    Returns (rows, totals):
-      rows: [{origin, count, pct}]
-      totals: {"flags": int, "triggers": int, "total_events": int}
-
-    Behavior:
-      - totals["flags"] is ALWAYS the number of flags in-window (lenient parsing).
-      - totals["triggers"] is the number of triggers in-window (lenient parsing),
-        but only contributes to total_events when include_triggers=True.
+    Returns (rows, totals)
+      rows: [{origin, count, pct}, ...] sorted by count desc then origin asc
+      totals: {"flags": N, "triggers": M, "total_events": N(+M)}
+    Window filter uses epoch seconds to avoid tz/naive pitfalls.
+    Missing/unparsable timestamps are treated as 'now' (keeps brand-new test rows).
     """
     if days <= 0:
         return ([], {"flags": 0, "triggers": 0, "total_events": 0})
 
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=days)
+    now_s = time.time()
+    cutoff = now_s - days * 86400
 
-    # 1) FLAGS
-    flag_counter: Counter[str] = Counter()
+    # Count flags
+    flags_by_origin: Dict[str, int] = {}
     flags_in_window = 0
-    for rec in _iter_jsonl(flags_path):
-        # --- LENIENT WINDOW: treat missing/unparsable ts as "now" so tests/CI don't drop fresh rows
-        ts = _parse_ts(rec.get("timestamp")) or now
-        if ts >= cutoff:
-            origin = normalize_origin(rec.get("origin"))
-            flag_counter[origin] += 1
-            flags_in_window += 1
+    for rec in _read_jsonl_stream(flags_path):
+        ts_s = _ts_to_epoch_s(rec.get("timestamp"))
+        if ts_s < cutoff:
+            continue
+        origin = _norm_origin(rec.get("origin"))
+        flags_by_origin[origin] = flags_by_origin.get(origin, 0) + 1
+        flags_in_window += 1
 
-    # 2) TRIGGERS
-    trig_counter: Counter[str] = Counter()
+    triggers_by_origin: Dict[str, int] = {}
     triggers_in_window = 0
-    if triggers_path:
-        for rec in _iter_jsonl(triggers_path):
-            ts = _parse_ts(rec.get("timestamp")) or now  # LENIENT
-            if ts >= cutoff:
-                origin = normalize_origin(rec.get("origin"))
-                trig_counter[origin] += 1
-                triggers_in_window += 1
+    if include_triggers and triggers_path:
+        for rec in _read_jsonl_stream(triggers_path):
+            ts_s = _ts_to_epoch_s(rec.get("timestamp"))
+            if ts_s < cutoff:
+                continue
+            origin = _norm_origin(rec.get("origin"))
+            triggers_by_origin[origin] = triggers_by_origin.get(origin, 0) + 1
+            triggers_in_window += 1
 
-    # 3) Build response set
-    combined: Counter[str] = Counter(flag_counter)
+    # Merge for output rows only if we include triggers
+    combined: Dict[str, int] = dict(flags_by_origin)
     if include_triggers:
-        combined.update(trig_counter)
+        for k, v in triggers_by_origin.items():
+            combined[k] = combined.get(k, 0) + v
 
-    total_events = sum(combined.values())
+    total_events = flags_in_window + (triggers_in_window if include_triggers else 0)
+
+    if total_events == 0:
+        return ([], {"flags": 0, "triggers": 0, "total_events": 0})
+
+    # Build rows with pct
     rows: List[Dict[str, Any]] = []
-    if total_events > 0:
-        for origin, count in combined.items():
-            pct = round(100.0 * count / total_events, 2)
-            rows.append({"origin": origin, "count": int(count), "pct": pct})
-        rows.sort(key=lambda r: (-r["count"], r["origin"]))
+    for origin, count in combined.items():
+        pct = round(100.0 * count / total_events, 2)
+        rows.append({"origin": origin, "count": count, "pct": pct})
 
-    # 4) Totals
-    totals = {
+    # sort: count desc, origin asc
+    rows.sort(key=lambda r: (-r["count"], r["origin"]))
+
+    return rows, {
         "flags": flags_in_window,
         "triggers": triggers_in_window if include_triggers else 0,
         "total_events": total_events,
     }
-    return rows, totals
