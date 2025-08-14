@@ -7,7 +7,7 @@ Outputs:
  - artifacts/consensus.png
  - artifacts/consensus_social.png
  - artifacts/origin_breakdown.png
- - artifacts/source_yield_plan.png (optional future chart)
+ - (new) Source Yield Plan section
 
 Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty.
 """
@@ -17,13 +17,10 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import matplotlib.pyplot as plt
 
-from matplotlib.patches import FancyBboxPatch, Rectangle
-
 # ---------- config ----------
-LOGS_DIR = Path("logs")
+LOGS_DIR = Path(os.getenv("LOGS_DIR", "logs"))
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 DEFAULT_THRESHOLD = 2.5
-SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120
 # ----------------------------
 
 # ---------- helpers ----------
@@ -45,11 +42,6 @@ def band_weight_from_score(score):
     if score >= 0.75: return 1.25
     if score >= 0.50: return 1.0
     return 0.75
-
-def weight_to_label(w: float) -> str:
-    if w >= 1.20: return "High"
-    if w >= 0.90: return "Med"
-    return "Low"
 
 def parse_ts(val):
     if val is None: return None
@@ -82,7 +74,6 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         flag_times.append(ts)
     return display, seeded
 
-# ---------- maybe seed logs if empty ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
         return False
@@ -157,7 +148,7 @@ small_png = ART / "consensus.png"
 plt.savefig(small_png, dpi=200)
 plt.close()
 
-# ---------- origin breakdown ----------
+# ---------- origin breakdown graphic ----------
 def draw_origin_breakdown():
     try:
         from src.analytics.origin_utils import compute_origin_breakdown
@@ -183,8 +174,8 @@ def draw_origin_breakdown():
 
 origin_result = draw_origin_breakdown()
 
-# ---------- source yield plan ----------
-def compute_source_yield_section():
+# ---------- source yield plan section ----------
+def compute_yield_plan_section():
     try:
         from src.analytics.source_yield import compute_source_yield
         from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
@@ -194,7 +185,7 @@ def compute_source_yield_section():
         print(f"[yield plan skipped: {e}]")
         return None
 
-yield_result = compute_source_yield_section()
+yield_plan_result = compute_yield_plan_section()
 
 # ---------- markdown summary ----------
 md = []
@@ -224,31 +215,22 @@ if origin_result:
     md.append("![Origin Breakdown](origin_breakdown.png)")
     md.append("")
 
-if yield_result:
-    md.append("## Source Yield Plan (Last 7 Days)")
-    totals = yield_result.get("totals", {})
-    md.append(f"- Flags: {totals.get('flags', 0)}")
-    md.append(f"- Triggers: {totals.get('triggers', 0)}")
-    header = f"{'Origin':<15} {'Flags':>5} {'Triggers':>8} {'Rate':>8} {'Yield':>8}"
+if yield_plan_result:
+    md.append("## Source Yield Plan")
+    md.append(f"- Window: {yield_plan_result['window_days']} days")
+    md.append(f"- Flags total: {yield_plan_result['totals']['flags']}")
+    md.append(f"- Triggers total: {yield_plan_result['totals']['triggers']}")
+    header = f"{'Origin':<15} {'Flags':>6} {'Triggers':>9} {'Rate':>8} {'Yield':>8} {'Eligible':>9}"
     md.append("```")
     md.append(header)
     md.append("-" * len(header))
-    for o in yield_result.get("origins", []):
-        md.append(f"{o['origin']:<15} {o['flags']:>5} {o['triggers']:>8} "
-                  f"{o['trigger_rate']:.3f} {o['yield_score']:.3f}")
+    for r in yield_plan_result["origins"]:
+        md.append(f"{r['origin']:<15} {r['flags']:>6} {r['triggers']:>9} {r['trigger_rate']:>8.3f} {r['yield_score']:>8.3f} {str(r['eligible']):>9}")
     md.append("```")
-    md.append("**Budget Plan (% allocation):**")
-    header2 = f"{'Origin':<15} {'Pct':>6}"
-    md.append("```")
-    md.append(header2)
-    md.append("-" * len(header2))
-    for b in yield_result.get("budget_plan", []):
-        md.append(f"{b['origin']:<15} {b['pct']:.1f}")
-    md.append("```")
-    if "notes" in yield_result:
-        md.append("Notes:")
-        for note in yield_result["notes"]:
-            md.append(f"- {note}")
+    if yield_plan_result["budget_plan"]:
+        md.append("**Budget Plan (% allocation):**")
+        for bp in yield_plan_result["budget_plan"]:
+            md.append(f"- {bp['origin']}: {bp['pct']:.1f}%")
     md.append("")
 
 (ART / "demo_summary.md").write_text("\n".join(md))
