@@ -1,124 +1,141 @@
-#!/usr/bin/env python3
-"""
-Tests for /internal/source-yield-plan endpoint and compute_source_yield().
-"""
-
 import json
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from datetime import datetime, timezone, timedelta
 
 import pytest
 
 from src.analytics.source_yield import compute_source_yield
 
 
+def write_jsonl(path: Path, rows: list):
+    path.write_text("\n".join(json.dumps(r) for r in rows))
+
+
+def make_ts(days_ago: int = 0):
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+
+
 @pytest.fixture
 def tmp_logs(tmp_path):
     flags_path = tmp_path / "retraining_log.jsonl"
     triggers_path = tmp_path / "retraining_triggered.jsonl"
-
-    now = datetime.now(timezone.utc)
-
-    def write_jsonl(path, rows):
-        with open(path, "w") as f:
-            for r in rows:
-                f.write(json.dumps(r) + "\n")
-
-    # Flags: twitter(6), reddit(3), rss_news(1)
-    flags = []
-    for i in range(6):
-        flags.append({"origin": "twitter", "timestamp": (now - timedelta(days=1)).isoformat()})
-    for i in range(3):
-        flags.append({"origin": "reddit", "timestamp": (now - timedelta(days=2)).isoformat()})
-    for i in range(1):
-        flags.append({"origin": "rss_news", "timestamp": (now - timedelta(days=2)).isoformat()})
-    write_jsonl(flags_path, flags)
-
-    # Triggers: twitter(2), reddit(1)
-    triggers = []
-    for i in range(2):
-        triggers.append({"origin": "twitter", "timestamp": (now - timedelta(hours=10)).isoformat()})
-    for i in range(1):
-        triggers.append({"origin": "reddit", "timestamp": (now - timedelta(hours=5)).isoformat()})
-    write_jsonl(triggers_path, triggers)
-
     return flags_path, triggers_path
 
 
 def test_happy_path(tmp_logs):
     flags_path, triggers_path = tmp_logs
-    res = compute_source_yield(flags_path, triggers_path, days=7, min_events=2, alpha=0.7)
+    # twitter: 8 flags, 2 triggers
+    # reddit: 4 flags, 1 trigger
+    flags = [{"origin": "twitter", "timestamp": make_ts()} for _ in range(8)]
+    flags += [{"origin": "reddit", "timestamp": make_ts()} for _ in range(4)]
+    triggers = [{"origin": "twitter", "timestamp": make_ts()} for _ in range(2)]
+    triggers += [{"origin": "reddit", "timestamp": make_ts()} for _ in range(1)]
 
-    origins = {o["origin"]: o for o in res["origins"]}
-    assert origins["twitter"]["flags"] == 6
-    assert origins["twitter"]["triggers"] == 2
-    assert abs(origins["twitter"]["trigger_rate"] - (2/6)) < 1e-6
+    write_jsonl(flags_path, flags)
+    write_jsonl(triggers_path, triggers)
 
-    # Budget plan should sum to ~100
-    total_pct = sum(p["pct"] for p in res["budget_plan"])
-    assert 99.9 <= total_pct <= 100.1
+    result = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=0.7)
 
-    # Order: twitter first
-    assert res["budget_plan"][0]["origin"] == "twitter"
+    assert result["totals"]["flags"] == 12
+    assert result["totals"]["triggers"] == 3
+    origins = {o["origin"]: o for o in result["origins"]}
+    assert origins["twitter"]["trigger_rate"] == 0.25
+    assert origins["reddit"]["trigger_rate"] == 0.25
+    # Budget should sum to ~100
+    total_pct = sum(b["pct"] for b in result["budget_plan"])
+    assert abs(total_pct - 100) < 0.01
 
 
 def test_min_events_filter(tmp_logs):
     flags_path, triggers_path = tmp_logs
-    res = compute_source_yield(flags_path, triggers_path, days=7, min_events=5, alpha=0.7)
-    # rss_news only has 1 flag, should be excluded from budget_plan
-    origins_in_plan = {p["origin"] for p in res["budget_plan"]}
-    assert "rss_news" not in origins_in_plan
-    # But rss_news still present in raw origins
-    origins_all = {o["origin"] for o in res["origins"]}
-    assert "rss_news" in origins_all
+    # twitter: 10 flags, reddit: 2 flags
+    flags = [{"origin": "twitter", "timestamp": make_ts()} for _ in range(10)]
+    flags += [{"origin": "reddit", "timestamp": make_ts()} for _ in range(2)]
+    triggers = []
+
+    write_jsonl(flags_path, flags)
+    write_jsonl(triggers_path, triggers)
+
+    result = compute_source_yield(flags_path, triggers_path, days=7, min_events=5, alpha=0.5)
+
+    # reddit should not be in budget_plan
+    origins_in_plan = {b["origin"] for b in result["budget_plan"]}
+    assert "reddit" not in origins_in_plan
+    assert "twitter" in origins_in_plan
+    # But reddit still in origins list
+    origins_all = {o["origin"] for o in result["origins"]}
+    assert "reddit" in origins_all
 
 
 def test_alpha_extremes(tmp_logs):
     flags_path, triggers_path = tmp_logs
-    res_vol = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=0.0)
-    res_conv = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=1.0)
-    # Rankings should differ between pure volume and pure conversion
-    plan_vol = [p["origin"] for p in res_vol["budget_plan"]]
-    plan_conv = [p["origin"] for p in res_conv["budget_plan"]]
-    assert plan_vol != plan_conv
+    # twitter has high conversion rate, reddit has high volume
+    flags = [{"origin": "twitter", "timestamp": make_ts()} for _ in range(5)]
+    flags += [{"origin": "reddit", "timestamp": make_ts()} for _ in range(20)]
+    triggers = [{"origin": "twitter", "timestamp": make_ts()} for _ in range(3)]
+    triggers += [{"origin": "reddit", "timestamp": make_ts()} for _ in range(1)]
+
+    write_jsonl(flags_path, flags)
+    write_jsonl(triggers_path, triggers)
+
+    r_alpha1 = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=1.0)
+    r_alpha0 = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=0.0)
+
+    # alpha=1.0: ranking by trigger rate
+    origins_alpha1 = [o["origin"] for o in r_alpha1["budget_plan"]]
+    # alpha=0.0: ranking by volume
+    origins_alpha0 = [o["origin"] for o in r_alpha0["budget_plan"]]
+
+    assert origins_alpha1[0] == "twitter"
+    assert origins_alpha0[0] == "reddit"
 
 
 def test_missing_triggers_file(tmp_path):
     flags_path = tmp_path / "retraining_log.jsonl"
-    triggers_path = tmp_path / "missing.jsonl"
-
-    now = datetime.now(timezone.utc)
-    flags = [
-        {"origin": "twitter", "timestamp": now.isoformat()},
-        {"origin": "reddit", "timestamp": now.isoformat()},
-    ]
-    with open(flags_path, "w") as f:
-        for r in flags:
-            f.write(json.dumps(r) + "\n")
-
-    res = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=0.7)
-    for o in res["origins"]:
-        assert o["trigger_rate"] == 0.0  # no triggers file
-
-
-def test_windowing_excludes_old_events(tmp_path):
-    flags_path = tmp_path / "retraining_log.jsonl"
     triggers_path = tmp_path / "retraining_triggered.jsonl"
+    # only flags exist
+    flags = [{"origin": "twitter", "timestamp": make_ts()} for _ in range(5)]
+    write_jsonl(flags_path, flags)
+    # triggers_path intentionally missing
 
-    now = datetime.now(timezone.utc)
-    old_time = now - timedelta(days=30)
+    result = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=0.5)
 
+    assert result["totals"]["triggers"] == 0
+    assert all(o["triggers"] == 0 for o in result["origins"])
+
+
+def test_windowing_excludes_old(tmp_logs):
+    flags_path, triggers_path = tmp_logs
     flags = [
-        {"origin": "twitter", "timestamp": now.isoformat()},
-        {"origin": "twitter", "timestamp": old_time.isoformat()},
+        {"origin": "twitter", "timestamp": make_ts(days_ago=10)},  # too old
+        {"origin": "twitter", "timestamp": make_ts(days_ago=1)},   # recent
     ]
-    with open(flags_path, "w") as f:
-        for r in flags:
-            f.write(json.dumps(r) + "\n")
+    triggers = [{"origin": "twitter", "timestamp": make_ts(days_ago=1)}]
 
-    with open(triggers_path, "w") as f:
-        pass  # empty
+    write_jsonl(flags_path, flags)
+    write_jsonl(triggers_path, triggers)
 
-    res = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=0.7)
-    origins = {o["origin"]: o for o in res["origins"]}
-    assert origins["twitter"]["flags"] == 1  # only recent one counted
+    result = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=0.5)
+
+    assert result["totals"]["flags"] == 1
+    assert result["totals"]["triggers"] == 1
+
+
+def test_schema_tolerance(tmp_logs):
+    flags_path, triggers_path = tmp_logs
+    flags = [
+        {"source": "twitter", "timestamp": make_ts()},
+        {"signal_origin": "reddit", "timestamp": make_ts()},
+        {"meta": {"origin": "rss_news"}, "timestamp": make_ts()},
+    ]
+    triggers = [
+        {"source": "twitter", "timestamp": make_ts()},
+        {"signal_origin": "reddit", "timestamp": make_ts()},
+    ]
+
+    write_jsonl(flags_path, flags)
+    write_jsonl(triggers_path, triggers)
+
+    result = compute_source_yield(flags_path, triggers_path, days=7, min_events=1, alpha=0.5)
+    origins = {o["origin"] for o in result["origins"]}
+    assert {"twitter", "reddit", "rss_news"} <= origins
