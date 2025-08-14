@@ -7,7 +7,6 @@ Outputs:
  - artifacts/consensus.png
  - artifacts/consensus_social.png
  - artifacts/origin_breakdown.png
- - artifacts/source_yield_plan.png (optional later)
 
 Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty.
 """
@@ -21,6 +20,7 @@ import matplotlib.pyplot as plt
 LOGS_DIR = Path(os.getenv("LOGS_DIR", "logs"))
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 DEFAULT_THRESHOLD = 2.5
+SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120
 # ----------------------------
 
 # ---------- helpers ----------
@@ -42,6 +42,11 @@ def band_weight_from_score(score):
     if score >= 0.75: return 1.25
     if score >= 0.50: return 1.0
     return 0.75
+
+def weight_to_label(w: float) -> str:
+    if w >= 1.20: return "High"
+    if w >= 0.90: return "Med"
+    return "Low"
 
 def parse_ts(val):
     if val is None: return None
@@ -74,7 +79,6 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         flag_times.append(ts)
     return display, seeded
 
-# ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
         return False
@@ -153,12 +157,8 @@ plt.close()
 def draw_origin_breakdown():
     try:
         from src.analytics.origin_utils import compute_origin_breakdown
-        rows, totals = compute_origin_breakdown(
-            LOGS_DIR / "retraining_log.jsonl",
-            LOGS_DIR / "retraining_triggered.jsonl",
-            days=7,
-            include_triggers=False
-        )
+        from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+        rows, totals = compute_origin_breakdown(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, include_triggers=True)
         if not rows:
             return None
         origins = [r["origin"] for r in rows]
@@ -221,27 +221,33 @@ if origin_result:
     md.append("![Origin Breakdown](origin_breakdown.png)")
     md.append("")
 
+# Always print yield plan section
+md.append("## Source Yield Plan (Last 7 Days)")
 if yield_plan_result:
-    md.append("## Source Yield Plan (Last 7 Days)")
     md.append(f"- Flags total: {yield_plan_result['totals']['flags']}")
     md.append(f"- Triggers total: {yield_plan_result['totals']['triggers']}")
-    header = f"{'Origin':<15} {'Flags':>5} {'Trig':>5} {'Rate':>6} {'Yield':>7} {'Elig':>6}"
-    md.append("```")
-    md.append(header)
-    md.append("-" * len(header))
-    for r in yield_plan_result["origins"]:
-        md.append(f"{r['origin']:<15} {r['flags']:>5} {r['triggers']:>5} {r['trigger_rate']:>6.3f} {r['yield_score']:>7.3f} {str(r['eligible']):>6}")
-    md.append("```")
-    md.append("")
-    md.append("**Budget Plan:**")
-    header2 = f"{'Origin':<15} {'Pct':>6}"
-    md.append("```")
-    md.append(header2)
-    md.append("-" * len(header2))
-    for bp in yield_plan_result["budget_plan"]:
-        md.append(f"{bp['origin']:<15} {bp['pct']:>6.1f}")
-    md.append("```")
-    md.append("")
+    if yield_plan_result["origins"]:
+        header = f"{'Origin':<15} {'Flags':>5} {'Trig':>5} {'Rate':>6} {'Yield':>7} {'Elig':>6}"
+        md.append("```")
+        md.append(header)
+        md.append("-" * len(header))
+        for r in yield_plan_result["origins"]:
+            md.append(f"{r['origin']:<15} {r['flags']:>5} {r['triggers']:>5} "
+                      f"{r['trigger_rate']:>6.3f} {r['yield_score']:>7.3f} {str(r['eligible']):>6}")
+        md.append("```")
+        md.append("")
+        md.append("**Budget Plan:**")
+        header2 = f"{'Origin':<15} {'Pct':>6}"
+        md.append("```")
+        md.append(header2)
+        md.append("-" * len(header2))
+        for bp in yield_plan_result["budget_plan"]:
+            md.append(f"{bp['origin']:<15} {bp['pct']:>6.1f}")
+        md.append("```")
+    else:
+        md.append("_No eligible origins in this window._")
+else:
+    md.append("_Yield plan computation failed._")
 
 (ART / "demo_summary.md").write_text("\n".join(md))
 
