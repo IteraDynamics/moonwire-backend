@@ -5,8 +5,9 @@ MoonWire CI Demo Summary (read-only)
 Outputs:
  - artifacts/demo_summary.md
  - artifacts/consensus.png
+ - artifacts/consensus_social.png
  - artifacts/origin_breakdown.png
- - artifacts/source_yield_plan.png (optional future graphic)
+ - artifacts/source_yield_plan.png (optional future chart)
 
 Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty.
 """
@@ -15,6 +16,7 @@ import os, json, hashlib, random, uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import matplotlib.pyplot as plt
+
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 # ---------- config ----------
@@ -80,7 +82,7 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         flag_times.append(ts)
     return display, seeded
 
-# ---------- maybe seed logs ----------
+# ---------- maybe seed logs if empty ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
         return False
@@ -182,16 +184,17 @@ def draw_origin_breakdown():
 origin_result = draw_origin_breakdown()
 
 # ---------- source yield plan ----------
-def compute_yield_plan_section():
+def compute_source_yield_section():
     try:
         from src.analytics.source_yield import compute_source_yield
         from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
-        return compute_source_yield(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, min_events=5, alpha=0.7)
+        result = compute_source_yield(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, min_events=5, alpha=0.7)
+        return result
     except Exception as e:
-        print(f"[source yield skipped: {e}]")
+        print(f"[yield plan skipped: {e}]")
         return None
 
-yield_plan_result = compute_yield_plan_section()
+yield_result = compute_source_yield_section()
 
 # ---------- markdown summary ----------
 md = []
@@ -221,22 +224,30 @@ if origin_result:
     md.append("![Origin Breakdown](origin_breakdown.png)")
     md.append("")
 
-if yield_plan_result:
+if yield_result:
     md.append("## Source Yield Plan (Last 7 Days)")
-    md.append(f"- Flags total: {yield_plan_result['totals']['flags']}")
-    md.append(f"- Triggers total: {yield_plan_result['totals']['triggers']}")
-    header = f"{'Origin':<12} {'Flags':>6} {'Trig':>6} {'Rate':>6} {'Yield':>7} {'Elig':>6} {'Budget%':>8}"
+    totals = yield_result.get("totals", {})
+    md.append(f"- Flags: {totals.get('flags', 0)}")
+    md.append(f"- Triggers: {totals.get('triggers', 0)}")
+    header = f"{'Origin':<15} {'Flags':>5} {'Triggers':>8} {'Rate':>8} {'Yield':>8}"
     md.append("```")
     md.append(header)
     md.append("-" * len(header))
-    for o in yield_plan_result["origins"]:
-        budget_pct = next((b["pct"] for b in yield_plan_result["budget_plan"] if b["origin"] == o["origin"]), 0.0)
-        md.append(f"{o['origin']:<12} {o['flags']:>6} {o['triggers']:>6} "
-                  f"{o['trigger_rate']*100:>5.1f}% {o['yield_score']:.3f} "
-                  f"{str(o['eligible']):>6} {budget_pct:>7.1f}")
+    for o in yield_result.get("origins", []):
+        md.append(f"{o['origin']:<15} {o['flags']:>5} {o['triggers']:>8} "
+                  f"{o['trigger_rate']:.3f} {o['yield_score']:.3f}")
     md.append("```")
-    if yield_plan_result.get("notes"):
-        for note in yield_plan_result["notes"]:
+    md.append("**Budget Plan (% allocation):**")
+    header2 = f"{'Origin':<15} {'Pct':>6}"
+    md.append("```")
+    md.append(header2)
+    md.append("-" * len(header2))
+    for b in yield_result.get("budget_plan", []):
+        md.append(f"{b['origin']:<15} {b['pct']:.1f}")
+    md.append("```")
+    if "notes" in yield_result:
+        md.append("Notes:")
+        for note in yield_result["notes"]:
             md.append(f"- {note}")
     md.append("")
 
