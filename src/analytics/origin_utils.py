@@ -23,6 +23,26 @@ def _norm_origin(raw: Any) -> str:
         return "unknown"
     return _ALIAS.get(s, s.lower())
 
+def tolerant_origin(row: Dict[str, Any]) -> str:
+    """
+    Extract origin from a row with schema tolerance.
+    Tries keys: origin, source, signal_origin, meta.origin, metadata.source
+    Defaults to 'unknown' if none found.
+    """
+    for key in ("origin", "source", "signal_origin"):
+        if key in row and row[key]:
+            return _norm_origin(row[key])
+
+    # nested dicts
+    for nested_key in ("meta", "metadata"):
+        nested = row.get(nested_key)
+        if isinstance(nested, dict):
+            for sub_key in ("origin", "source"):
+                if sub_key in nested and nested[sub_key]:
+                    return _norm_origin(nested[sub_key])
+
+    return "unknown"
+
 def _parse_ts(val: Any) -> datetime | None:
     """
     Accept:
@@ -42,7 +62,7 @@ def _parse_ts(val: Any) -> datetime | None:
 
     try:
         s = str(val).strip()
-        # NEW: accept numeric strings as epoch seconds
+        # accept numeric strings as epoch seconds
         if s.replace(".", "", 1).isdigit():
             try:
                 return datetime.fromtimestamp(float(s), tz=timezone.utc)
@@ -59,6 +79,24 @@ def _parse_ts(val: Any) -> datetime | None:
         return dt
     except Exception:
         return None
+
+def tolerant_ts(row: Dict[str, Any]) -> datetime | None:
+    """
+    Extract timestamp from row with tolerance for schema variations.
+    Looks for: timestamp, ts, created_at, meta.timestamp, metadata.created_at
+    """
+    for key in ("timestamp", "ts", "created_at"):
+        if key in row and row[key]:
+            return _parse_ts(row[key])
+
+    for nested_key in ("meta", "metadata"):
+        nested = row.get(nested_key)
+        if isinstance(nested, dict):
+            for sub_key in ("timestamp", "ts", "created_at"):
+                if sub_key in nested and nested[sub_key]:
+                    return _parse_ts(nested[sub_key])
+
+    return None
 
 def _within_window(ts: datetime | None, now_utc: datetime, days: int) -> bool:
     if ts is None:
@@ -135,5 +173,9 @@ def compute_origin_breakdown(
     else:
         rows = []
 
-    totals = {"flags": n_flags, "triggers": (n_trig if include_triggers else 0), "total_events": total_events}
+    totals = {
+        "flags": n_flags,
+        "triggers": (n_trig if include_triggers else 0),
+        "total_events": total_events,
+    }
     return rows, totals
