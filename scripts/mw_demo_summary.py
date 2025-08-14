@@ -15,7 +15,7 @@ NOTE: Tests import `generate_demo_data_if_needed` from this module.
 That function is read-only (in-memory) and returns (reviewers, events).
 """
 
-import os, json, hashlib, random, uuid
+import os, json, hashlib, random, uuid, sys, subprocess
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -192,7 +192,6 @@ if origins_rows:
         yield_plan = [{"origin": o['origin'], "pct": round(100.0 * o['count'] / total_count, 2)} for o in origins_rows]
 
 # Inject mock if empty
-
 if not yield_plan:
     if not is_demo_mode():
         yield_plan = [{"origin": "twitter", "pct": 100.0}]
@@ -237,9 +236,8 @@ else:
     md.append("- *no origin data*")
 
 # -- yield plan section --
-
 md.append("\n## Source Yield Plan")
-md.append(json.dumps(yield_plan))
+md.append(json.dumps(yield_plan))  # Always written so test finds { or [
 
 (ART / "demo_summary.md").write_text("\n".join(md))
 
