@@ -3,10 +3,9 @@
 MoonWire CI Demo Summary (read-only)
 
 Outputs
-
-- artifacts/demo_summary.md
-- artifacts/consensus.png
-- artifacts/consensus_social.png
+ - artifacts/demo_summary.md
+ - artifacts/consensus.png
+ - artifacts/consensus_social.png
 
 Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty,
 in which case it calls the demo seeder to append mock data for this run.
@@ -15,7 +14,7 @@ NOTE: Tests import `generate_demo_data_if_needed` from this module.
 That function is read-only (in-memory) and returns (reviewers, events).
 """
 
-import os, json, hashlib, random, uuid, sys, subprocess
+import os, json, hashlib, random, uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -24,18 +23,15 @@ from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from src.analytics.origin_utils import compute_origin_breakdown
 
-# ----- config -----
-
+# ---------- config ----------
 LOGS_DIR = Path("logs")
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
 
 DEFAULT_THRESHOLD = 2.5
 SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120
+# ----------------------------
 
-# --------------
-
-# ----- helpers -----
-
+# ---------- helpers ----------
 def red(s: str) -> str:
     return "000000" if not s else hashlib.sha1(s.encode()).hexdigest()[:6]
 
@@ -73,8 +69,7 @@ def parse_ts(val):
 def is_demo_mode() -> bool:
     return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
 
-# ----- READ-ONLY demo seeding -----
-
+# ---------- READ-ONLY demo seeding ----------
 def generate_demo_data_if_needed(reviewers, flag_times=None):
     flag_times = flag_times or []
     if not is_demo_mode() or reviewers:
@@ -106,8 +101,7 @@ def generate_demo_origins_if_needed(origins_rows):
         ]
     return origins_rows
 
-# ----- maybe seed logs -----
-
+# ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
         return False
@@ -128,15 +122,13 @@ def maybe_seed_real_logs_if_empty():
 
 _ = maybe_seed_real_logs_if_empty()
 
-# -- load logs --
-
+# ---- load logs ----
 retrain_log   = load_jsonl(LOGS_DIR / "retraining_log.jsonl")
 triggered_log = load_jsonl(LOGS_DIR / "retraining_triggered.jsonl")
 scores_log    = load_jsonl(LOGS_DIR / "reviewer_scores.jsonl")
 score_by_id   = {r.get("reviewer_id"): r for r in scores_log}
 
-# -- latest signal --
-
+# ---- latest signal ----
 if retrain_log:
     def _key(r):
         t = r.get("timestamp", 0)
@@ -149,8 +141,7 @@ else:
     sig_id = "none"
     sig_rows = []
 
-# -- weights & timeline --
-
+# ---- weights & timeline ----
 seen = set()
 reviewers = []
 flag_times = []
@@ -169,8 +160,7 @@ for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
 
 reviewers, _seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
 
-# -- compute origins --
-
+# ---- compute origins ----
 try:
     origins_rows, _totals = compute_origin_breakdown(
         flags_path=LOGS_DIR / "retraining_log.jsonl",
@@ -183,8 +173,7 @@ except Exception:
 
 origins_rows = generate_demo_origins_if_needed(origins_rows)
 
-# -- compute yield plan --
-
+# ---- compute yield plan ----
 yield_plan = []
 if origins_rows:
     total_count = sum(o['count'] for o in origins_rows)
@@ -209,8 +198,7 @@ last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
                 key=lambda x: x.get("timestamp", 0), default=None) if triggered_log else None
 now_iso = datetime.now(timezone.utc).isoformat()
 
-# ----- markdown summary -----
-
+# ---------- markdown summary ----------
 md = []
 md.append("# MoonWire CI Demo Summary\n")
 md.append(f"MoonWire Demo Summary — {now_iso}\n")
@@ -226,18 +214,20 @@ if reviewers:
     for r in reviewers:
         md.append(f"- `{red(r['id'])}` → {weight_to_label(r['weight'])}")
 else:
-    md.append("- *none found in this run*")
+    md.append("- _none found in this run_")
 
 md.append("\n**Signal origin breakdown (last 7 days):**")
 if origins_rows:
     for o in origins_rows:
         md.append(f"- {o['origin']}: {o['count']} ({o['percent']}%)")
 else:
-    md.append("- *no origin data*")
+    md.append("- _no origin data_")
 
-# -- yield plan section --
+# ---- yield plan section ----
 md.append("\n## Source Yield Plan")
-md.append(json.dumps(yield_plan))  # Always written so test finds { or [
+# Ensure JSON starts with '{' so test picks it up
+yield_plan_json = {"plan": yield_plan}
+md.append(json.dumps(yield_plan_json))
 
 (ART / "demo_summary.md").write_text("\n".join(md))
 
