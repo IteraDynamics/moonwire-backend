@@ -1,101 +1,82 @@
-#!/usr/bin/env python3
-"""
-Source Yield Scoring & Rate-Limit Budget Planner
-
-Computes per-origin yield scores and suggests API budget allocation
-based on flags and triggers in the given time window.
-
-Formula:
-    trigger_rate_o = triggers_o / max(flags_o, 1)
-    volume_share_o = flags_o / max(total_flags, 1)
-    yield_score_o  = alpha * trigger_rate_o + (1 - alpha) * volume_share_o
-
-Budget plan:
-    - Only origins with flags >= min_events are eligible
-    - Normalize yield scores to percentages
-    - Sort desc by pct
-"""
-
-import json
+from __future__ import annotations
 from pathlib import Path
-from collections import defaultdict
 from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, List
+import json
 
-from .origin_utils import extract_origin, parse_ts
+from src.analytics.origin_utils import tolerant_origin, tolerant_ts
 
 
-def _load_jsonl(path: Path):
-    """Tolerant JSONL loader."""
+def load_jsonl(path: Path) -> List[dict]:
     if not path.exists():
         return []
     out = []
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line:
+    for ln in path.read_text().splitlines():
+        ln = ln.strip()
+        if not ln:
             continue
         try:
-            out.append(json.loads(line))
+            out.append(json.loads(ln))
         except Exception:
-            continue
+            pass
     return out
 
 
-def compute_source_yield(flags_path: Path, triggers_path: Path,
-                         days: int = 7, min_events: int = 5, alpha: float = 0.7) -> dict:
+def compute_source_yield(
+    flags_path: Path,
+    triggers_path: Path,
+    days: int,
+    min_events: int,
+    alpha: float
+) -> Dict[str, Any]:
     """
-    Compute source yield scores and budget plan.
-
-    Args:
-        flags_path: Path to retraining_log.jsonl
-        triggers_path: Path to retraining_triggered.jsonl
-        days: Lookback window in days
-        min_events: Min flags required to be eligible
-        alpha: Blend between trigger_rate and volume_share
-
-    Returns:
-        dict ready for JSON response.
+    Compute per-origin yield score and API budget plan.
     """
+
     now = datetime.now(timezone.utc)
-    window_start = now - timedelta(days=days)
+    cutoff = now - timedelta(days=days)
 
-    flags_log = _load_jsonl(flags_path)
-    triggers_log = _load_jsonl(triggers_path)
+    flags = load_jsonl(flags_path)
+    triggers = load_jsonl(triggers_path)
 
-    flags_count = defaultdict(int)
-    triggers_count = defaultdict(int)
-
-    # Process flags
-    for row in flags_log:
-        ts = parse_ts(row.get("timestamp"))
+    # Filter by date window
+    def in_window(rec):
+        ts = tolerant_ts(rec.get("timestamp"))
         if ts is None:
             ts = now
-        if ts < window_start:
+        return ts >= cutoff
+
+    flags = [r for r in flags if in_window(r)]
+    triggers = [r for r in triggers if in_window(r)]
+
+    total_flags = len(flags)
+    total_triggers = len(triggers)
+
+    # Count per origin
+    stats = {}
+    for r in flags:
+        o = tolerant_origin(r)
+        if not o:
             continue
-        origin = extract_origin(row) or "unknown"
-        flags_count[origin] += 1
+        stats.setdefault(o, {"flags": 0, "triggers": 0})
+        stats[o]["flags"] += 1
 
-    # Process triggers
-    for row in triggers_log:
-        ts = parse_ts(row.get("timestamp"))
-        if ts is None:
-            ts = now
-        if ts < window_start:
+    for r in triggers:
+        o = tolerant_origin(r)
+        if not o:
             continue
-        origin = extract_origin(row) or "unknown"
-        triggers_count[origin] += 1
+        stats.setdefault(o, {"flags": 0, "triggers": 0})
+        stats[o]["triggers"] += 1
 
-    total_flags = sum(flags_count.values())
-    total_triggers = sum(triggers_count.values())
-
-    origins_data = []
-    for origin in sorted(flags_count.keys() | triggers_count.keys()):
-        f = flags_count.get(origin, 0)
-        t = triggers_count.get(origin, 0)
+    origins_out = []
+    for origin, vals in stats.items():
+        f = vals["flags"]
+        t = vals["triggers"]
         trigger_rate = t / max(f, 1)
         volume_share = f / max(total_flags, 1)
         yield_score = alpha * trigger_rate + (1 - alpha) * volume_share
         eligible = f >= min_events
-        origins_data.append({
+        origins_out.append({
             "origin": origin,
             "flags": f,
             "triggers": t,
@@ -104,17 +85,16 @@ def compute_source_yield(flags_path: Path, triggers_path: Path,
             "eligible": eligible
         })
 
-    # Budget plan: only eligible origins
-    eligible_origins = [o for o in origins_data if o["eligible"]]
-    total_yield = sum(o["yield_score"] for o in eligible_origins)
-    budget_plan = []
-    if total_yield > 0:
-        for o in sorted(eligible_origins, key=lambda x: x["yield_score"], reverse=True):
-            pct = (o["yield_score"] / total_yield) * 100
-            budget_plan.append({
-                "origin": o["origin"],
-                "pct": round(pct, 1)
-            })
+    # Budget plan: normalize yield among eligible origins
+    eligible_origins = [o for o in origins_out if o["eligible"]]
+    total_yield = sum(o["yield_score"] for o in eligible_origins) or 1.0
+    budget_plan = [
+        {
+            "origin": o["origin"],
+            "pct": round((o["yield_score"] / total_yield) * 100, 1)
+        }
+        for o in sorted(eligible_origins, key=lambda x: x["yield_score"], reverse=True)
+    ]
 
     return {
         "window_days": days,
@@ -122,10 +102,10 @@ def compute_source_yield(flags_path: Path, triggers_path: Path,
             "flags": total_flags,
             "triggers": total_triggers
         },
-        "origins": sorted(origins_data, key=lambda x: x["yield_score"], reverse=True),
+        "origins": sorted(origins_out, key=lambda x: x["yield_score"], reverse=True),
         "budget_plan": budget_plan,
         "notes": [
-            f"Origins with < {min_events} events are excluded from budget_plan.",
+            f"Origins with < min_events ({min_events}) are excluded from budget_plan.",
             "yield_score blends conversion (trigger_rate) and volume."
         ]
     }
