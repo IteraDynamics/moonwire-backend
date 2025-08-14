@@ -79,7 +79,8 @@ def parse_ts(val):
     except Exception: return None
 
 def is_demo_mode() -> bool:
-    return DEMO_MODE
+    # Read from env at call-time so tests that monkeypatch DEMO_MODE take effect
+    return os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
 
 
 # ---------- READ-ONLY demo seeding ----------
