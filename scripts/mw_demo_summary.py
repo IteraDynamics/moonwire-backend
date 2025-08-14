@@ -22,7 +22,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from src.analytics.origin_utils import compute_origin_breakdown
-from src.analytics.source_yield import compute_source_yield
 
 # ---------- config ----------
 LOGS_DIR = Path("logs")
@@ -91,6 +90,7 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
 def generate_demo_origins_if_needed(origins_rows):
     if not is_demo_mode():
         return origins_rows
+    # Trigger seeding if no data or all origins are "unknown"
     if not origins_rows or all(r["origin"] == "unknown" for r in origins_rows):
         demo_sources = ["twitter", "reddit", "rss_news"]
         counts = [random.randint(1, 5) for _ in demo_sources]
@@ -100,20 +100,6 @@ def generate_demo_origins_if_needed(origins_rows):
             for src, c in zip(demo_sources, counts)
         ]
     return origins_rows
-
-def generate_demo_yield_plan_if_needed(plan):
-    if not is_demo_mode():
-        return plan
-    if not plan or not plan.get("budget_plan"):
-        return {
-            "window_days": 7,
-            "budget_plan": [
-                {"origin": "twitter", "budget_pct": 40.0},
-                {"origin": "reddit", "budget_pct": 35.0},
-                {"origin": "rss_news", "budget_pct": 25.0}
-            ]
-        }
-    return plan
 
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
@@ -187,18 +173,6 @@ except Exception:
 
 origins_rows = generate_demo_origins_if_needed(origins_rows)
 
-# ---- compute source yield plan ----
-try:
-    yield_plan = compute_source_yield(
-        flags_path=LOGS_DIR / "retraining_log.jsonl",
-        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
-        days=7
-    )
-except Exception:
-    yield_plan = {}
-
-yield_plan = generate_demo_yield_plan_if_needed(yield_plan)
-
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold    = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
@@ -227,16 +201,23 @@ else:
 md.append("\n**Signal origin breakdown (last 7 days):**")
 if origins_rows:
     for o in origins_rows:
-        md.append(f"- {o['origin']}: {o['count']} ({o.get('percent', o.get('pct', 0))}%)")
+        md.append(f"- {o['origin']}: {o['count']} ({o['percent']}%)")
 else:
     md.append("- _no origin data_")
 
 # ---- Source Yield Plan section ----
 md.append("\n## Source Yield Plan\n")
+yield_plan = {}
+if origins_rows:
+    total_count = sum(o['count'] for o in origins_rows)
+    if total_count > 0:
+        yield_plan = {
+            o['origin']: round(o['count'] / total_count * 100, 2)
+            for o in origins_rows
+        }
+# Output so JSON starts with '{' on first line
 if yield_plan:
-    md.append("```json")
-    md.append(json.dumps(yield_plan, indent=2))  # full dict so it starts with "{"
-    md.append("```")
+    md.append(json.dumps(yield_plan, indent=2))
 else:
     md.append("_no yield plan data_")
 
