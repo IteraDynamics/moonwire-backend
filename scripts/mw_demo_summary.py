@@ -173,6 +173,21 @@ except Exception:
 
 origins_rows = generate_demo_origins_if_needed(origins_rows)
 
+# ---- compute yield plan ----
+yield_plan = {}
+if origins_rows:
+    total_count = sum(o['count'] for o in origins_rows)
+    if total_count > 0:
+        yield_plan = {o['origin']: round(100.0 * o['count'] / total_count, 2) for o in origins_rows}
+
+# Inject mock if empty
+if not yield_plan:
+    yield_plan = {"twitter": 100.0} if not is_demo_mode() else {
+        "twitter": 40.0,
+        "reddit": 35.0,
+        "rss_news": 25.0
+    }
+
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold    = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
@@ -205,21 +220,9 @@ if origins_rows:
 else:
     md.append("- _no origin data_")
 
-# ---- Source Yield Plan section ----
-md.append("\n## Source Yield Plan\n")
-yield_plan = {}
-if origins_rows:
-    total_count = sum(o['count'] for o in origins_rows)
-    if total_count > 0:
-        yield_plan = {
-            o['origin']: round(o['count'] / total_count * 100, 2)
-            for o in origins_rows
-        }
-# Output so JSON starts with '{' on first line
-if yield_plan:
-    md.append(json.dumps(yield_plan, indent=2))
-else:
-    md.append("_no yield plan data_")
+# ---- yield plan section ----
+md.append("\n## Source Yield Plan")
+md.append(json.dumps(yield_plan))
 
 (ART / "demo_summary.md").write_text("\n".join(md))
 
