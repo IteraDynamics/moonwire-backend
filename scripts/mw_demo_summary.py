@@ -2,31 +2,24 @@
 """
 MoonWire CI Demo Summary (read-only)
 
-Outputs
+Outputs:
  - artifacts/demo_summary.md
  - artifacts/consensus.png
  - artifacts/consensus_social.png
+ - artifacts/origin_breakdown.png
 
-Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty,
-in which case it calls the demo seeder to append mock data for this run.
-
-NOTE: Tests import `generate_demo_data_if_needed` from this module.
-That function is read-only (in-memory) and returns (reviewers, events).
+Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty.
 """
 
 import os, json, hashlib, random, uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Rectangle
-
-from src.analytics.origin_utils import compute_origin_breakdown
 
 # ---------- config ----------
 LOGS_DIR = Path("logs")
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
-
 DEFAULT_THRESHOLD = 2.5
 SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120
 # ----------------------------
@@ -69,7 +62,7 @@ def parse_ts(val):
 def is_demo_mode() -> bool:
     return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
 
-# ---------- READ-ONLY demo seeding ----------
+# ---------- READ-ONLY demo seeding for tests/visuals ----------
 def generate_demo_data_if_needed(reviewers, flag_times=None):
     flag_times = flag_times or []
     if not is_demo_mode() or reviewers:
@@ -87,21 +80,7 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         flag_times.append(ts)
     return display, seeded
 
-def generate_demo_origins_if_needed(origins_rows):
-    if not is_demo_mode():
-        return origins_rows
-    # Trigger seeding if no data or all origins are "unknown"
-    if not origins_rows or all(r["origin"] == "unknown" for r in origins_rows):
-        demo_sources = ["twitter", "reddit", "rss_news"]
-        counts = [random.randint(1, 5) for _ in demo_sources]
-        total = sum(counts)
-        return [
-            {"origin": src, "count": c, "percent": round(c/total*100, 1)}
-            for src, c in zip(demo_sources, counts)
-        ]
-    return origins_rows
-
-# ---------- maybe seed logs ----------
+# ---------- maybe seed logs if empty ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
         return False
@@ -160,19 +139,6 @@ for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
 
 reviewers, _seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
 
-# ---- compute origins ----
-try:
-    origins_rows, _totals = compute_origin_breakdown(
-        flags_path=LOGS_DIR / "retraining_log.jsonl",
-        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
-        days=7,
-        include_triggers=True
-    )
-except Exception:
-    origins_rows = []
-
-origins_rows = generate_demo_origins_if_needed(origins_rows)
-
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
 threshold    = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
@@ -180,31 +146,101 @@ last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
                 key=lambda x: x.get("timestamp", 0), default=None) if triggered_log else None
 now_iso = datetime.now(timezone.utc).isoformat()
 
+# ---------- small CI bar ----------
+plt.figure(figsize=(3.8, 2.4), dpi=200)
+plt.title("Consensus Weight vs Threshold")
+plt.bar(["weight","threshold"], [total_weight, threshold])
+plt.tight_layout()
+small_png = ART / "consensus.png"
+plt.savefig(small_png, dpi=200)
+plt.close()
+
+# ---------- origin breakdown graphic ----------
+def draw_origin_breakdown():
+    try:
+        from src.analytics.origin_utils import compute_origin_breakdown
+        from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+        rows, totals = compute_origin_breakdown(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, include_triggers=False)
+        if not rows:
+            return None
+        origins = [r["origin"] for r in rows]
+        counts  = [r["count"] for r in rows]
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.bar(origins, counts, color="#3BA1FF")
+        ax.set_title("Signal Origins (Last 7 Days)")
+        ax.set_ylabel("Count")
+        plt.xticks(rotation=30, ha="right")
+        out = ART / "origin_breakdown.png"
+        plt.tight_layout()
+        plt.savefig(out, dpi=150)
+        plt.close(fig)
+        return out, totals, rows
+    except Exception as e:
+        print(f"[origin breakdown skipped: {e}]")
+        return None
+
+origin_result = draw_origin_breakdown()
+
 # ---------- markdown summary ----------
 md = []
 md.append("# MoonWire CI Demo Summary\n")
 md.append(f"MoonWire Demo Summary — {now_iso}\n")
-md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.\n")
 md.append(f"- **Signal:** `{red(sig_id)}`")
 md.append(f"- **Unique reviewers:** {len(reviewers)}")
 md.append(f"- **Combined weight:** **{total_weight}**")
-md.append(f"- **Threshold:** **{threshold}** → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
+md.append(f"- **Threshold:** **{threshold}**  → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
 if last_trig:
     md.append(f"- **Last retrain trigger logged:** {last_trig.get('timestamp','')}")
-md.append("\n**Reviewers (redacted):**")
-if reviewers:
-    for r in reviewers:
-        md.append(f"- `{red(r['id'])}` → {weight_to_label(r['weight'])}")
-else:
-    md.append("- _none found in this run_")
+md.append("")
 
-md.append("\n**Signal origin breakdown (last 7 days):**")
-if origins_rows:
-    for o in origins_rows:
-        md.append(f"- {o['origin']}: {o['count']} ({o['percent']}%)")
-else:
-    md.append("- _no origin data_")
+if origin_result:
+    _, totals, rows = origin_result
+    md.append("## Origin Breakdown (Last 7 Days)")
+    md.append(f"- Flags: {totals['flags']}")
+    md.append(f"- Triggers: {totals['triggers']}")
+    md.append(f"- Total events: {totals['total_events']}")
+    # simple text table
+    header = f"{'Origin':<15} {'Count':>5} {'Pct':>6}"
+    md.append("```")
+    md.append(header)
+    md.append("-" * len(header))
+    for r in rows:
+        md.append(f"{r['origin']:<15} {r['count']:>5} {r['pct']:>5.1f}%")
+    md.append("```")
+    md.append("![Origin Breakdown](origin_breakdown.png)")
+
+# ---------- source yield plan ----------
+try:
+    from src.analytics.source_yield import compute_source_yield
+    from src import paths as src_paths
+    yield_result = compute_source_yield(
+        flags_path=src_paths.RETRAINING_LOG_PATH,
+        triggers_path=src_paths.RETRAINING_TRIGGERED_LOG_PATH,
+        days=7,
+        min_events=5,
+        alpha=0.7
+    )
+    md.append("## Source Yield Plan (7d)")
+    md.append(f"- Total Flags: {yield_result['totals']['flags']}")
+    md.append(f"- Total Triggers: {yield_result['totals']['triggers']}")
+    md.append("```")
+    md.append(f"{'Origin':<15} {'Flags':>6} {'Triggers':>9} {'Rate':>6} {'Yield':>7} {'Elig':>5}")
+    md.append("-"*50)
+    for o in yield_result["origins"]:
+        md.append(f"{o['origin']:<15} {o['flags']:>6} {o['triggers']:>9} "
+                  f"{o['trigger_rate']:.3f} {o['yield_score']:.3f} {str(o['eligible']):>5}")
+    md.append("```")
+    md.append("**Budget Allocation (%):**")
+    md.append("```")
+    for b in yield_result["budget_plan"]:
+        md.append(f"{b['origin']:<15} {b['pct']:>5.1f}%")
+    md.append("```")
+except Exception as e:
+    md.append(f"_Source yield plan skipped: {e}_")
 
 (ART / "demo_summary.md").write_text("\n".join(md))
 
 print(f"Wrote: {ART/'demo_summary.md'}")
+print(f"Wrote: {small_png}")
+if origin_result:
+    print(f"Wrote: {origin_result[0]}")
