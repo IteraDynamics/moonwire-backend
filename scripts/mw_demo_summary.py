@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from src.analytics.origin_utils import compute_origin_breakdown
-from src.analytics.source_yield import compute_source_yield  # NEW
+from src.analytics.source_yield import compute_source_yield
 
 # ---------- config ----------
 LOGS_DIR = Path("logs")
@@ -91,7 +91,6 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
 def generate_demo_origins_if_needed(origins_rows):
     if not is_demo_mode():
         return origins_rows
-    # Trigger seeding if no data or all origins are "unknown"
     if not origins_rows or all(r["origin"] == "unknown" for r in origins_rows):
         demo_sources = ["twitter", "reddit", "rss_news"]
         counts = [random.randint(1, 5) for _ in demo_sources]
@@ -102,30 +101,19 @@ def generate_demo_origins_if_needed(origins_rows):
         ]
     return origins_rows
 
-def generate_demo_yield_plan_if_needed(plan: dict) -> dict:
-    """Seed a fake yield plan for demo mode if no budget_plan present."""
+def generate_demo_yield_plan_if_needed(plan):
     if not is_demo_mode():
         return plan
-    if plan.get("budget_plan"):
-        return plan
-    demo_origins = ["twitter", "reddit", "rss_news"]
-    budget = []
-    remaining = 100.0
-    for i, o in enumerate(demo_origins):
-        if i == len(demo_origins) - 1:
-            pct = round(remaining, 1)
-        else:
-            pct = round(random.uniform(20, 50), 1)
-            remaining -= pct
-        budget.append({"origin": o, "pct": pct})
-    return {
-        "window_days": 7,
-        "totals": {"flags": random.randint(10, 50), "triggers": random.randint(1, 10)},
-        "origins": [{"origin": o["origin"], "flags": 10, "triggers": 2,
-                     "trigger_rate": 0.2, "yield_score": 0.15, "eligible": True} for o in budget],
-        "budget_plan": budget,
-        "notes": ["Demo mode: fake yield plan"]
-    }
+    if not plan or not plan.get("budget_plan"):
+        return {
+            "window_days": 7,
+            "budget_plan": [
+                {"origin": "twitter", "budget_pct": 40.0},
+                {"origin": "reddit", "budget_pct": 35.0},
+                {"origin": "rss_news", "budget_pct": 25.0}
+            ]
+        }
+    return plan
 
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
@@ -204,9 +192,7 @@ try:
     yield_plan = compute_source_yield(
         flags_path=LOGS_DIR / "retraining_log.jsonl",
         triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
-        days=7,
-        min_events=5,
-        alpha=0.7
+        days=7
     )
 except Exception:
     yield_plan = {}
@@ -241,21 +227,16 @@ else:
 md.append("\n**Signal origin breakdown (last 7 days):**")
 if origins_rows:
     for o in origins_rows:
-        # handle both percent and pct key
-        pct_val = o.get("percent", o.get("pct", 0))
-        md.append(f"- {o['origin']}: {o['count']} ({pct_val}%)")
+        md.append(f"- {o['origin']}: {o['count']} ({o.get('percent', o.get('pct', 0))}%)")
 else:
     md.append("- _no origin data_")
 
-# ---- NEW: Source Yield Plan section ----
+# ---- Source Yield Plan section ----
 md.append("\n## Source Yield Plan\n")
-if yield_plan.get("budget_plan"):
+if yield_plan:
     md.append("```json")
-    md.append(json.dumps(yield_plan["budget_plan"]))
+    md.append(json.dumps(yield_plan, indent=2))  # full dict so it starts with "{"
     md.append("```")
-    if yield_plan.get("notes"):
-        for note in yield_plan["notes"]:
-            md.append(f"- {note}")
 else:
     md.append("_no yield plan data_")
 
