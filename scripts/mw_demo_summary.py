@@ -7,6 +7,7 @@ Outputs:
  - artifacts/consensus.png
  - artifacts/consensus_social.png
  - artifacts/origin_breakdown.png
+ - artifacts/source_yield_plan.png (optional later)
 
 Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty.
 """
@@ -27,17 +28,13 @@ def red(s: str) -> str:
     return "000000" if not s else hashlib.sha1(s.encode()).hexdigest()[:6]
 
 def load_jsonl(path: Path):
-    if not path.exists():
-        return []
+    if not path.exists(): return []
     out = []
     for ln in path.read_text().splitlines():
         ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            out.append(json.loads(ln))
-        except Exception:
-            pass
+        if not ln: continue
+        try: out.append(json.loads(ln))
+        except Exception: pass
     return out
 
 def band_weight_from_score(score):
@@ -47,19 +44,14 @@ def band_weight_from_score(score):
     return 0.75
 
 def parse_ts(val):
-    if val is None:
-        return None
+    if val is None: return None
     try:
-        ts = float(val)
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
-    except Exception:
-        pass
+        ts = float(val); return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except Exception: pass
     try:
-        s = str(val)
-        s = s[:-1] + "+00:00" if s.endswith("Z") else s
+        s = str(val);  s = s[:-1] + "+00:00" if s.endswith("Z") else s
         return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception:
-        return None
+    except Exception: return None
 
 def is_demo_mode() -> bool:
     return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
@@ -82,6 +74,7 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         flag_times.append(ts)
     return display, seeded
 
+# ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
         return False
@@ -156,12 +149,16 @@ small_png = ART / "consensus.png"
 plt.savefig(small_png, dpi=200)
 plt.close()
 
-# ---------- origin breakdown graphic ----------
+# ---------- origin breakdown ----------
 def draw_origin_breakdown():
     try:
         from src.analytics.origin_utils import compute_origin_breakdown
-        from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
-        rows, totals = compute_origin_breakdown(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, include_triggers=False)
+        rows, totals = compute_origin_breakdown(
+            LOGS_DIR / "retraining_log.jsonl",
+            LOGS_DIR / "retraining_triggered.jsonl",
+            days=7,
+            include_triggers=False
+        )
         if not rows:
             return None
         origins = [r["origin"] for r in rows]
@@ -182,13 +179,17 @@ def draw_origin_breakdown():
 
 origin_result = draw_origin_breakdown()
 
-# ---------- source yield plan ----------
+# ---------- yield plan ----------
 yield_plan_result = None
 try:
     from src.analytics.source_yield import compute_source_yield
-    from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
-    # Use min_events=1 for summary so tests with tiny logs still produce section
-    yield_plan_result = compute_source_yield(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, min_events=1, alpha=0.7)
+    yield_plan_result = compute_source_yield(
+        LOGS_DIR / "retraining_log.jsonl",
+        LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        min_events=1,
+        alpha=0.7
+    )
 except Exception as e:
     print(f"[yield plan skipped: {e}]")
 
@@ -221,28 +222,25 @@ if origin_result:
     md.append("")
 
 if yield_plan_result:
-    md.append("## Source Yield Plan")
-    md.append(f"- Window: {yield_plan_result['window_days']} days")
-    md.append(f"- Flags: {yield_plan_result['totals']['flags']}")
-    md.append(f"- Triggers: {yield_plan_result['totals']['triggers']}")
-    md.append(f"- Eligible origins: {len([o for o in yield_plan_result['origins'] if o['eligible']])}")
-    header = f"{'Origin':<15} {'Flags':>6} {'Triggers':>9} {'TrigRate':>9} {'Yield':>7} {'Eligible':>9}"
+    md.append("## Source Yield Plan (Last 7 Days)")
+    md.append(f"- Flags total: {yield_plan_result['totals']['flags']}")
+    md.append(f"- Triggers total: {yield_plan_result['totals']['triggers']}")
+    header = f"{'Origin':<15} {'Flags':>5} {'Trig':>5} {'Rate':>6} {'Yield':>7} {'Elig':>6}"
     md.append("```")
     md.append(header)
     md.append("-" * len(header))
-    for o in yield_plan_result['origins']:
-        md.append(f"{o['origin']:<15} {o['flags']:>6} {o['triggers']:>9} "
-                  f"{o['trigger_rate']*100:>8.1f}% {o['yield_score']:.3f} {str(o['eligible']):>9}")
+    for r in yield_plan_result["origins"]:
+        md.append(f"{r['origin']:<15} {r['flags']:>5} {r['triggers']:>5} {r['trigger_rate']:>6.3f} {r['yield_score']:>7.3f} {str(r['eligible']):>6}")
     md.append("```")
-    if yield_plan_result.get("budget_plan"):
-        md.append("**Budget Plan (% of API spend):**")
-        md.append("```")
-        for b in yield_plan_result["budget_plan"]:
-            md.append(f"{b['origin']:<15} {b['pct']:.1f}%")
-        md.append("```")
-    if yield_plan_result.get("notes"):
-        for note in yield_plan_result["notes"]:
-            md.append(f"> {note}")
+    md.append("")
+    md.append("**Budget Plan:**")
+    header2 = f"{'Origin':<15} {'Pct':>6}"
+    md.append("```")
+    md.append(header2)
+    md.append("-" * len(header2))
+    for bp in yield_plan_result["budget_plan"]:
+        md.append(f"{bp['origin']:<15} {bp['pct']:>6.1f}")
+    md.append("```")
     md.append("")
 
 (ART / "demo_summary.md").write_text("\n".join(md))
