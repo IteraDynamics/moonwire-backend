@@ -43,11 +43,6 @@ def band_weight_from_score(score):
     if score >= 0.50: return 1.0
     return 0.75
 
-def weight_to_label(w: float) -> str:
-    if w >= 1.20: return "High"
-    if w >= 0.90: return "Med"
-    return "Low"
-
 def parse_ts(val):
     if val is None: return None
     try:
@@ -61,7 +56,7 @@ def parse_ts(val):
 def is_demo_mode() -> bool:
     return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
 
-# ---------- READ-ONLY demo seeding ----------
+# ---------- READ-ONLY demo seeding for tests/visuals ----------
 def generate_demo_data_if_needed(reviewers, flag_times=None):
     flag_times = flag_times or []
     if not is_demo_mode() or reviewers:
@@ -79,6 +74,7 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         flag_times.append(ts)
     return display, seeded
 
+# ---------- maybe seed logs if empty ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
         return False
@@ -153,12 +149,12 @@ small_png = ART / "consensus.png"
 plt.savefig(small_png, dpi=200)
 plt.close()
 
-# ---------- origin breakdown ----------
+# ---------- origin breakdown graphic ----------
 def draw_origin_breakdown():
     try:
         from src.analytics.origin_utils import compute_origin_breakdown
         from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
-        rows, totals = compute_origin_breakdown(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, include_triggers=True)
+        rows, totals = compute_origin_breakdown(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, include_triggers=False)
         if not rows:
             return None
         origins = [r["origin"] for r in rows]
@@ -179,17 +175,12 @@ def draw_origin_breakdown():
 
 origin_result = draw_origin_breakdown()
 
-# ---------- yield plan ----------
+# ---------- source yield plan ----------
 yield_plan_result = None
 try:
     from src.analytics.source_yield import compute_source_yield
-    yield_plan_result = compute_source_yield(
-        LOGS_DIR / "retraining_log.jsonl",
-        LOGS_DIR / "retraining_triggered.jsonl",
-        days=7,
-        min_events=1,
-        alpha=0.7
-    )
+    from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+    yield_plan_result = compute_source_yield(RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH, days=7, min_events=1, alpha=0.7)
 except Exception as e:
     print(f"[yield plan skipped: {e}]")
 
@@ -221,28 +212,14 @@ if origin_result:
     md.append("![Origin Breakdown](origin_breakdown.png)")
     md.append("")
 
-# Always print yield plan section
+# Add Source Yield Plan section (with JSON budget plan)
 md.append("## Source Yield Plan (Last 7 Days)")
 if yield_plan_result:
     md.append(f"- Flags total: {yield_plan_result['totals']['flags']}")
     md.append(f"- Triggers total: {yield_plan_result['totals']['triggers']}")
-    if yield_plan_result["origins"]:
-        header = f"{'Origin':<15} {'Flags':>5} {'Trig':>5} {'Rate':>6} {'Yield':>7} {'Elig':>6}"
-        md.append("```")
-        md.append(header)
-        md.append("-" * len(header))
-        for r in yield_plan_result["origins"]:
-            md.append(f"{r['origin']:<15} {r['flags']:>5} {r['triggers']:>5} "
-                      f"{r['trigger_rate']:>6.3f} {r['yield_score']:>7.3f} {str(r['eligible']):>6}")
-        md.append("```")
-        md.append("")
-        md.append("**Budget Plan:**")
-        header2 = f"{'Origin':<15} {'Pct':>6}"
-        md.append("```")
-        md.append(header2)
-        md.append("-" * len(header2))
-        for bp in yield_plan_result["budget_plan"]:
-            md.append(f"{bp['origin']:<15} {bp['pct']:>6.1f}")
+    if yield_plan_result["budget_plan"]:
+        md.append("```json")
+        md.append(json.dumps(yield_plan_result["budget_plan"], indent=2))
         md.append("```")
     else:
         md.append("_No eligible origins in this window._")
