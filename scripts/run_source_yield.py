@@ -1,14 +1,32 @@
 #!/usr/bin/env python3
 
-import json
 import sys
+import json
 from pathlib import Path
 
-# Ensure top-level project root (where 'src/' lives) is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.analytics.source_yield import compute_source_yield
 from src.paths import LOGS_DIR
+
+def render_markdown(result: dict) -> str:
+    lines = []
+    lines.append(f"### 📈 Source Yield Plan — {result['window_days']}d Window\n")
+
+    if not result["budget_plan"]:
+        lines.append("_No eligible origins to display — try lowering `min_events`._\n")
+        return "\n".join(lines)
+
+    lines.append("**Rate-limit budget plan:**\n")
+    for item in result["budget_plan"]:
+        lines.append(f"- `{item['origin']}` → **{item['pct']}%**")
+
+    lines.append("\n**Raw Origin Stats:**")
+    for o in result["origins"]:
+        lines.append(f"- `{o['origin']}`: {o['flags']} flags, {o['triggers']} triggers → score={o['yield_score']}")
+
+    return "\n".join(lines)
+
 
 if __name__ == "__main__":
     result = compute_source_yield(
@@ -18,4 +36,6 @@ if __name__ == "__main__":
         min_events=5,
         alpha=0.7
     )
-    print(json.dumps(result, indent=2))
+
+    md = render_markdown(result)
+    print(md)
