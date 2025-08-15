@@ -15,7 +15,7 @@ _ALIAS = {
     "Reddit": "reddit",
 }
 
-def _norm_origin(raw: Any) -> str:
+def extract_origin(raw: Any) -> str:
     if raw is None:
         return "unknown"
     s = str(raw).strip()
@@ -23,7 +23,7 @@ def _norm_origin(raw: Any) -> str:
         return "unknown"
     return _ALIAS.get(s, s.lower())
 
-def _parse_ts(val: Any) -> datetime | None:
+def parse_ts(val: Any) -> datetime | None:
     """
     Accept:
       - float/int epoch seconds
@@ -60,12 +60,7 @@ def _parse_ts(val: Any) -> datetime | None:
     except Exception:
         return None
 
-def _within_window(ts: datetime | None, now_utc: datetime, days: int) -> bool:
-    if ts is None:
-        return False
-    return ts >= (now_utc - timedelta(days=days))
-
-def _stream_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
+def stream_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
     if not path.exists():
         return
     with path.open("r") as f:
@@ -78,6 +73,11 @@ def _stream_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
             except Exception:
                 # tolerate malformed lines
                 continue
+
+def _within_window(ts: datetime | None, now_utc: datetime, days: int) -> bool:
+    if ts is None:
+        return False
+    return ts >= (now_utc - timedelta(days=days))
 
 def compute_origin_breakdown(
     flags_path: Path,
@@ -96,11 +96,11 @@ def compute_origin_breakdown(
     # Count flags
     flag_counts: Dict[str, int] = {}
     n_flags = 0
-    for row in _stream_jsonl(flags_path):
-        ts = _parse_ts(row.get("timestamp"))
+    for row in stream_jsonl(flags_path):
+        ts = parse_ts(row.get("timestamp"))
         if not _within_window(ts, now_utc, days):
             continue
-        org = _norm_origin(row.get("origin"))
+        org = extract_origin(row.get("origin"))
         flag_counts[org] = flag_counts.get(org, 0) + 1
         n_flags += 1
 
@@ -108,11 +108,11 @@ def compute_origin_breakdown(
     trig_counts: Dict[str, int] = {}
     n_trig = 0
     if include_triggers:
-        for row in _stream_jsonl(triggers_path):
-            ts = _parse_ts(row.get("timestamp"))
+        for row in stream_jsonl(triggers_path):
+            ts = parse_ts(row.get("timestamp"))
             if not _within_window(ts, now_utc, days):
                 continue
-            org = _norm_origin(row.get("origin"))
+            org = extract_origin(row.get("origin"))
             trig_counts[org] = trig_counts.get(org, 0) + 1
             n_trig += 1
 
