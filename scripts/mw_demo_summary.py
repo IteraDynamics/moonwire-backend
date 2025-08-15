@@ -15,6 +15,7 @@ from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from src.analytics.origin_utils import compute_origin_breakdown
 from src.analytics.source_yield import compute_source_yield
+from src.analytics.source_metrics import compute_source_metrics
 from src.paths import LOGS_DIR
 
 # ---------- config ----------
@@ -257,6 +258,24 @@ try:
             md.append(f"- `{o['origin']}`: {o['flags']} flags, {o['triggers']} triggers → score={o['yield_score']}")
 except Exception as e:
     md.append(f"\n_⚠️ Yield plan failed: {e}_")
+
+# ---------- source precision & recall ----------
+try:
+    metrics = compute_source_metrics(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        min_count=1
+    )
+    rows = metrics.get("origins", [])
+    md.append("\n### 📉 Source Precision & Recall (7d)")
+    if not rows:
+        md.append("_No eligible origins to display._")
+    else:
+        for row in rows:
+            md.append(f"- `{row['origin']}`: precision={row['precision']} | recall={row['recall']}")
+except Exception as e:
+    md.append(f"\n_⚠️ Source metrics failed: {e}_")
 
 # ---------- write file ----------
 (ART / "demo_summary.md").write_text("\n".join(md))
