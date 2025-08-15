@@ -53,6 +53,14 @@ jobs:
           ls -lah artifacts || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
 
+      - name: Run source yield planner
+        if: ${{ success() }}
+        run: |
+          echo "## 📊 Source Yield Plan Output" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          python scripts/run_source_yield.py >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
       - name: Publish CI summary
         if: ${{ success() }}
         run: |
@@ -68,10 +76,3 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
-
-      - name: Run source yield planner
-          run: |
-            echo "## 📊 Source Yield Plan Output" >> $GITHUB_STEP_SUMMARY
-            echo '```json' >> $GITHUB_STEP_SUMMARY
-            python scripts/run_source_yield.py >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
