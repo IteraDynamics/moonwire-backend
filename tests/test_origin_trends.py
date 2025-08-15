@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from src.analytics.origin_trends import compute_origin_trends
-from src.main import app
+from main import app
 import src.paths as paths
 
 
