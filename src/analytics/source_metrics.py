@@ -1,12 +1,11 @@
+import os
+import json
+import random
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Any
-import random
-
 from src.analytics.origin_utils import parse_ts, extract_origin
-from src.paths import LOGS_DIR
-
 
 def compute_source_metrics(
     flags_path: Path,
