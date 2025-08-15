@@ -227,7 +227,7 @@ else:
 md.append("\n## Source Yield Plan")
 # Ensure JSON starts with '{' so test picks it up
 yield_plan_json = {"plan": yield_plan}
-md.append(json.dumps(yield_plan_json))
+md.append(json.dumps({"yield_plan": yield_plan}))
 
 (ART / "demo_summary.md").write_text("\n".join(md))
 
