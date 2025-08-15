@@ -15,6 +15,7 @@ from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from src.analytics.origin_utils import compute_origin_breakdown
 from src.analytics.source_yield import compute_source_yield
+from src.analytics.source_metrics import compute_source_metrics
 from src.paths import LOGS_DIR
 
 # ---------- config ----------
@@ -128,6 +129,28 @@ def generate_demo_yield_plan_if_needed(yield_data):
         "budget_plan": budget_plan,
         "notes": ["_demo mode: yield plan seeded_"]
     }
+
+def generate_demo_source_metrics_if_needed(metrics: dict) -> dict:
+    """
+    If DEMO_MODE=true and metrics has no origins (or only 'unknown'),
+    seed three plausible origins with precision/recall so the CI summary
+    shows something useful.
+    """
+    if not is_demo_mode():
+        return metrics
+
+    rows = (metrics or {}).get("origins") or []
+    known = [r for r in rows if r.get("origin") != "unknown"]
+    if known:
+        return metrics
+
+    demo_rows = []
+    for origin in ["twitter", "reddit", "rss_news"]:
+        precision = round(random.uniform(0.25, 0.9), 2)
+        recall    = round(random.uniform(0.10, 0.6), 2)
+        demo_rows.append({"origin": origin, "precision": precision, "recall": recall})
+
+    return {"window_days": 7, "origins": demo_rows, "notes": ["_demo mode: metrics seeded_"]}
 
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
@@ -257,6 +280,26 @@ try:
             md.append(f"- `{o['origin']}`: {o['flags']} flags, {o['triggers']} triggers → score={o['yield_score']}")
 except Exception as e:
     md.append(f"\n_⚠️ Yield plan failed: {e}_")
+
+# ---------- source precision & recall ----------
+try:
+    metrics = compute_source_metrics(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        min_count=1
+    )
+    metrics = generate_demo_source_metrics_if_needed(metrics)
+    rows = metrics.get("origins", [])
+
+    md.append("\n### 📉 Source Precision & Recall (7d)")
+    if not rows:
+        md.append("_No eligible origins to display._")
+    else:
+        for row in rows:
+            md.append(f"- `{row['origin']}`: precision={row['precision']} | recall={row['recall']}")
+except Exception as e:
+    md.append(f"\n_⚠️ Source metrics failed: {e}_")
 
 # ---------- write file ----------
 (ART / "demo_summary.md").write_text("\n".join(md))
