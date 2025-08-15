@@ -3,7 +3,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Dict, Any
 
-from src.analytics.origin_utils import tolerant_jsonl_stream, extract_origin, parse_ts
+from src.analytics.origin_utils import (
+    stream_jsonl,
+    extract_origin,
+    parse_ts
+)
 
 
 def compute_source_yield(
@@ -18,22 +22,22 @@ def compute_source_yield(
     triggers_by_origin = defaultdict(int)
 
     # Parse flags
-    for record in tolerant_jsonl_stream(flags_path):
+    for record in stream_jsonl(flags_path):
         ts = parse_ts(record.get("timestamp"))
-        if ts < cutoff:
+        if ts is None or ts < cutoff:
             continue
-        origin = extract_origin(record)
+        origin = extract_origin(record.get("origin") or record.get("source") or record.get("meta", {}).get("origin") or record.get("metadata", {}).get("source"))
         flags_by_origin[origin] += 1
 
     total_flags = sum(flags_by_origin.values())
 
     # Parse triggers
     if triggers_path.exists():
-        for record in tolerant_jsonl_stream(triggers_path):
+        for record in stream_jsonl(triggers_path):
             ts = parse_ts(record.get("timestamp"))
-            if ts < cutoff:
+            if ts is None or ts < cutoff:
                 continue
-            origin = extract_origin(record)
+            origin = extract_origin(record.get("origin") or record.get("source") or record.get("meta", {}).get("origin") or record.get("metadata", {}).get("source"))
             triggers_by_origin[origin] += 1
 
     # Build per-origin stats
