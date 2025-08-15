@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 
 import json
+import sys
+from pathlib import Path
+
+# Ensure top-level project root (where 'src/' lives) is on sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from src.analytics.source_yield import compute_source_yield
 from src.paths import LOGS_DIR
 
