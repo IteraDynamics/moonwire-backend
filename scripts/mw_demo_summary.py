@@ -16,7 +16,9 @@ from matplotlib.patches import FancyBboxPatch, Rectangle
 from src.analytics.origin_utils import compute_origin_breakdown
 from src.analytics.source_yield import compute_source_yield
 from src.analytics.source_metrics import compute_source_metrics
+from src.analytics.origin_trends import compute_origin_trends
 from src.paths import LOGS_DIR
+
 
 # ---------- config ----------
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
@@ -152,6 +154,29 @@ def generate_demo_source_metrics_if_needed(metrics: dict) -> dict:
 
     return {"window_days": 7, "origins": demo_rows, "notes": ["_demo mode: metrics seeded_"]}
 
+def generate_demo_origin_trends_if_needed(trends, days=7, interval="day"):
+    if not is_demo_mode():
+        return trends
+    if trends.get("origins"):
+        return trends
+
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    def daily(n):
+        out = []
+        for i in range(n):
+            ts = (now - timedelta(days=(n - 1 - i))).replace(hour=0)
+            out.append({
+                "timestamp_bucket": ts.isoformat(),
+                "flags_count": random.randint(0, 8),
+                "triggers_count": random.randint(0, 4),
+            })
+        return out
+
+    origins = []
+    for o in ["reddit", "rss_news", "twitter"]:
+        origins.append({"origin": o, "buckets": daily(days)})
+    return {"window_days": days, "interval": interval, "origins": origins, "notes": ["demo trends seeded"]}
+
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
@@ -280,6 +305,30 @@ try:
             md.append(f"- `{o['origin']}`: {o['flags']} flags, {o['triggers']} triggers → score={o['yield_score']}")
 except Exception as e:
     md.append(f"\n_⚠️ Yield plan failed: {e}_")
+    
+# ---------- origin trends ----------
+try:
+    trends = compute_origin_trends(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        interval="day"
+    )
+    trends = generate_demo_origin_trends_if_needed(trends, days=7, interval="day")
+
+    md.append("\n### 📊 Origin Trends (7d)")
+    if not trends["origins"]:
+        md.append("_No trend data available._")
+    else:
+        for item in trends["origins"]:
+            md.append(f"- **{item['origin']}**")
+            for b in item["buckets"]:
+                day = b["timestamp_bucket"][:10]
+                md.append(f"  - {day}: flags={b['flags_count']}, triggers={b['triggers_count']}")
+except Exception as e:
+    md.append(f"\n_⚠️ Origin trends failed: {e}_")
+
+
 
 # ---------- source precision & recall ----------
 try:
