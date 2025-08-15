@@ -6,12 +6,6 @@ Outputs
  - artifacts/demo_summary.md
  - artifacts/consensus.png
  - artifacts/consensus_social.png
-
-Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty,
-in which case it calls the demo seeder to append mock data for this run.
-
-NOTE: Tests import `generate_demo_data_if_needed` from this module.
-That function is read-only (in-memory) and returns (reviewers, events).
 """
 
 import os, json, hashlib, random, uuid
@@ -22,6 +16,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from src.analytics.origin_utils import compute_origin_breakdown
+from src.analytics.source_yield import compute_source_yield
+from src.paths import LOGS_DIR
 
 # ---------- config ----------
 LOGS_DIR = Path("logs")
@@ -90,7 +86,6 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
 def generate_demo_origins_if_needed(origins_rows):
     if not is_demo_mode():
         return origins_rows
-    # Trigger seeding if no data or all origins are "unknown"
     if not origins_rows or all(r["origin"] == "unknown" for r in origins_rows):
         demo_sources = ["twitter", "reddit", "rss_news"]
         counts = [random.randint(1, 5) for _ in demo_sources]
@@ -205,6 +200,29 @@ if origins_rows:
 else:
     md.append("- _no origin data_")
 
-(ART / "demo_summary.md").write_text("\n".join(md))
+# ---------- source yield plan (NEW) ----------
+try:
+    yield_data = compute_source_yield(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        min_events=5,
+        alpha=0.7
+    )
+    md.append("\n### 📈 Source Yield Plan (last 7 days)")
+    if not yield_data["budget_plan"]:
+        md.append("_No eligible origins to display — try lowering `min_events`._")
+    else:
+        md.append("**Rate-limit budget plan:**")
+        for item in yield_data["budget_plan"]:
+            md.append(f"- `{item['origin']}` → **{item['pct']}%**")
 
+        md.append("\n**Raw Origin Stats:**")
+        for o in yield_data["origins"]:
+            md.append(f"- `{o['origin']}`: {o['flags']} flags, {o['triggers']} triggers → score={o['yield_score']}")
+except Exception as e:
+    md.append(f"\n_⚠️ Yield plan failed: {e}_")
+
+# ---------- write file ----------
+(ART / "demo_summary.md").write_text("\n".join(md))
 print(f"Wrote: {ART/'demo_summary.md'}")
