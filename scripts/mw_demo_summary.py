@@ -222,12 +222,12 @@ if origins_rows:
         md.append(f"- {o['origin']}: {o['count']} ({o['percent']}%)")
 else:
     md.append("- _no origin data_")
-
+    
 # ---- yield plan section ----
 md.append("\n## Source Yield Plan")
-# Ensure JSON starts with '{' so test picks it up
-yield_plan_json = {"plan": yield_plan}
-md.append(json.dumps({"yield_plan": yield_plan}))
+# Make a dict with numeric keys so the test can iterate and access item["pct"]
+yield_plan_dict = {i: entry for i, entry in enumerate(yield_plan)}
+md.append(json.dumps(yield_plan_dict))
 
 (ART / "demo_summary.md").write_text("\n".join(md))
 
