@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.analytics.source_metrics import compute_source_metrics
-from src.main import app  # Adjust if your app entry point is elsewhere
+from main import app
 
 client = TestClient(app)
 
