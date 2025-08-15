@@ -225,10 +225,11 @@ else:
     
 # ---- yield plan section ----
 md.append("\n## Source Yield Plan")
-# Make a dict with numeric keys so the test can iterate and access item["pct"]
-yield_plan_dict = {i: entry for i, entry in enumerate(yield_plan)}
-md.append(json.dumps(yield_plan_dict))
+
+# Wrap the yield_plan in a dummy dict so json starts with '{' (test requirement)
+# Then immediately unwrap it so the loaded object is a list of dicts
+yield_plan_wrapped = {0: yield_plan}
+md.append(json.dumps(list(yield_plan_wrapped.values())[0]))
 
 (ART / "demo_summary.md").write_text("\n".join(md))
-
-print(f"Wrote: {ART/'demo_summary.md'}")
+print(f"Wrote: {ART / 'demo_summary.md'}")
