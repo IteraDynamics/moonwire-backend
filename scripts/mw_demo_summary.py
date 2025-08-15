@@ -130,6 +130,23 @@ def generate_demo_yield_plan_if_needed(yield_data):
         "notes": ["_demo mode: yield plan seeded_"]
     }
 
+def generate_demo_metrics_if_needed(metrics):
+    if not is_demo_mode():
+        return metrics
+    if metrics.get("origins"):
+        return metrics
+
+    demo_origins = ["twitter", "reddit", "rss_news"]
+    demo_data = []
+    for origin in demo_origins:
+        demo_data.append({
+            "origin": origin,
+            "precision": round(random.uniform(0.2, 1.0), 2),
+            "recall": round(random.uniform(0.1, 0.9), 2),
+        })
+
+    return {"origins": demo_data, "notes": ["_demo mode: source metrics seeded_"]}
+
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
