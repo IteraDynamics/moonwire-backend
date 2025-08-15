@@ -4,14 +4,6 @@ MoonWire CI Demo Summary (read-only)
 
 Outputs
  - artifacts/demo_summary.md
- - artifacts/consensus.png
- - artifacts/consensus_social.png
-
-Reads ./logs/*.jsonl; never mutates logs unless DEMO_MODE=true AND retraining log is empty,
-in which case it calls the demo seeder to append mock data for this run.
-
-NOTE: Tests import `generate_demo_data_if_needed` from this module.
-That function is read-only (in-memory) and returns (reviewers, events).
 """
 
 import os, json, hashlib, random, uuid
@@ -22,14 +14,12 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from src.analytics.origin_utils import compute_origin_breakdown
+from src.analytics.source_yield import compute_source_yield
+from src.paths import LOGS_DIR
 
 # ---------- config ----------
-LOGS_DIR = Path("logs")
 ART = Path("artifacts"); ART.mkdir(exist_ok=True)
-
 DEFAULT_THRESHOLD = 2.5
-SOCIAL_W, SOCIAL_H, DPI = 1280, 720, 120
-# ----------------------------
 
 # ---------- helpers ----------
 def red(s: str) -> str:
@@ -69,7 +59,6 @@ def parse_ts(val):
 def is_demo_mode() -> bool:
     return os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
 
-# ---------- READ-ONLY demo seeding ----------
 def generate_demo_data_if_needed(reviewers, flag_times=None):
     flag_times = flag_times or []
     if not is_demo_mode() or reviewers:
@@ -90,7 +79,6 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
 def generate_demo_origins_if_needed(origins_rows):
     if not is_demo_mode():
         return origins_rows
-    # Trigger seeding if no data or all origins are "unknown"
     if not origins_rows or all(r["origin"] == "unknown" for r in origins_rows):
         demo_sources = ["twitter", "reddit", "rss_news"]
         counts = [random.randint(1, 5) for _ in demo_sources]
@@ -100,6 +88,46 @@ def generate_demo_origins_if_needed(origins_rows):
             for src, c in zip(demo_sources, counts)
         ]
     return origins_rows
+
+def generate_demo_yield_plan_if_needed(yield_data):
+    if not is_demo_mode():
+        return yield_data
+    if yield_data["budget_plan"]:
+        return yield_data
+
+    demo_origins = ["twitter", "reddit", "rss_news"]
+    demo_flags = [random.randint(5, 15) for _ in demo_origins]
+    demo_triggers = [random.randint(1, 4) for _ in demo_origins]
+    total_flags = sum(demo_flags)
+    alpha = 0.7
+
+    origins = []
+    for origin, flags, triggers in zip(demo_origins, demo_flags, demo_triggers):
+        trigger_rate = triggers / max(flags, 1)
+        volume_share = flags / max(total_flags, 1)
+        yield_score = round(alpha * trigger_rate + (1 - alpha) * volume_share, 3)
+        origins.append({
+            "origin": origin,
+            "flags": flags,
+            "triggers": triggers,
+            "trigger_rate": round(trigger_rate, 3),
+            "yield_score": yield_score,
+            "eligible": True
+        })
+
+    total_yield = sum(o["yield_score"] for o in origins)
+    budget_plan = [
+        {"origin": o["origin"], "pct": round(100 * o["yield_score"] / total_yield, 1)}
+        for o in sorted(origins, key=lambda o: o["yield_score"], reverse=True)
+    ]
+
+    return {
+        "window_days": 7,
+        "totals": {"flags": total_flags, "triggers": sum(demo_triggers)},
+        "origins": origins,
+        "budget_plan": budget_plan,
+        "notes": ["_demo mode: yield plan seeded_"]
+    }
 
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
@@ -158,11 +186,11 @@ for r in sorted(sig_rows, key=lambda x: x.get("timestamp", 0)):
         w = band_weight_from_score(sc)
     reviewers.append({"id": rid, "weight": round(float(w), 2)})
 
-reviewers, _seeded_events = generate_demo_data_if_needed(reviewers, flag_times)
+reviewers, _ = generate_demo_data_if_needed(reviewers, flag_times)
 
 # ---- compute origins ----
 try:
-    origins_rows, _totals = compute_origin_breakdown(
+    origins_rows, _ = compute_origin_breakdown(
         flags_path=LOGS_DIR / "retraining_log.jsonl",
         triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
         days=7,
@@ -173,15 +201,15 @@ except Exception:
 
 origins_rows = generate_demo_origins_if_needed(origins_rows)
 
+# ---------- markdown summary ----------
+md = []
+now_iso = datetime.now(timezone.utc).isoformat()
 total_weight = round(sum(r["weight"] for r in reviewers), 2)
-threshold    = DEFAULT_THRESHOLD
+threshold = DEFAULT_THRESHOLD
 would_trigger = total_weight >= threshold
 last_trig = max((t for t in triggered_log if t.get("signal_id")==sig_id),
                 key=lambda x: x.get("timestamp", 0), default=None) if triggered_log else None
-now_iso = datetime.now(timezone.utc).isoformat()
 
-# ---------- markdown summary ----------
-md = []
 md.append("# MoonWire CI Demo Summary\n")
 md.append(f"MoonWire Demo Summary — {now_iso}\n")
 md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.\n")
@@ -205,6 +233,31 @@ if origins_rows:
 else:
     md.append("- _no origin data_")
 
-(ART / "demo_summary.md").write_text("\n".join(md))
+# ---------- yield planner ----------
+try:
+    yield_data = compute_source_yield(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        min_events=5,
+        alpha=0.7
+    )
+    yield_data = generate_demo_yield_plan_if_needed(yield_data)
 
+    md.append("\n### 📈 Source Yield Plan (last 7 days)")
+    if not yield_data["budget_plan"]:
+        md.append("_No yield plan available (not enough recent activity)._")
+    else:
+        md.append("**Rate-limit budget plan:**")
+        for item in yield_data["budget_plan"]:
+            md.append(f"- `{item['origin']}` → **{item['pct']}%**")
+
+        md.append("\n**Raw Origin Stats:**")
+        for o in yield_data["origins"]:
+            md.append(f"- `{o['origin']}`: {o['flags']} flags, {o['triggers']} triggers → score={o['yield_score']}")
+except Exception as e:
+    md.append(f"\n_⚠️ Yield plan failed: {e}_")
+
+# ---------- write file ----------
+(ART / "demo_summary.md").write_text("\n".join(md))
 print(f"Wrote: {ART/'demo_summary.md'}")
