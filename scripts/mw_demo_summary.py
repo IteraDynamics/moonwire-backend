@@ -95,21 +95,26 @@ def generate_demo_origins_if_needed(origins_rows):
 def generate_demo_yield_plan_if_needed(yield_data):
     if not is_demo_mode():
         return yield_data
-    if yield_data["budget_plan"]:
+
+    origins = yield_data.get("origins") or []
+    has_budget = bool(yield_data.get("budget_plan"))
+    if has_budget and _has_non_unknown(origins):
+        # Real-looking plan exists; keep it
         return yield_data
 
+    # --- seed demo plan (same logic you already had) ---
     demo_origins = ["twitter", "reddit", "rss_news"]
     demo_flags = [random.randint(5, 15) for _ in demo_origins]
     demo_triggers = [random.randint(1, 4) for _ in demo_origins]
     total_flags = sum(demo_flags)
     alpha = 0.7
 
-    origins = []
+    origins_out = []
     for origin, flags, triggers in zip(demo_origins, demo_flags, demo_triggers):
         trigger_rate = triggers / max(flags, 1)
         volume_share = flags / max(total_flags, 1)
         yield_score = round(alpha * trigger_rate + (1 - alpha) * volume_share, 3)
-        origins.append({
+        origins_out.append({
             "origin": origin,
             "flags": flags,
             "triggers": triggers,
@@ -118,19 +123,20 @@ def generate_demo_yield_plan_if_needed(yield_data):
             "eligible": True
         })
 
-    total_yield = sum(o["yield_score"] for o in origins)
+    total_yield = sum(o["yield_score"] for o in origins_out) or 1.0
     budget_plan = [
         {"origin": o["origin"], "pct": round(100 * o["yield_score"] / total_yield, 1)}
-        for o in sorted(origins, key=lambda o: o["yield_score"], reverse=True)
+        for o in sorted(origins_out, key=lambda o: o["yield_score"], reverse=True)
     ]
 
     return {
         "window_days": 7,
         "totals": {"flags": total_flags, "triggers": sum(demo_triggers)},
-        "origins": origins,
+        "origins": origins_out,
         "budget_plan": budget_plan,
         "notes": ["_demo mode: yield plan seeded_"]
     }
+
 
 def generate_demo_source_metrics_if_needed(metrics: dict) -> dict:
     """
@@ -157,10 +163,14 @@ def generate_demo_source_metrics_if_needed(metrics: dict) -> dict:
 def generate_demo_origin_trends_if_needed(trends, days=7, interval="day"):
     if not is_demo_mode():
         return trends
-    if trends.get("origins"):
+
+    origins = (trends or {}).get("origins") or []
+    if _has_non_unknown(origins):
+        # Real-looking trends exist; keep them
         return trends
 
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
     def daily(n):
         out = []
         for i in range(n):
@@ -172,10 +182,21 @@ def generate_demo_origin_trends_if_needed(trends, days=7, interval="day"):
             })
         return out
 
-    origins = []
+    origins_out = []
     for o in ["reddit", "rss_news", "twitter"]:
-        origins.append({"origin": o, "buckets": daily(days)})
-    return {"window_days": days, "interval": interval, "origins": origins, "notes": ["demo trends seeded"]}
+        origins_out.append({"origin": o, "buckets": daily(days)})
+
+    return {
+        "window_days": days,
+        "interval": interval,
+        "origins": origins_out,
+        "notes": ["demo trends seeded"]
+    }
+
+
+def _has_non_unknown(origins: list | None) -> bool:
+    origins = origins or []
+    return any(o.get("origin") and o.get("origin") != "unknown" for o in origins)
 
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
@@ -283,11 +304,12 @@ else:
 
 # ---------- yield planner ----------
 try:
+    min_ev = 1 if is_demo_mode() else 5   # 👈 demo-friendly threshold
     yield_data = compute_source_yield(
         flags_path=LOGS_DIR / "retraining_log.jsonl",
         triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
         days=7,
-        min_events=5,
+        min_events=min_ev,
         alpha=0.7
     )
     yield_data = generate_demo_yield_plan_if_needed(yield_data)
@@ -305,6 +327,7 @@ try:
             md.append(f"- `{o['origin']}`: {o['flags']} flags, {o['triggers']} triggers → score={o['yield_score']}")
 except Exception as e:
     md.append(f"\n_⚠️ Yield plan failed: {e}_")
+
     
 # ---------- origin trends ----------
 try:
