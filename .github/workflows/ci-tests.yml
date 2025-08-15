@@ -68,3 +68,10 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Run source yield planner
+          run: |
+            echo "## 📊 Source Yield Plan Output" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            python scripts/run_source_yield.py >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
