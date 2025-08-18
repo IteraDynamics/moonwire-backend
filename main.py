@@ -99,7 +99,7 @@ app.include_router(origin_analytics_router)
 app.include_router(source_metrics_router.router)
 app.include_router(origin_trends_router)
 app.include_router(origin_correlations_router)
-app.include_router(lead_lag_router)
+app.include_router(lead_lag_router, prefix="/internal")
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
