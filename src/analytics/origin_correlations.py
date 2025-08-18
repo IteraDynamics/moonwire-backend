@@ -18,26 +18,6 @@ def _bucket_start(dt: datetime, interval: str) -> datetime:
         raise ValueError('interval must be "day" or "hour"')
 
 
-def _bucket_range(now: datetime, days: int, interval: str) -> List[datetime]:
-    """Inclusive forward-ordered list of bucket starts covering the window."""
-    if interval == "day":
-        start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        step = timedelta(days=1)
-        count = days
-    else:  # hour
-        hours = days * 24
-        start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=hours - 1)
-        step = timedelta(hours=1)
-        count = hours
-
-    out: List[datetime] = []
-    cur = start
-    for _ in range(count):
-        out.append(cur)
-        cur = cur + step
-    return out
-
-
 def _pearson(x: List[float], y: List[float]) -> float:
     n = len(x)
     if n < 2:
@@ -47,7 +27,8 @@ def _pearson(x: List[float], y: List[float]) -> float:
     sxx = sum((xi - mx) ** 2 for xi in x)
     syy = sum((yi - my) ** 2 for yi in y)
     if sxx == 0.0 or syy == 0.0:
-        return 0.0  # constant series → undefined; treat as 0
+        # constant series -> undefined correlation; treat as 0
+        return 0.0
     sxy = sum((xi - mx) * (yi - my) for xi, yi in zip(x, y))
     return sxy / (sqrt(sxx) * sqrt(syy))
 
@@ -59,8 +40,8 @@ def compute_origin_correlations(
     interval: str = "day",
 ) -> Dict[str, Any]:
     """
-    Bucket flag events by time (day|hour), build aligned time series per origin,
-    then compute pairwise Pearson correlations between origins.
+    Bucket flag events by time (day|hour), build aligned time series per origin
+    over *observed buckets only*, then compute pairwise Pearson correlations.
 
     Returns:
     {
@@ -78,12 +59,11 @@ def compute_origin_correlations(
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=days)
 
-    buckets = _bucket_range(now, days, interval)
+    # Collect counts and the set of actually observed buckets in-window
+    counts: DefaultDict[Tuple[str, datetime], int] = defaultdict(int)
+    origins_set: set[str] = set()
+    observed_buckets: set[datetime] = set()
 
-    # (origin -> bucket_ts -> count)
-    grid: DefaultDict[str, Dict[datetime, int]] = defaultdict(lambda: defaultdict(int))
-
-    # Flags only (activity correlations)
     if flags_path.exists():
         for row in stream_jsonl(flags_path):
             ts = parse_ts(row.get("timestamp")) or now
@@ -96,14 +76,23 @@ def compute_origin_correlations(
                 or (row.get("meta") or {}).get("origin")
                 or (row.get("metadata") or {}).get("source")
             )
-            grid[origin][bts] += 1
+            counts[(origin, bts)] += 1
+            origins_set.add(origin)
+            observed_buckets.add(bts)
 
-    # Build aligned vectors per origin; skip constant-zero
+    # No data → no pairs
+    if not origins_set or not observed_buckets:
+        return {"window_days": days, "interval": interval, "origins": [], "pairs": []}
+
+    buckets_sorted = sorted(observed_buckets)
+    origins_sorted = sorted(origins_set)
+
+    # Build aligned vectors per origin across observed buckets only; skip all-zero series
     vectors: Dict[str, List[float]] = {}
-    for origin, per_bucket in grid.items():
-        vec = [float(per_bucket.get(b, 0)) for b in buckets]
+    for o in origins_sorted:
+        vec = [float(counts.get((o, b), 0)) for b in buckets_sorted]
         if any(v != 0.0 for v in vec):
-            vectors[origin] = vec
+            vectors[o] = vec
 
     origins = sorted(vectors.keys())
     pairs: List[Dict[str, Any]] = []
@@ -111,7 +100,7 @@ def compute_origin_correlations(
         r = _pearson(vectors[a], vectors[b])
         pairs.append({"a": a, "b": b, "correlation": round(r, 3)})
 
-    # strongest first
+    # Sort strongest first
     pairs.sort(key=lambda p: p["correlation"], reverse=True)
 
     return {"window_days": days, "interval": interval, "origins": origins, "pairs": pairs}
