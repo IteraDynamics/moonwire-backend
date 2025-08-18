@@ -18,6 +18,7 @@ from src.analytics.source_yield import compute_source_yield
 from src.analytics.source_metrics import compute_source_metrics
 from src.analytics.origin_trends import compute_origin_trends
 from src.paths import LOGS_DIR
+from src.analytics.origin_correlations import compute_origin_correlations
 
 
 # ---------- config ----------
@@ -198,6 +199,31 @@ def _has_non_unknown(origins: list | None) -> bool:
     origins = origins or []
     return any(o.get("origin") and o.get("origin") != "unknown" for o in origins)
 
+def generate_demo_correlations_if_needed(data, days=7, interval="day"):
+    if not is_demo_mode():
+        return data
+    pairs = (data or {}).get("pairs") or []
+    if pairs:
+        return data
+    origins = ["twitter", "reddit", "rss_news"]
+    seeded = []
+    for i in range(len(origins)):
+        for j in range(i + 1, len(origins)):
+            seeded.append({
+                "a": origins[i],
+                "b": origins[j],
+                "correlation": round(random.uniform(0.3, 0.8), 3)
+            })
+    seeded.sort(key=lambda p: p["correlation"], reverse=True)
+    return {
+        "window_days": days,
+        "interval": interval,
+        "origins": sorted(origins),
+        "pairs": seeded,
+        "notes": ["demo correlations seeded"]
+    }
+
+
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
     if not is_demo_mode():
@@ -350,6 +376,28 @@ try:
                 md.append(f"  - {day}: flags={b['flags_count']}, triggers={b['triggers_count']}")
 except Exception as e:
     md.append(f"\n_⚠️ Origin trends failed: {e}_")
+
+# ---------- cross-origin correlations ----------
+try:
+    cors = compute_origin_correlations(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        interval="day",
+    )
+    cors = generate_demo_correlations_if_needed(cors, days=7, interval="day")
+
+    md.append("\n### 🔗 Cross-Origin Correlations (7d)")
+    pairs = cors.get("pairs", [])
+    if not pairs:
+        md.append("_No correlation data available._")
+    else:
+        top3 = pairs[:3]
+        for p in top3:
+            md.append(f"- `{p['a']}` ↔ `{p['b']}` → **{p['correlation']}**")
+except Exception as e:
+    md.append(f"\n_⚠️ Correlation analysis failed: {e}_")
+
 
 
 
