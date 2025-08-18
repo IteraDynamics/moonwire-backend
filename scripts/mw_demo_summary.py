@@ -19,6 +19,8 @@ from src.analytics.source_metrics import compute_source_metrics
 from src.analytics.origin_trends import compute_origin_trends
 from src.paths import LOGS_DIR
 from src.analytics.origin_correlations import compute_origin_correlations
+from src.analytics.lead_lag import compute_lead_lag
+
 
 
 # ---------- config ----------
@@ -223,6 +225,25 @@ def generate_demo_correlations_if_needed(data, days=7, interval="day"):
         "notes": ["demo correlations seeded"]
     }
 
+def generate_demo_lead_lag_if_needed(data, days=7, interval="hour", max_lag=24, use="flags"):
+    if not is_demo_mode():
+        return data
+    pairs = (data or {}).get("pairs") or []
+    if pairs:
+        return data
+    origins = ["twitter", "reddit", "rss_news"]
+    seeded = []
+    for i in range(len(origins)):
+        for j in range(len(origins)):
+            if i == j: continue
+            L = random.randint(1, max(1, max_lag))
+            r = round(random.uniform(0.3, 0.8), 3)
+            a, b = origins[i], origins[j]
+            seeded.append({"a": a, "b": b, "best_lag": L, "correlation": r, "leader": a})
+    seeded.sort(key=lambda p: (-abs(p["correlation"]), p["a"], p["b"]))
+    return {"window_days": days, "interval": interval, "max_lag": max_lag, "use": use, "origins": origins, "pairs": seeded, "notes": ["demo lead/lag seeded"]}
+
+
 
 # ---------- maybe seed logs ----------
 def maybe_seed_real_logs_if_empty():
@@ -397,6 +418,30 @@ try:
             md.append(f"- `{p['a']}` ↔ `{p['b']}` → **{p['correlation']}**")
 except Exception as e:
     md.append(f"\n_⚠️ Correlation analysis failed: {e}_")
+
+
+# ---------- lead–lag ----------
+try:
+    ll = compute_lead_lag(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        interval="hour",
+        max_lag=24,
+        use="flags",
+    )
+    ll = generate_demo_lead_lag_if_needed(ll, days=7, interval="hour", max_lag=24, use="flags")
+
+    md.append("\n### ⏱️ Lead–Lag (7d, hour)")
+    pairs = ll.get("pairs", [])[:3]
+    if not pairs:
+        md.append("_No lead–lag pairs available._")
+    else:
+        for p in pairs:
+            sign = "+" if p["best_lag"] >= 0 else ""
+            md.append(f"- {p['a']} → {p['b']}: {sign}{p['best_lag']}{'h' if 'hour'==ll.get('interval','hour') else 'd'} (r={p['correlation']})")
+except Exception as e:
+    md.append(f"\n_⚠️ Lead–lag analysis failed: {e}_")
 
 
 
