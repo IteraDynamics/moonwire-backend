@@ -48,6 +48,7 @@ from src import source_metrics_router
 from src.origin_trends_router import router as origin_trends_router
 from src.origin_correlations_router import router as origin_correlations_router
 from src.lead_lag_router import router as lead_lag_router
+from src.burst_detection_router import router as burst_detection_router
 
 app = FastAPI()
 
@@ -100,6 +101,7 @@ app.include_router(source_metrics_router.router)
 app.include_router(origin_trends_router)
 app.include_router(origin_correlations_router)
 app.include_router(lead_lag_router, prefix="/internal")
+app.include_router(burst_detection_router)
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
