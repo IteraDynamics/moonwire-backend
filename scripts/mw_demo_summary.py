@@ -20,6 +20,7 @@ from src.analytics.origin_trends import compute_origin_trends
 from src.paths import LOGS_DIR
 from src.analytics.origin_correlations import compute_origin_correlations
 from src.analytics.lead_lag import compute_lead_lag
+from src.analytics.burst_detection import compute_bursts
 
 
 
@@ -243,6 +244,24 @@ def generate_demo_lead_lag_if_needed(data, days=7, interval="hour", max_lag=24, 
     seeded.sort(key=lambda p: (-abs(p["correlation"]), p["a"], p["b"]))
     return {"window_days": days, "interval": interval, "max_lag": max_lag, "use": use, "origins": origins, "pairs": seeded, "notes": ["demo lead/lag seeded"]}
 
+def generate_demo_bursts_if_needed(data, days=7, interval="hour", z_thresh=2.0):
+    if not is_demo_mode():
+        return data
+    origins = (data or {}).get("origins", [])
+    has_known = any(o.get("origin") != "unknown" and o.get("bursts") for o in origins)
+    if has_known:
+        return data
+    # simple seeded fallback
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    demo_origins = ["twitter", "reddit", "rss_news"]
+    demo = []
+    for o in demo_origins:
+        ts = now.isoformat().replace("+00:00", "Z")
+        demo.append({"origin": o, "bursts": [{"timestamp_bucket": ts, "count": 42, "z_score": 3.1}]})
+    return {"window_days": days, "interval": interval, "origins": demo, "notes": ["demo bursts seeded"]}
+
+
+
 
 
 # ---------- maybe seed logs ----------
@@ -442,6 +461,48 @@ try:
             md.append(f"- {p['a']} → {p['b']}: {sign}{p['best_lag']}{'h' if 'hour'==ll.get('interval','hour') else 'd'} (r={p['correlation']})")
 except Exception as e:
     md.append(f"\n_⚠️ Lead–lag analysis failed: {e}_")
+
+
+# ---------- burst detection ----------
+try:
+    raw_bursts = compute_bursts(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        interval="hour",
+        z_thresh=2.0,
+    )
+
+    def _known_only(bundle):
+        return [
+            o for o in (bundle or {}).get("origins", [])
+            if o.get("origin") != "unknown" and o.get("bursts")
+        ]
+
+    display_origins = _known_only(raw_bursts)
+
+    # If we only have unknown (or nothing at all) and we're in demo mode, seed
+    if not display_origins and is_demo_mode():
+        seeded = generate_demo_bursts_if_needed(raw_bursts, days=7, interval="hour", z_thresh=2.0)
+        display_origins = _known_only(seeded) or seeded.get("origins", [])
+
+    md.append("\n### 🚨 Burst Detection (7d, hour)")
+    if not display_origins:
+        md.append("_No bursts detected._")
+    else:
+        # Flatten and show the top 3 by z-score
+        items = []
+        for o in display_origins:
+            for b in o.get("bursts", []):
+                items.append((o["origin"], b))
+        items.sort(key=lambda t: t[1].get("z_score", 0), reverse=True)
+        for origin, b in items[:3]:
+            md.append(f"- {origin}: {b['timestamp_bucket']} (count={b['count']}, z={b['z_score']})")
+except Exception as e:
+    md.append(f"\n_⚠️ Burst detection failed: {e}_")
+
+
+
 
 
 
