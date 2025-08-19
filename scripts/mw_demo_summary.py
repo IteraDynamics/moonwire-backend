@@ -470,20 +470,34 @@ try:
         interval="hour",
         z_thresh=2.0,
     )
-    bursts = generate_demo_bursts_if_needed(bursts, days=7, interval="hour", z_thresh=2.0)
+
+    # Filter out 'unknown' for display
+    def _filter_known(b):
+        return [o for o in (b or {}).get("origins", []) if o.get("origin") != "unknown" and o.get("bursts")]
+
+    display_origins = _filter_known(bursts)
+
+    # If nothing but 'unknown' (or truly empty) and we're in demo mode, seed
+    if (not display_origins) and is_demo_mode():
+        bursts = generate_demo_bursts_if_needed(bursts, days=7, interval="hour", z_thresh=2.0)
+        display_origins = _filter_known(bursts) or bursts.get("origins", [])
 
     md.append("\n### 🚨 Burst Detection (7d, hour)")
-    shown = 0
-    for o in bursts.get("origins", []):
-        for b in o.get("bursts", [])[:1]:  # show top item per origin
-            md.append(f"- {o['origin']}: {b['timestamp_bucket']} (count={b['count']}, z={b['z_score']})")
-            shown += 1
-        if shown >= 3:
-            break
-    if shown == 0:
+    if not display_origins:
         md.append("_No bursts detected._")
+    else:
+        shown = 0
+        for o in display_origins:
+            for b in o.get("bursts", [])[:1]:  # one per origin
+                md.append(f"- {o['origin']}: {b['timestamp_bucket']} (count={b['count']}, z={b['z_score']})")
+                shown += 1
+                if shown >= 3:
+                    break
+            if shown >= 3:
+                break
 except Exception as e:
     md.append(f"\n_⚠️ Burst detection failed: {e}_")
+
 
 
 
