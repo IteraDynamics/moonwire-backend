@@ -20,6 +20,7 @@ from src.analytics.origin_trends import compute_origin_trends
 from src.paths import LOGS_DIR
 from src.analytics.origin_correlations import compute_origin_correlations
 from src.analytics.lead_lag import compute_lead_lag
+from src.analytics.burst_detection import compute_bursts
 
 
 
@@ -243,6 +244,22 @@ def generate_demo_lead_lag_if_needed(data, days=7, interval="hour", max_lag=24, 
     seeded.sort(key=lambda p: (-abs(p["correlation"]), p["a"], p["b"]))
     return {"window_days": days, "interval": interval, "max_lag": max_lag, "use": use, "origins": origins, "pairs": seeded, "notes": ["demo lead/lag seeded"]}
 
+def generate_demo_bursts_if_needed(data, days=7, interval="hour", z_thresh=2.0):
+    if not is_demo_mode():
+        return data
+    has_any = any(len(o.get("bursts", [])) > 0 for o in (data or {}).get("origins", []))
+    if has_any:
+        return data
+    # simple seeded fallback
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    origins = ["twitter", "reddit", "rss_news"]
+    demo = []
+    for o in origins:
+        ts = now.isoformat().replace("+00:00", "Z")
+        demo.append({"origin": o, "bursts": [{"timestamp_bucket": ts, "count": 42, "z_score": 3.1}]})
+    return {"window_days": days, "interval": interval, "origins": demo, "notes": ["demo bursts seeded"]}
+
+
 
 
 # ---------- maybe seed logs ----------
@@ -442,6 +459,32 @@ try:
             md.append(f"- {p['a']} → {p['b']}: {sign}{p['best_lag']}{'h' if 'hour'==ll.get('interval','hour') else 'd'} (r={p['correlation']})")
 except Exception as e:
     md.append(f"\n_⚠️ Lead–lag analysis failed: {e}_")
+
+
+# ---------- burst detection ----------
+try:
+    bursts = compute_bursts(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7,
+        interval="hour",
+        z_thresh=2.0,
+    )
+    bursts = generate_demo_bursts_if_needed(bursts, days=7, interval="hour", z_thresh=2.0)
+
+    md.append("\n### 🚨 Burst Detection (7d, hour)")
+    shown = 0
+    for o in bursts.get("origins", []):
+        for b in o.get("bursts", [])[:1]:  # show top item per origin
+            md.append(f"- {o['origin']}: {b['timestamp_bucket']} (count={b['count']}, z={b['z_score']})")
+            shown += 1
+        if shown >= 3:
+            break
+    if shown == 0:
+        md.append("_No bursts detected._")
+except Exception as e:
+    md.append(f"\n_⚠️ Burst detection failed: {e}_")
+
 
 
 
