@@ -23,6 +23,8 @@ from src.analytics.lead_lag import compute_lead_lag
 from src.analytics.burst_detection import compute_bursts
 from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
+from src.analytics.nowcast_attention import compute_nowcast_attention
+
 
 
 
@@ -281,6 +283,23 @@ def generate_demo_volatility_if_needed(data, days=30, interval="hour"):
         "notes": ["demo regimes seeded"]
     }
 
+def generate_demo_nowcast_if_needed(data, days=7, interval="hour", top=3):
+    if not is_demo_mode():
+        return data
+    if (data or {}).get("origins"):
+        return data
+    # simple seeded
+    return {
+        "window_days": days, "interval": interval, "as_of": None,
+        "origins": [
+            {"origin":"twitter","score":92.4,"rank":1,"components":{"z":3.1,"z_norm":0.62,"precision":0.7,"leadership":0.5,"regime":"turbulent","regime_factor":1.05,"threshold":3.0}},
+            {"origin":"reddit","score":74.8,"rank":2,"components":{"z":1.8,"z_norm":0.36,"precision":0.55,"leadership":0.4,"regime":"normal","regime_factor":1.0,"threshold":2.5}},
+            {"origin":"rss_news","score":66.3,"rank":3,"components":{"z":1.2,"z_norm":0.24,"precision":0.5,"leadership":0.2,"regime":"calm","regime_factor":0.95,"threshold":2.2}},
+        ],
+        "notes":["demo nowcast seeded"]
+    }
+
+
 
 
 
@@ -523,6 +542,24 @@ except Exception as e:
 
 
 
+# ---------- nowcast attention ----------
+try:
+    na = compute_nowcast_attention(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=7, interval="hour", lookback=72, z_cap=5.0, top=3
+    )
+    na = generate_demo_nowcast_if_needed(na, days=7, interval="hour", top=3)
+
+    md.append("\n### ⚡ Nowcast Attention (hour)")
+    rows = [o for o in na.get("origins", []) if o.get("origin") != "unknown"][:3]
+    if not rows:
+        md.append("_No attention highlights._")
+    else:
+        for r in rows:
+            md.append(f"- {r['origin']}: {r['score']}  (z={r['components'].get('z')}, p={r['components'].get('precision')}, lead={r['components'].get('leadership')}, {r['components'].get('regime')})")
+except Exception as e:
+    md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
 
 
 # ---------- burst detection ----------
