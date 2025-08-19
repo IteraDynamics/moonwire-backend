@@ -21,6 +21,8 @@ from src.paths import LOGS_DIR
 from src.analytics.origin_correlations import compute_origin_correlations
 from src.analytics.lead_lag import compute_lead_lag
 from src.analytics.burst_detection import compute_bursts
+from src.analytics.volatility_regimes import compute_volatility_regimes
+from src.analytics.threshold_policy import threshold_for_regime
 
 
 
@@ -260,6 +262,19 @@ def generate_demo_bursts_if_needed(data, days=7, interval="hour", z_thresh=2.0):
         demo.append({"origin": o, "bursts": [{"timestamp_bucket": ts, "count": 42, "z_score": 3.1}]})
     return {"window_days": days, "interval": interval, "origins": demo, "notes": ["demo bursts seeded"]}
 
+def generate_demo_volatility_if_needed(data, days=30, interval="hour"):
+    if not is_demo_mode():
+        return data
+    if data.get("origins"):
+        return data
+    origins = [
+        {"origin": "twitter", "regime": "turbulent", "vol_metric": 4.1, "stats": {"mean": 1.2, "std": 4.1}},
+        {"origin": "reddit",  "regime": "normal",    "vol_metric": 2.0, "stats": {"mean": 1.0, "std": 2.0}},
+        {"origin": "rss_news","regime": "calm",      "vol_metric": 0.3, "stats": {"mean": 0.8, "std": 0.3}},
+    ]
+    return {"window_days": days, "interval": interval, "origins": origins, "notes": ["demo regimes seeded"]}
+
+
 
 
 
@@ -461,6 +476,35 @@ try:
             md.append(f"- {p['a']} → {p['b']}: {sign}{p['best_lag']}{'h' if 'hour'==ll.get('interval','hour') else 'd'} (r={p['correlation']})")
 except Exception as e:
     md.append(f"\n_⚠️ Lead–lag analysis failed: {e}_")
+
+# ---------- volatility regimes ----------
+try:
+    vr = compute_volatility_regimes(
+        flags_path=LOGS_DIR / "retraining_log.jsonl",
+        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
+        days=30,
+        interval="hour",
+        lookback=72,
+        q_calm=0.33,
+        q_turb=0.80
+    )
+    vr = generate_demo_volatility_if_needed(vr, days=30, interval="hour")
+
+    md.append("\n### 🌫️ Volatility Regimes (hour)")
+    shown = 0
+    for row in vr.get("origins", []):
+        regime = row.get("regime", "normal")
+        thr = threshold_for_regime(regime)
+        md.append(f"- {row['origin']}: {regime} → threshold {thr}")
+        shown += 1
+        if shown >= 3:
+            break
+    if shown == 0:
+        md.append("_No volatility data._")
+except Exception as e:
+    md.append(f"\n_⚠️ Volatility regimes failed: {e}_")
+
+
 
 
 # ---------- burst detection ----------
