@@ -265,14 +265,22 @@ def generate_demo_bursts_if_needed(data, days=7, interval="hour", z_thresh=2.0):
 def generate_demo_volatility_if_needed(data, days=30, interval="hour"):
     if not is_demo_mode():
         return data
-    if data.get("origins"):
+    origins = (data or {}).get("origins", [])
+    has_known = any(o.get("origin") != "unknown" for o in origins)
+    if has_known:
         return data
-    origins = [
-        {"origin": "twitter", "regime": "turbulent", "vol_metric": 4.1, "stats": {"mean": 1.2, "std": 4.1}},
-        {"origin": "reddit",  "regime": "normal",    "vol_metric": 2.0, "stats": {"mean": 1.0, "std": 2.0}},
-        {"origin": "rss_news","regime": "calm",      "vol_metric": 0.3, "stats": {"mean": 0.8, "std": 0.3}},
-    ]
-    return {"window_days": days, "interval": interval, "origins": origins, "notes": ["demo regimes seeded"]}
+    # Seed three plausible regimes
+    return {
+        "window_days": days,
+        "interval": interval,
+        "origins": [
+            {"origin": "twitter",  "regime": "turbulent", "vol_metric": 4.1, "stats": {"mean": 1.2, "std": 4.1}},
+            {"origin": "reddit",   "regime": "normal",    "vol_metric": 2.0, "stats": {"mean": 1.0, "std": 2.0}},
+            {"origin": "rss_news", "regime": "calm",      "vol_metric": 0.3, "stats": {"mean": 0.8, "std": 0.3}},
+        ],
+        "notes": ["demo regimes seeded"]
+    }
+
 
 
 
@@ -479,7 +487,7 @@ except Exception as e:
 
 # ---------- volatility regimes ----------
 try:
-    vr = compute_volatility_regimes(
+    raw_vr = compute_volatility_regimes(
         flags_path=LOGS_DIR / "retraining_log.jsonl",
         triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
         days=30,
@@ -488,21 +496,31 @@ try:
         q_calm=0.33,
         q_turb=0.80
     )
-    vr = generate_demo_volatility_if_needed(vr, days=30, interval="hour")
+
+    def _known_only(vr_bundle):
+        return [
+            o for o in (vr_bundle or {}).get("origins", [])
+            if o.get("origin") != "unknown"
+        ]
+
+    display = _known_only(raw_vr)
+
+    # If only 'unknown' (or nothing) and we're in demo mode, seed demo regimes
+    if not display and is_demo_mode():
+        seeded = generate_demo_volatility_if_needed(raw_vr, days=30, interval="hour")
+        display = _known_only(seeded) or seeded.get("origins", [])
 
     md.append("\n### 🌫️ Volatility Regimes (hour)")
-    shown = 0
-    for row in vr.get("origins", []):
-        regime = row.get("regime", "normal")
-        thr = threshold_for_regime(regime)
-        md.append(f"- {row['origin']}: {regime} → threshold {thr}")
-        shown += 1
-        if shown >= 3:
-            break
-    if shown == 0:
+    if not display:
         md.append("_No volatility data._")
+    else:
+        for row in display[:3]:
+            regime = row.get("regime", "normal")
+            thr = threshold_for_regime(regime)
+            md.append(f"- {row['origin']}: {regime} → threshold {thr}")
 except Exception as e:
     md.append(f"\n_⚠️ Volatility regimes failed: {e}_")
+
 
 
 
