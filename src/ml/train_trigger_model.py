@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, os, random
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 import joblib
 import numpy as np
@@ -15,7 +15,7 @@ import src.paths as paths  # use live module attributes so monkeypatch works
 MODEL_NAME = "trigger_likelihood_v0"
 
 
-def _prepare_xy(rows) -> tuple[np.ndarray, np.ndarray]:
+def _prepare_xy(rows) -> Tuple[np.ndarray, np.ndarray]:
     X = np.array([r.x for r in rows], dtype=float)
     y = np.array([r.y for r in rows], dtype=int)
     return X, y
@@ -41,22 +41,34 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
 
-    # --- NEW: guard against single-class label sets (augment minimally) ---
-    # Some synthetic test setups can produce only negatives in the window.
-    # We augment with a tiny demo batch to ensure both classes exist.
-    y_tmp = np.array([r.y for r in rows], dtype=int)
-    if len(np.unique(y_tmp)) < 2:
+    # --- Guard 1: single-class dataset → augment minimally with demo rows
+    y_all = np.array([r.y for r in rows], dtype=int)
+    if len(np.unique(y_all)) < 2:
         demo_rows, _, _ = synth_demo_dataset()
-        # take a small slice (balanced-ish) to avoid swamping real rows
         random.seed(42)
-        demo_slice = [demo_rows[i] for i in range(60)]  # ~1–2 hours per origin
+        # Pick a small deterministic slice spread across time
+        # Take every 10th sample from the first ~300 demo rows to include some positives
+        demo_slice = [demo_rows[i] for i in range(0, min(300, len(demo_rows)), 10)]
         rows = rows + demo_slice
         meta_extras["augmented_single_class"] = True
 
-    # Time-aware split
+    # Time-aware split (sort by timestamp)
     rows.sort(key=lambda r: r.ts)
     n = len(rows)
     split = max(int(n * 0.8), 1)
+
+    # --- Guard 2: if training fold is still single-class, slide the split forward
+    def has_two_classes(arr: np.ndarray) -> bool:
+        return len(np.unique(arr)) >= 2
+
+    y_all = np.array([r.y for r in rows], dtype=int)
+    if not has_two_classes(y_all[:split]) and has_two_classes(y_all):
+        # Move split boundary forward until the train fold contains both classes,
+        # while preserving time order. Cap at n-1 to keep a non-empty val fold.
+        while split < n - 1 and not has_two_classes(y_all[:split]):
+            split += 1
+        meta_extras["split_adjusted_for_class_balance"] = True
+
     tr, va = rows[:split], rows[split:]
 
     Xtr, ytr = _prepare_xy(tr)
