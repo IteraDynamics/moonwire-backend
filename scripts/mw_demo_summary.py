@@ -25,6 +25,12 @@ from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 
+# ML inference (safe if artifacts missing; we'll guard in code)
+try:
+    from src.ml.infer import score as infer_score, metadata as model_metadata
+    _ML_OK = True
+except Exception:
+    _ML_OK = False
 
 
 
@@ -302,6 +308,12 @@ def generate_demo_nowcast_if_needed(data, days=7, interval="hour", top=3):
     }
 
 
+def pick_example_origin(origins_rows, default="twitter"):
+    # Prefer first known origin from the origin breakdown; fallback to default
+    for o in origins_rows or []:
+        if o.get("origin") and o["origin"] != "unknown":
+            return o["origin"]
+    return default
 
 
 
@@ -569,6 +581,53 @@ try:
             )
 except Exception as e:
     md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
+
+
+# ---------- trigger likelihood v0 ----------
+md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+if not _ML_OK:
+    md.append("_Model unavailable in this build._")
+else:
+    # model metadata line
+    try:
+        _meta = model_metadata()
+    except Exception:
+        _meta = {}
+    if _meta:
+        _metrics = _meta.get("metrics", {}) or {}
+        _auc = _metrics.get("roc_auc_va") or _metrics.get("roc_auc_tr")
+        _bits = []
+        if _meta.get("created_at"):
+            _bits.append(f"model@{_meta['created_at']}")
+        if _auc is not None:
+            try:
+                _bits.append(f"AUC={float(_auc):.2f}")
+            except Exception:
+                _bits.append(f"AUC={_auc}")
+        if _meta.get("demo"):
+            _bits.append("demo")
+        if _bits:
+            md.append("- " + " • ".join(_bits))
+
+    # example score for a relevant origin at the current bucket
+    try:
+        ex_origin = pick_example_origin(origins_rows)
+        now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+        _res = infer_score({"origin": ex_origin, "timestamp": now_bucket})
+        p = _res.get("prob_trigger_next_6h")
+        if isinstance(p, (int, float)):
+            md.append(f"- {ex_origin}: **{round(p*100,1)}%** chance of trigger in next 6h")
+        else:
+            raise ValueError("prob not numeric")
+    except Exception:
+        # fallback: deterministic feature-only probe so the section never looks empty
+        try:
+            _res = infer_score({"features": {"burst_z": 2.0}})
+            p = _res.get("prob_trigger_next_6h")
+            md.append(f"- example (burst_z=2.0): **{round(float(p)*100,1)}%**")
+        except Exception:
+            md.append("_No score available._")
+
 
 
 # ---------- burst detection ----------
