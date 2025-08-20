@@ -4,8 +4,9 @@ import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Allow tests to override via env var
+# Allow tests (and CI) to override via env vars
 LOGS_DIR = Path(os.getenv("LOGS_DIR", str(BASE_DIR / "logs")))
+MODELS_DIR = Path(os.getenv("MODELS_DIR", str(BASE_DIR / "models")))  # <— NEW
 
 # Existing logs
 REVIEWER_IMPACT_LOG_PATH = LOGS_DIR / "reviewer_impact_log.jsonl"

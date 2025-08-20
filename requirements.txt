@@ -14,3 +14,4 @@ pandas
 scikit-learn
 requests
 numpy
+joblib

@@ -25,6 +25,12 @@ from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 
+# ML inference (safe if artifacts missing; we'll guard in code)
+try:
+    from src.ml.infer import score as infer_score, metadata as model_metadata
+    _ML_OK = True
+except Exception:
+    _ML_OK = False
 
 
 
@@ -302,6 +308,31 @@ def generate_demo_nowcast_if_needed(data, days=7, interval="hour", top=3):
     }
 
 
+# Old:
+# def pick_example_origin(origins_rows, default="twitter"): ...
+
+# New:
+def pick_candidate_origins(origins_rows, yield_data=None, top=3, default=("twitter","reddit","rss_news")):
+    seen, out = set(), []
+    # Prefer yield plan ordering if available
+    if yield_data:
+        for item in yield_data.get("budget_plan", []) or []:
+            o = item.get("origin")
+            if o and o != "unknown" and o not in seen:
+                out.append(o); seen.add(o)
+                if len(out) >= top: return out
+    # Then origin breakdown
+    for row in origins_rows or []:
+        o = row.get("origin")
+        if o and o != "unknown" and o not in seen:
+            out.append(o); seen.add(o)
+            if len(out) >= top: return out
+    # Then sane defaults
+    for o in default:
+        if o not in seen:
+            out.append(o); seen.add(o)
+            if len(out) >= top: break
+    return out[:top]
 
 
 
@@ -569,6 +600,51 @@ try:
             )
 except Exception as e:
     md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
+
+
+# ---------- trigger likelihood v0 ----------
+md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+if not _ML_OK:
+    md.append("_Model unavailable in this build._")
+else:
+    # Metadata line (unchanged)
+    try:
+        _meta = model_metadata()
+    except Exception:
+        _meta = {}
+    if _meta:
+        _metrics = _meta.get("metrics", {}) or {}
+        _auc = _metrics.get("roc_auc_va") or _metrics.get("roc_auc_tr")
+        bits = []
+        if _meta.get("created_at"): bits.append(f"model@{_meta['created_at']}")
+        if _auc is not None:
+            try: bits.append(f"AUC={float(_auc):.2f}")
+            except Exception: bits.append(f"AUC={_auc}")
+        if _meta.get("demo"): bits.append("demo")
+        if bits: md.append("- " + " • ".join(bits))
+
+    # Score up to 3 origins (prefer yield plan ordering if available)
+    try:
+        yield_data_local = locals().get("yield_data")  # may not exist if yield block failed
+        candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
+        now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+        printed = 0
+        for o in candidates:
+            try:
+                res = infer_score({"origin": o, "timestamp": now_bucket})
+                p = res.get("prob_trigger_next_6h")
+                if isinstance(p, (int, float)):
+                    md.append(f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h")
+                    printed += 1
+            except Exception:
+                continue
+        if printed == 0:
+            # Fallback to a deterministic probe so the section isn’t empty
+            res = infer_score({"features": {"burst_z": 2.0}})
+            md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
+    except Exception:
+        md.append("_No score available._")
+
 
 
 # ---------- burst detection ----------
