@@ -10,8 +10,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, log_loss, brier_score_loss
 
 from src.ml.feature_builder import build_examples, synth_demo_dataset
-import src.paths as paths  # <-- use live module attributes so monkeypatch works
-
+import src.paths as paths  # use live module attributes so monkeypatch works
 
 MODEL_NAME = "trigger_likelihood_v0"
 
@@ -27,13 +26,11 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use the live log paths from paths module (monkeypatch-friendly)
-    rows, feat_order = build_examples(
-        paths.RETRAINING_LOG_PATH,
-        paths.RETRAINING_TRIGGERED_LOG_PATH,
-        days=days,
-        interval=interval,
-    )
+    # Build example paths from the CURRENT LOGS_DIR (monkeypatch-friendly)
+    flags_path = paths.LOGS_DIR / "retraining_log.jsonl"
+    triggers_path = paths.LOGS_DIR / "retraining_triggered.jsonl"
+
+    rows, feat_order = build_examples(flags_path, triggers_path, days=days, interval=interval)
     meta_extras = {}
     if not rows and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
         rows, feat_order, meta_extras = synth_demo_dataset()
@@ -48,7 +45,11 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     tr, va = rows[:split], rows[split:]
 
     Xtr, ytr = _prepare_xy(tr)
-    Xva, yva = _prepare_xy(va) if len(va) > 0 else (np.empty((0, Xtr.shape[1])), np.empty((0,), dtype=int))
+    if len(va) > 0:
+        Xva = np.array([r.x for r in va], dtype=float)
+        yva = np.array([r.y for r in va], dtype=int)
+    else:
+        Xva = np.empty((0, Xtr.shape[1])); yva = np.empty((0,), dtype=int)
 
     clf = LogisticRegression(max_iter=2000, class_weight="balanced", solver="liblinear")
     clf.fit(Xtr, ytr)
