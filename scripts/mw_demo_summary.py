@@ -308,12 +308,31 @@ def generate_demo_nowcast_if_needed(data, days=7, interval="hour", top=3):
     }
 
 
-def pick_example_origin(origins_rows, default="twitter"):
-    # Prefer first known origin from the origin breakdown; fallback to default
-    for o in origins_rows or []:
-        if o.get("origin") and o["origin"] != "unknown":
-            return o["origin"]
-    return default
+# Old:
+# def pick_example_origin(origins_rows, default="twitter"): ...
+
+# New:
+def pick_candidate_origins(origins_rows, yield_data=None, top=3, default=("twitter","reddit","rss_news")):
+    seen, out = set(), []
+    # Prefer yield plan ordering if available
+    if yield_data:
+        for item in yield_data.get("budget_plan", []) or []:
+            o = item.get("origin")
+            if o and o != "unknown" and o not in seen:
+                out.append(o); seen.add(o)
+                if len(out) >= top: return out
+    # Then origin breakdown
+    for row in origins_rows or []:
+        o = row.get("origin")
+        if o and o != "unknown" and o not in seen:
+            out.append(o); seen.add(o)
+            if len(out) >= top: return out
+    # Then sane defaults
+    for o in default:
+        if o not in seen:
+            out.append(o); seen.add(o)
+            if len(out) >= top: break
+    return out[:top]
 
 
 
@@ -588,7 +607,7 @@ md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
 if not _ML_OK:
     md.append("_Model unavailable in this build._")
 else:
-    # model metadata line
+    # Metadata line (unchanged)
     try:
         _meta = model_metadata()
     except Exception:
@@ -596,37 +615,35 @@ else:
     if _meta:
         _metrics = _meta.get("metrics", {}) or {}
         _auc = _metrics.get("roc_auc_va") or _metrics.get("roc_auc_tr")
-        _bits = []
-        if _meta.get("created_at"):
-            _bits.append(f"model@{_meta['created_at']}")
+        bits = []
+        if _meta.get("created_at"): bits.append(f"model@{_meta['created_at']}")
         if _auc is not None:
-            try:
-                _bits.append(f"AUC={float(_auc):.2f}")
-            except Exception:
-                _bits.append(f"AUC={_auc}")
-        if _meta.get("demo"):
-            _bits.append("demo")
-        if _bits:
-            md.append("- " + " • ".join(_bits))
+            try: bits.append(f"AUC={float(_auc):.2f}")
+            except Exception: bits.append(f"AUC={_auc}")
+        if _meta.get("demo"): bits.append("demo")
+        if bits: md.append("- " + " • ".join(bits))
 
-    # example score for a relevant origin at the current bucket
+    # Score up to 3 origins (prefer yield plan ordering if available)
     try:
-        ex_origin = pick_example_origin(origins_rows)
+        yield_data_local = locals().get("yield_data")  # may not exist if yield block failed
+        candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
         now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
-        _res = infer_score({"origin": ex_origin, "timestamp": now_bucket})
-        p = _res.get("prob_trigger_next_6h")
-        if isinstance(p, (int, float)):
-            md.append(f"- {ex_origin}: **{round(p*100,1)}%** chance of trigger in next 6h")
-        else:
-            raise ValueError("prob not numeric")
+        printed = 0
+        for o in candidates:
+            try:
+                res = infer_score({"origin": o, "timestamp": now_bucket})
+                p = res.get("prob_trigger_next_6h")
+                if isinstance(p, (int, float)):
+                    md.append(f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h")
+                    printed += 1
+            except Exception:
+                continue
+        if printed == 0:
+            # Fallback to a deterministic probe so the section isn’t empty
+            res = infer_score({"features": {"burst_z": 2.0}})
+            md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
     except Exception:
-        # fallback: deterministic feature-only probe so the section never looks empty
-        try:
-            _res = infer_score({"features": {"burst_z": 2.0}})
-            p = _res.get("prob_trigger_next_6h")
-            md.append(f"- example (burst_z=2.0): **{round(float(p)*100,1)}%**")
-        except Exception:
-            md.append("_No score available._")
+        md.append("_No score available._")
 
 
 
