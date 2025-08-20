@@ -8,8 +8,7 @@ import joblib
 import numpy as np
 
 from src.ml.feature_builder import build_feature_row_for, FEATURE_ORDER
-import src.paths as paths  # <-- use live module attributes so monkeypatch works
-
+import src.paths as paths  # use live module attributes so monkeypatch works
 
 MODEL_NAME = "trigger_likelihood_v0"
 
@@ -44,9 +43,14 @@ def score(body: Dict[str, Any]) -> Dict[str, Any]:
         if not origin or not ts_raw:
             raise ValueError("Provide either {'features': {...}} or {'origin','timestamp'}.")
         ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+
+        # Build paths from CURRENT LOGS_DIR (monkeypatch-friendly)
+        flags_path = paths.LOGS_DIR / "retraining_log.jsonl"
+        triggers_path = paths.LOGS_DIR / "retraining_triggered.jsonl"
+
         feats, _ = build_feature_row_for(
-            paths.RETRAINING_LOG_PATH,
-            paths.RETRAINING_TRIGGERED_LOG_PATH,
+            flags_path,
+            triggers_path,
             origin=origin,
             ts=ts,
             interval="hour",
