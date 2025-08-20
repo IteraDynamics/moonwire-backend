@@ -31,6 +31,28 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
 
+      # --- Train trigger likelihood model (smoke) ---
+      - name: Train trigger likelihood model (smoke)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DEMO_MODE: "true"        # allow seeding if logs are empty in CI
+        run: |
+          python -m src.ml.train_trigger_model --days 14 --interval hour
+          echo "Models in ./models:"
+          ls -lah models || true
+
+      - name: Upload model artifacts
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigger-likelihood-v0
+          path: |
+            models/trigger_likelihood_v0.joblib
+            models/trigger_likelihood_v0.meta.json
+          if-no-files-found: warn
+          retention-days: 14
+
       # --- Demo summary & artifacts (read-only, post-tests) ---
       - name: Prep artifacts dir
         if: ${{ success() }}
