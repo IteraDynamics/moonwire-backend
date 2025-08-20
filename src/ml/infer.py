@@ -8,30 +8,30 @@ import joblib
 import numpy as np
 
 from src.ml.feature_builder import build_feature_row_for, FEATURE_ORDER
-try:
-    from src.paths import MODELS_DIR, LOGS_DIR
-except Exception:
-    MODELS_DIR, LOGS_DIR = Path("models"), Path("logs")
+import src.paths as paths  # <-- use live module attributes so monkeypatch works
+
 
 MODEL_NAME = "trigger_likelihood_v0"
 
-def _load() -> tuple[Any, Dict[str, Any]]:
-    model_path = MODELS_DIR / f"{MODEL_NAME}.joblib"
-    meta_path  = MODELS_DIR / f"{MODEL_NAME}.meta.json"
+
+def _load() -> tuple[object | None, Dict[str, Any]]:
+    model_path = paths.MODELS_DIR / f"{MODEL_NAME}.joblib"
+    meta_path = paths.MODELS_DIR / f"{MODEL_NAME}.meta.json"
     if not (model_path.exists() and meta_path.exists()):
         return None, {}
     model = joblib.load(model_path)
     meta = json.loads(meta_path.read_text())
     return model, meta
 
+
 def _align_features(feats: Dict[str, float], order: List[str]) -> np.ndarray:
     return np.array([float(feats.get(k, 0.0)) for k in order], dtype=float)
+
 
 def score(body: Dict[str, Any]) -> Dict[str, Any]:
     model, meta = _load()
     if model is None:
-        if os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes"):
-            # seeded demo output
+        if os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
             return {"prob_trigger_next_6h": 0.42, "contributions": [], "demo": True}
         raise FileNotFoundError("Model artifacts not found.")
 
@@ -43,13 +43,19 @@ def score(body: Dict[str, Any]) -> Dict[str, Any]:
         ts_raw = body.get("timestamp")
         if not origin or not ts_raw:
             raise ValueError("Provide either {'features': {...}} or {'origin','timestamp'}.")
-        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone(timezone.utc)
-        feats, _ = build_feature_row_for(LOGS_DIR / "retraining_log.jsonl", LOGS_DIR / "retraining_triggered.jsonl", origin=origin, ts=ts, interval="hour")
+        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+        feats, _ = build_feature_row_for(
+            paths.RETRAINING_LOG_PATH,
+            paths.RETRAINING_TRIGGERED_LOG_PATH,
+            origin=origin,
+            ts=ts,
+            interval="hour",
+        )
 
     x = _align_features(feats, order).reshape(1, -1)
     proba = float(model.predict_proba(x)[0, 1])
 
-    # contributions = coef * value (plus intercept as bias)
+    # contributions = coef * value + intercept
     coef = getattr(model, "coef_", None)
     intercept = float(getattr(model, "intercept_", [0.0])[0])
     contribs = []
@@ -63,12 +69,13 @@ def score(body: Dict[str, Any]) -> Dict[str, Any]:
         "contributions": contribs,
         "features_used": {k: float(feats.get(k, 0.0)) for k in order},
         "demo": bool(meta.get("demo", False)),
-        "model_meta": {"model_name": meta.get("model_name"), "created_at": meta.get("created_at")}
+        "model_meta": {"model_name": meta.get("model_name"), "created_at": meta.get("created_at")},
     }
+
 
 def metadata() -> Dict[str, Any]:
     _, meta = _load()
-    if not meta and os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes"):
+    if not meta and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
         return {"model_name": MODEL_NAME, "feature_order": FEATURE_ORDER, "demo": True}
     if not meta:
         raise FileNotFoundError("Metadata not found.")
