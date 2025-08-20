@@ -830,21 +830,25 @@ else:
             bursts_by_origin = {}
 
     # --- score up to 3 origins (prefer yield plan ordering if available) ---
-    try:
-        yield_data_local = locals().get("yield_data")  # may not exist if yield block failed
-        candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
-        now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
-        printed = 0
-        
-        use_rich = _demo_rich_scores_enabled()
-        nonzero_seen = False
-        feats_cache = {}
+    
+    
+    # --- score up to 3 origins (prefer yield plan ordering if available)
+try:
+    yield_data_local = locals().get("yield_data")  # may not exist if yield block failed
+    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
+    now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+    printed = 0
 
-        if use_rich:
-            # Prebuild features per origin
-            for o in candidates:
-                feats = _build_summary_features_for_origin(
-                    o,
+    # --- prebuild features + fallback if all-zero ---
+    use_rich = _demo_rich_scores_enabled()
+    nonzero_seen = False
+    feats_cache = {}
+
+    if use_rich:
+        # Prebuild features per origin
+        for o in candidates:
+            feats = _build_summary_features_for_origin(
+                o,
                 trends_by_origin=trends_map,
                 regimes_map=regimes_map,
                 metrics_rows=metrics_rows,
@@ -852,41 +856,34 @@ else:
                 bursts_map=bursts_by_origin,
             )
             feats_cache[o] = feats
-            # detect any non-zero feature so we know rich path is meaningful
-            if any(v not in (0, 0.0, None) for v in feats.values()):
-            nonzero_seen = True
+            if any((v or 0) != 0 for v in feats.values()):
+                nonzero_seen = True
 
-        # If rich path requested but everything is zero, fall back to timestamp scoring.
-        if use_rich and not nonzero_seen:
-            use_rich = False
-        
-        
-        for o in candidates:
-            try:
-                if use_rich:
-                    res = infer_score({"features": feats_cache[o]})
-                    # (optional) show how many non-zero features fed the model
-                    # nz = sum(1 for v in feats_cache[o].values() if v not in (0, 0.0, None))
-                    # md.append(f"  _(nz-features={nz})_")
-                else:
-                    res = infer_score({"origin": o, "timestamp": now_bucket})
+    # If rich path requested but everything is zero, fall back to timestamp scoring.
+    if use_rich and not nonzero_seen:
+        use_rich = False
 
-                p = res.get("prob_trigger_next_6h")
-                if isinstance(p, (int, float)):
-                    md.append(f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h")
-                    printed += 1
-            except Exception:
-                continue
+    # scoring loop
+    for o in candidates:
+        try:
+            if use_rich:
+                res = infer_score({"features": feats_cache[o]})
+            else:
+                res = infer_score({"origin": o, "timestamp": now_bucket})
+            p = res.get("prob_trigger_next_6h")
+            if isinstance(p, (int, float)):
+                md.append(f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h")
+                printed += 1
+        except Exception:
+            continue
 
-        if printed == 0:
-            # fallback so the section never looks empty
-            try:
-                res = infer_score({"features": {"burst_z": 2.0}})
-                md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
-            except Exception:
-                md.append("_No score available._")
-    except Exception:
-        md.append("_No score available._")
+    if printed == 0:
+        # Fallback so the section isn’t empty
+        res = infer_score({"features": {"burst_z": 2.0}})
+        md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
+
+except Exception:
+    md.append("_No score available._")
 
 
 
