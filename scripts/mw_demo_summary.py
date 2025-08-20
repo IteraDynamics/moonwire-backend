@@ -670,7 +670,79 @@ md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
 if not _ML_OK:
     md.append("_Model unavailable in this build._")
 else:
-    # Metadata line (unchanged)
+    # --- local helpers (safe to duplicate; no external deps) ---
+    def _demo_rich_scores_enabled() -> bool:
+        return os.getenv("DEMO_RICH_SCORES", "false").lower() in ("1", "true", "yes")
+
+    def _build_summary_features_for_origin(
+        origin: str,
+        *,
+        trends_by_origin=None,
+        regimes_map=None,
+        metrics_rows=None,
+        leadlag_pairs=None,
+        bursts_map=None,
+    ):
+        f = {
+            "count_1h": 0.0, "count_6h": 0.0, "count_24h": 0.0, "count_72h": 0.0,
+            "burst_z": 0.0,
+            "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
+            "precision_7d": 0.0, "recall_7d": 0.0,
+            "leadership_max_r": 0.0,
+        }
+
+        # bursts (use most recent z if present)
+        if bursts_map and origin in bursts_map and bursts_map[origin]:
+            try:
+                f["burst_z"] = float(bursts_map[origin][0].get("z_score", 0.0))
+            except Exception:
+                pass
+
+        # regimes → one-hot
+        if regimes_map and origin in regimes_map:
+            rk = f"regime_{regimes_map[origin]}"
+            if rk in f:
+                f[rk] = 1.0
+
+        # precision / recall (7d)
+        if metrics_rows:
+            for r in metrics_rows:
+                if r.get("origin") == origin:
+                    try:
+                        f["precision_7d"] = float(r.get("precision", 0.0))
+                        f["recall_7d"] = float(r.get("recall", 0.0))
+                    except Exception:
+                        pass
+                    break
+
+        # leadership strength from lead–lag (max |r| where this origin is leader)
+        if leadlag_pairs:
+            best = 0.0
+            for p in leadlag_pairs:
+                if p.get("leader") == origin:
+                    try:
+                        best = max(best, abs(float(p.get("correlation", 0.0))))
+                    except Exception:
+                        pass
+            f["leadership_max_r"] = best
+
+        # rolling counts from trends (sum last N buckets; expects newest-first list)
+        def _sum_last(series, n):
+            try:
+                return float(sum(x.get("flags_count", 0) for x in series[:n])) if series else 0.0
+            except Exception:
+                return 0.0
+
+        if trends_by_origin and origin in trends_by_origin:
+            s = trends_by_origin[origin]
+            f["count_1h"]  = _sum_last(s, 1)
+            f["count_6h"]  = _sum_last(s, 6)
+            f["count_24h"] = _sum_last(s, 24)
+            f["count_72h"] = _sum_last(s, 72)
+
+        return f
+
+    # --- metadata line (unchanged) ---
     try:
         _meta = model_metadata()
     except Exception:
@@ -686,7 +758,76 @@ else:
         if _meta.get("demo"): bits.append("demo")
         if bits: md.append("- " + " • ".join(bits))
 
-    # Score up to 3 origins (prefer yield plan ordering if available)
+    # --- optionally gather richer context from existing analytics ---
+    trends_map = {}
+    regimes_map = {}
+    metrics_rows = []
+    leadlag_pairs = []
+    bursts_by_origin = {}
+
+    if _demo_rich_scores_enabled():
+        try:
+            from src.analytics.origin_trends import compute_origin_trends
+            _tr = compute_origin_trends(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour"
+            )
+            for item in _tr.get("origins", []):
+                origin = item.get("origin")
+                series = item.get("series", [])
+                # convert to newest-first for simple rolling windows
+                trends_map[origin] = list(reversed(series))
+        except Exception:
+            trends_map = {}
+
+        try:
+            from src.analytics.volatility_regimes import compute_volatility_regimes
+            _vr = compute_volatility_regimes(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=30, interval="hour", lookback=72
+            )
+            for r in _vr.get("origins", []):
+                regimes_map[r.get("origin")] = (r.get("regime") or "normal")
+        except Exception:
+            regimes_map = {}
+
+        try:
+            from src.analytics.source_metrics import compute_source_metrics
+            _sm = compute_source_metrics(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, min_count=1
+            )
+            metrics_rows = _sm.get("origins", []) or []
+        except Exception:
+            metrics_rows = []
+
+        try:
+            from src.analytics.lead_lag import compute_lead_lag
+            _ll = compute_lead_lag(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour", max_lag=24, use="flags"
+            )
+            leadlag_pairs = _ll.get("pairs", []) or []
+        except Exception:
+            leadlag_pairs = []
+
+        try:
+            from src.analytics.burst_detection import compute_bursts
+            _bd = compute_bursts(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour", z_thresh=2.0
+            )
+            for item in _bd.get("origins", []):
+                bursts_by_origin[item.get("origin")] = item.get("bursts", []) or []
+        except Exception:
+            bursts_by_origin = {}
+
+    # --- score up to 3 origins (prefer yield plan ordering if available) ---
     try:
         yield_data_local = locals().get("yield_data")  # may not exist if yield block failed
         candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
@@ -694,19 +835,37 @@ else:
         printed = 0
         for o in candidates:
             try:
-                res = infer_score({"origin": o, "timestamp": now_bucket})
+                if _demo_rich_scores_enabled():
+                    feats = _build_summary_features_for_origin(
+                        o,
+                        trends_by_origin=trends_map,
+                        regimes_map=regimes_map,
+                        metrics_rows=metrics_rows,
+                        leadlag_pairs=leadlag_pairs,
+                        bursts_map=bursts_by_origin,
+                    )
+                    res = infer_score({"features": feats})
+                else:
+                    res = infer_score({"origin": o, "timestamp": now_bucket})
+
                 p = res.get("prob_trigger_next_6h")
                 if isinstance(p, (int, float)):
                     md.append(f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h")
                     printed += 1
             except Exception:
                 continue
+
         if printed == 0:
-            # Fallback to a deterministic probe so the section isn’t empty
-            res = infer_score({"features": {"burst_z": 2.0}})
-            md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
+            # fallback so the section never looks empty
+            try:
+                res = infer_score({"features": {"burst_z": 2.0}})
+                md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
+            except Exception:
+                md.append("_No score available._")
     except Exception:
         md.append("_No score available._")
+
+
 
 
 
