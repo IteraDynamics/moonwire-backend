@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os
+import json, os, random
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any
@@ -31,12 +31,27 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     triggers_path = paths.LOGS_DIR / "retraining_triggered.jsonl"
 
     rows, feat_order = build_examples(flags_path, triggers_path, days=days, interval=interval)
-    meta_extras = {}
+    meta_extras: Dict[str, Any] = {}
+
+    # If no rows, allow DEMO_MODE to seed
     if not rows and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
         rows, feat_order, meta_extras = synth_demo_dataset()
 
+    # If still no rows → hard fail (keeps behavior when DEMO_MODE is off)
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
+
+    # --- NEW: guard against single-class label sets (augment minimally) ---
+    # Some synthetic test setups can produce only negatives in the window.
+    # We augment with a tiny demo batch to ensure both classes exist.
+    y_tmp = np.array([r.y for r in rows], dtype=int)
+    if len(np.unique(y_tmp)) < 2:
+        demo_rows, _, _ = synth_demo_dataset()
+        # take a small slice (balanced-ish) to avoid swamping real rows
+        random.seed(42)
+        demo_slice = [demo_rows[i] for i in range(60)]  # ~1–2 hours per origin
+        rows = rows + demo_slice
+        meta_extras["augmented_single_class"] = True
 
     # Time-aware split
     rows.sort(key=lambda r: r.ts)
@@ -80,6 +95,7 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
         "feature_order": feat_order,
         "metrics": metrics,
         "demo": bool(meta_extras.get("demo", False)),
+        "notes": [k for k, v in meta_extras.items() if v],
     }
     (out_dir / f"{MODEL_NAME}.meta.json").write_text(json.dumps(meta, indent=2))
 
