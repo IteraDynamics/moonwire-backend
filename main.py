@@ -50,6 +50,7 @@ from src.origin_correlations_router import router as origin_correlations_router
 from src.lead_lag_router import router as lead_lag_router
 from src.burst_detection_router import router as burst_detection_router
 from src.volatility_regimes_router import router as volatility_regimes_router
+from src.nowcast_router import router as nowcast_router
 
 app = FastAPI()
 
@@ -104,6 +105,7 @@ app.include_router(origin_correlations_router)
 app.include_router(lead_lag_router, prefix="/internal")
 app.include_router(burst_detection_router)
 app.include_router(volatility_regimes_router)
+app.include_router(nowcast_router)
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
