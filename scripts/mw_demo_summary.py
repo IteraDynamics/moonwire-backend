@@ -667,6 +667,8 @@ except Exception as e:
 
 # ---------- trigger likelihood v0 ----------
 md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+if os.getenv("DEMO_RICH_SCORES","").lower() in ("1","true","yes"):
+    md.append("_rich features on_")
 if not _ML_OK:
     md.append("_Model unavailable in this build._")
 else:
@@ -833,18 +835,39 @@ else:
         candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
         now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
         printed = 0
+        
+        use_rich = _demo_rich_scores_enabled()
+        nonzero_seen = False
+        feats_cache = {}
+
+        if use_rich:
+            # Prebuild features per origin
+            for o in candidates:
+                feats = _build_summary_features_for_origin(
+                    o,
+                trends_by_origin=trends_map,
+                regimes_map=regimes_map,
+                metrics_rows=metrics_rows,
+                leadlag_pairs=leadlag_pairs,
+                bursts_map=bursts_by_origin,
+            )
+            feats_cache[o] = feats
+            # detect any non-zero feature so we know rich path is meaningful
+            if any(v not in (0, 0.0, None) for v in feats.values()):
+            nonzero_seen = True
+
+        # If rich path requested but everything is zero, fall back to timestamp scoring.
+        if use_rich and not nonzero_seen:
+            use_rich = False
+        
+        
         for o in candidates:
             try:
-                if _demo_rich_scores_enabled():
-                    feats = _build_summary_features_for_origin(
-                        o,
-                        trends_by_origin=trends_map,
-                        regimes_map=regimes_map,
-                        metrics_rows=metrics_rows,
-                        leadlag_pairs=leadlag_pairs,
-                        bursts_map=bursts_by_origin,
-                    )
-                    res = infer_score({"features": feats})
+                if use_rich:
+                    res = infer_score({"features": feats_cache[o]})
+                    # (optional) show how many non-zero features fed the model
+                    # nz = sum(1 for v in feats_cache[o].values() if v not in (0, 0.0, None))
+                    # md.append(f"  _(nz-features={nz})_")
                 else:
                     res = infer_score({"origin": o, "timestamp": now_bucket})
 
