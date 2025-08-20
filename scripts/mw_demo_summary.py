@@ -334,6 +334,69 @@ def pick_candidate_origins(origins_rows, yield_data=None, top=3, default=("twitt
             if len(out) >= top: break
     return out[:top]
 
+def demo_rich_scores_enabled() -> bool:
+    return os.getenv("DEMO_RICH_SCORES", "false").lower() in ("1", "true", "yes")
+
+def build_summary_features_for_origin(
+    origin: str,
+    *,
+    trends_by_origin=None,
+    regimes_map=None,
+    metrics_rows=None,
+    leadlag_pairs=None,
+    bursts_map=None,
+):
+    f = {
+        "count_1h": 0.0, "count_6h": 0.0, "count_24h": 0.0, "count_72h": 0.0,
+        "burst_z": 0.0,
+        "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
+        "precision_7d": 0.0, "recall_7d": 0.0,
+        "leadership_max_r": 0.0,
+    }
+
+    # bursts (most-recent z)
+    if bursts_map and origin in bursts_map and bursts_map[origin]:
+        f["burst_z"] = float(bursts_map[origin][0].get("z_score", 0.0))
+
+    # regimes
+    if regimes_map and origin in regimes_map:
+        rk = f"regime_{regimes_map[origin]}"
+        if rk in f:
+            f[rk] = 1.0
+
+    # precision / recall (7d)
+    if metrics_rows:
+        for r in metrics_rows:
+            if r.get("origin") == origin:
+                f["precision_7d"] = float(r.get("precision", 0.0))
+                f["recall_7d"] = float(r.get("recall", 0.0))
+                break
+
+    # leadership strength from lead–lag (max |r| where this origin is leader)
+    if leadlag_pairs:
+        best = 0.0
+        for p in leadlag_pairs:
+            if p.get("leader") == origin:
+                try:
+                    best = max(best, abs(float(p.get("correlation", 0.0))))
+                except Exception:
+                    pass
+        f["leadership_max_r"] = best
+
+    # rolling counts from trends (sum last N buckets, newest-first list)
+    def _sum_last(series, n):
+        return float(sum(x.get("flags_count", 0) for x in series[:n])) if series else 0.0
+
+    if trends_by_origin and origin in trends_by_origin:
+        s = trends_by_origin[origin]
+        f["count_1h"]  = _sum_last(s, 1)
+        f["count_6h"]  = _sum_last(s, 6)
+        f["count_24h"] = _sum_last(s, 24)
+        f["count_72h"] = _sum_last(s, 72)
+
+    return f
+
+
 
 
 
