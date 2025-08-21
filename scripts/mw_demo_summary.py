@@ -421,120 +421,84 @@ def _pick_bursts_map_from_locals() -> dict[str, list]:
 def _build_summary_features_for_origin(
     origin: str,
     trends_by_origin: dict[str, list] | None = None,
-    regimes_map: dict[str, dict] | None = None,
+    regimes_map: dict[str, object] | None = None,   # value may be str or dict
     metrics_map: dict[str, dict] | None = None,
     bursts_by_origin: dict[str, list] | None = None,
 ) -> dict:
     """
-    Assemble a compact, model-compatible feature vector from summary sections:
-    - rolling counts over 1/6/24/72 buckets (flags)
-    - latest burst z-score
-    - regime one-hot
-    - precision/recall (7d)
-    - leadership_max_r placeholder (0 unless you add it later)
+    Build the model-ready feature vector for one origin from summary analytics:
+      - rolling counts over last 1/6/24/72 buckets (flags_count)
+      - latest burst z-score
+      - regime one-hot (handles str or {'regime': ...})
+      - precision_7d / recall_7d
+      - leadership_max_r (caller can inject/override)
     """
-    trends = (trends_by_origin or {}).get(origin, [])
+    series = (trends_by_origin or {}).get(origin, []) or []
 
-    def sum_last(k: int, key: str) -> float:
-        if not trends:
+    # Ensure we sum most-recent buckets regardless of series order.
+    # Try to detect if series is chronological asc by comparing first/last timestamps.
+    def _series_latest_k(k: int) -> list:
+        if not series:
+            return []
+        try:
+            first = series[0].get("timestamp_bucket")
+            last  = series[-1].get("timestamp_bucket")
+            asc = (str(first) <= str(last))
+        except Exception:
+            asc = True
+        s = series if asc else list(reversed(series))
+        return s[-k:] if k <= len(s) else s
+
+    def sum_last(k: int) -> float:
+        buckets = _series_latest_k(k)
+        try:
+            return float(sum(float(x.get("flags_count", 0) or 0) for x in buckets))
+        except Exception:
             return 0.0
-        vals = [float(t.get(key, 0.0) or 0.0) for t in trends[-k:]]
-        return float(sum(vals))
-
-    feat_counts = {
-        "count_1h": sum_last(1, "flags_count"),
-        "count_6h": sum_last(6, "flags_count"),
-        "count_24h": sum_last(24, "flags_count"),
-        "count_72h": sum_last(72, "flags_count"),
-    }
-
-    # Latest burst z (if any)
-    burst_z = 0.0
-    if bursts_by_origin and origin in bursts_by_origin and bursts_by_origin[origin]:
-        burst_z = float(bursts_by_origin[origin][-1].get("z_score", 0.0) or 0.0)
-
-    # Regime one-hot
-    regime = (regimes_map or {}).get(origin, {}).get("regime")
-    reg_feats = {
-        "regime_calm": 1.0 if regime == "calm" else 0.0,
-        "regime_normal": 1.0 if regime == "normal" else 0.0,
-        "regime_turbulent": 1.0 if regime == "turbulent" else 0.0,
-    }
-
-    # Precision/recall (7d)
-    m = (metrics_map or {}).get(origin, {})
-    prec = float(m.get("precision", 0.0) or 0.0)
-    reca = float(m.get("recall", 0.0) or 0.0)
 
     feats = {
-        **feat_counts,
-        "burst_z": float(burst_z),
-        **reg_feats,
-        "precision_7d": prec,
-        "recall_7d": reca,
-        "leadership_max_r": 0.0,  # optional: wire from lead–lag if you like
+        "count_1h":  sum_last(1),
+        "count_6h":  sum_last(6),
+        "count_24h": sum_last(24),
+        "count_72h": sum_last(72),
+        "burst_z":   0.0,
+        "regime_calm": 0.0,
+        "regime_normal": 0.0,
+        "regime_turbulent": 0.0,
+        "precision_7d": 0.0,
+        "recall_7d": 0.0,
+        "leadership_max_r": 0.0,  # caller may overwrite
     }
+
+    # Latest burst z (use last item if present)
+    bursts = (bursts_by_origin or {}).get(origin) or []
+    if bursts:
+        try:
+            feats["burst_z"] = float((bursts[-1] or {}).get("z_score", 0.0) or 0.0)
+        except Exception:
+            pass
+
+    # Regime one-hot (accept str or dict)
+    raw_reg = (regimes_map or {}).get(origin)
+    if isinstance(raw_reg, dict):
+        regime = (raw_reg.get("regime") or "").strip().lower()
+    elif isinstance(raw_reg, str):
+        regime = raw_reg.strip().lower()
+    else:
+        regime = ""
+    if regime in ("calm", "normal", "turbulent"):
+        feats[f"regime_{regime}"] = 1.0
+
+    # Precision/recall (7d)
+    m = (metrics_map or {}).get(origin) or {}
+    try:
+        feats["precision_7d"] = float(m.get("precision", 0.0) or 0.0)
+        feats["recall_7d"]    = float(m.get("recall", 0.0) or 0.0)
+    except Exception:
+        pass
+
     return feats
 
-
-def build_summary_features_for_origin(
-    origin: str,
-    *,
-    trends_by_origin=None,
-    regimes_map=None,
-    metrics_rows=None,
-    leadlag_pairs=None,
-    bursts_map=None,
-):
-    f = {
-        "count_1h": 0.0, "count_6h": 0.0, "count_24h": 0.0, "count_72h": 0.0,
-        "burst_z": 0.0,
-        "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
-        "precision_7d": 0.0, "recall_7d": 0.0,
-        "leadership_max_r": 0.0,
-    }
-
-    # bursts (most-recent z)
-    if bursts_map and origin in bursts_map and bursts_map[origin]:
-        f["burst_z"] = float(bursts_map[origin][0].get("z_score", 0.0))
-
-    # regimes
-    if regimes_map and origin in regimes_map:
-        rk = f"regime_{regimes_map[origin]}"
-        if rk in f:
-            f[rk] = 1.0
-
-    # precision / recall (7d)
-    if metrics_rows:
-        for r in metrics_rows:
-            if r.get("origin") == origin:
-                f["precision_7d"] = float(r.get("precision", 0.0))
-                f["recall_7d"] = float(r.get("recall", 0.0))
-                break
-
-    # leadership strength from lead–lag (max |r| where this origin is leader)
-    if leadlag_pairs:
-        best = 0.0
-        for p in leadlag_pairs:
-            if p.get("leader") == origin:
-                try:
-                    best = max(best, abs(float(p.get("correlation", 0.0))))
-                except Exception:
-                    pass
-        f["leadership_max_r"] = best
-
-    # rolling counts from trends (sum last N buckets, newest-first list)
-    def _sum_last(series, n):
-        return float(sum(x.get("flags_count", 0) for x in series[:n])) if series else 0.0
-
-    if trends_by_origin and origin in trends_by_origin:
-        s = trends_by_origin[origin]
-        f["count_1h"]  = _sum_last(s, 1)
-        f["count_6h"]  = _sum_last(s, 6)
-        f["count_24h"] = _sum_last(s, 24)
-        f["count_72h"] = _sum_last(s, 72)
-
-    return f
 
 
 
