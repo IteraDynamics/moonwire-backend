@@ -950,6 +950,9 @@ else:
                     nonzero_seen = True
 
         # scoring loop
+        
+
+     
         for o in candidates:
             try:
                 if use_rich and feats_cache.get(o):
@@ -968,6 +971,12 @@ else:
                         line += " (" + ", ".join(f"{k}={v:+.2f}" for k, v in top) + ")"
 
                     md.append(line)
+                    if use_rich and feats_cache.get(o):
+                        try:
+                            nz = sum(1 for v in feats_cache[o].values() if (v or 0) != 0)
+                            md.append(f"    _(nz-features={nz}/{len(feats_cache[o])})_")
+                        except Exception:
+                            pass
                     printed += 1
             except Exception:
                 continue
