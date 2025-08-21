@@ -64,6 +64,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"          # <- enable demo seeding when no reviewers present
           MPLBACKEND: "Agg"          # <- safe, headless matplotlib backend
+          DEMO_RICH_SCORES: "true"   # turn on richer ML scoring (safe to omit = off)
         run: python scripts/mw_demo_summary.py
 
       - name: Show artifacts (debug)
