@@ -931,7 +931,7 @@ else:
         except Exception:
             leadership_by_origin = {}
 
-        # --- build feature cache + coverage ---
+                # --- build feature cache + coverage ---
         feats_cache = {}
         nonzero_seen = False
         if use_rich:
@@ -949,10 +949,50 @@ else:
                 if any(abs(v or 0.0) > 1e-12 for v in feats.values()):
                     nonzero_seen = True
 
-        # scoring loop
-        
+        # --- DEMO fallback: if rich was requested but all features are zero, synthesize plausible non-zero features
+        try:
+            demo_mode_on = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
+        except Exception:
+            demo_mode_on = False
 
-     
+        if use_rich and not nonzero_seen and demo_mode_on:
+            # Create simple, differentiated patterns so probabilities diverge
+            patterns = [
+                {"count_1h": 3, "count_6h": 9, "count_24h": 18, "count_72h": 54, "burst_z": 1.2, "regime": "turbulent", "precision_7d": 0.35, "recall_7d": 0.25, "leadership_max_r": 0.40},
+                {"count_1h": 1, "count_6h": 4, "count_24h": 10, "count_72h": 30, "burst_z": 0.6, "regime": "normal",     "precision_7d": 0.20, "recall_7d": 0.15, "leadership_max_r": 0.20},
+                {"count_1h": 0, "count_6h": 2, "count_24h": 6,  "count_72h": 18, "burst_z": 0.0, "regime": "calm",       "precision_7d": 0.10, "recall_7d": 0.08, "leadership_max_r": 0.05},
+            ]
+            for idx, o in enumerate(candidates):
+                p = patterns[min(idx, len(patterns) - 1)]
+                feats = feats_cache.get(o, {
+                    "count_1h": 0.0, "count_6h": 0.0, "count_24h": 0.0, "count_72h": 0.0,
+                    "burst_z": 0.0,
+                    "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
+                    "precision_7d": 0.0, "recall_7d": 0.0,
+                    "leadership_max_r": 0.0,
+                })
+                feats.update({
+                    "count_1h": float(p["count_1h"]),
+                    "count_6h": float(p["count_6h"]),
+                    "count_24h": float(p["count_24h"]),
+                    "count_72h": float(p["count_72h"]),
+                    "burst_z": float(p["burst_z"]),
+                    "precision_7d": float(p["precision_7d"]),
+                    "recall_7d": float(p["recall_7d"]),
+                    "leadership_max_r": float(p["leadership_max_r"]),
+                    "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
+                })
+                rk = f"regime_{p['regime']}"
+                if rk in feats:
+                    feats[rk] = 1.0
+                feats_cache[o] = feats
+            nonzero_seen = True
+            md.append("_(demo) rich features synthesized for display_")
+
+
+
+        # scoring loop
+             
         for o in candidates:
             try:
                 if use_rich and feats_cache.get(o):
