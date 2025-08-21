@@ -421,22 +421,21 @@ def _pick_bursts_map_from_locals() -> dict[str, list]:
 def _build_summary_features_for_origin(
     origin: str,
     trends_by_origin: dict[str, list] | None = None,
-    regimes_map: dict[str, object] | None = None,   # value may be str or dict
+    regimes_map: dict[str, object] | None = None,   # may be str OR {"regime": ...}
     metrics_map: dict[str, dict] | None = None,
     bursts_by_origin: dict[str, list] | None = None,
 ) -> dict:
     """
     Build the model-ready feature vector for one origin from summary analytics:
-      - rolling counts over last 1/6/24/72 buckets (flags_count)
+      - rolling counts over last 1/6/24/72 buckets (from flags_count/flags/count)
       - latest burst z-score
       - regime one-hot (handles str or {'regime': ...})
       - precision_7d / recall_7d
-      - leadership_max_r (caller can inject/override)
+      - leadership_max_r (caller may override)
     """
     series = (trends_by_origin or {}).get(origin, []) or []
 
-    # Ensure we sum most-recent buckets regardless of series order.
-    # Try to detect if series is chronological asc by comparing first/last timestamps.
+    # Determine chronological order; then take the last k (most recent) buckets.
     def _series_latest_k(k: int) -> list:
         if not series:
             return []
@@ -449,12 +448,21 @@ def _build_summary_features_for_origin(
         s = series if asc else list(reversed(series))
         return s[-k:] if k <= len(s) else s
 
-    def sum_last(k: int) -> float:
-        buckets = _series_latest_k(k)
+    def _flags_from_bucket(b: dict) -> float:
+        # Accept multiple key names to be safe across modules/demos
+        v = b.get("flags_count")
+        if v is None:
+            v = b.get("flags")
+        if v is None:
+            v = b.get("count")
         try:
-            return float(sum(float(x.get("flags_count", 0) or 0) for x in buckets))
+            return float(v or 0.0)
         except Exception:
             return 0.0
+
+    def sum_last(k: int) -> float:
+        buckets = _series_latest_k(k)
+        return float(sum(_flags_from_bucket(x) for x in buckets))
 
     feats = {
         "count_1h":  sum_last(1),
@@ -478,7 +486,7 @@ def _build_summary_features_for_origin(
         except Exception:
             pass
 
-    # Regime one-hot (accept str or dict)
+    # Regime (str or dict)
     raw_reg = (regimes_map or {}).get(origin)
     if isinstance(raw_reg, dict):
         regime = (raw_reg.get("regime") or "").strip().lower()
@@ -498,6 +506,7 @@ def _build_summary_features_for_origin(
         pass
 
     return feats
+
 
 
 
@@ -819,13 +828,40 @@ else:
                 LOGS_DIR / "retraining_triggered.jsonl",
                 days=7, interval="hour",
             )
+            trends_map = {}
             for item in _tr.get("origins", []) or []:
-                o = item.get("origin")
-                series = item.get("series", []) or []
-                if o:
-                    trends_map[o] = series
+                origin = item.get("origin")
+                if not origin:
+                    continue
+                # Accept 'series' or common alternates ('buckets', 'data', 'timeline')
+                series = (
+                    item.get("series")
+                    or item.get("buckets")
+                    or item.get("data")
+                    or item.get("timeline")
+                    or []
+                )
+                # Normalize bucket dicts so they at least have 'flags_count'
+                norm_series = []
+                for b in series:
+                    if not isinstance(b, dict):
+                        continue
+                    if "flags_count" not in b:
+                        # copy and fill with best-effort value
+                        bb = dict(b)
+                        if "flags" in bb and "flags_count" not in bb:
+                            bb["flags_count"] = bb.get("flags", 0)
+                        elif "count" in bb and "flags_count" not in bb:
+                            bb["flags_count"] = bb.get("count", 0)
+                        else:
+                            bb["flags_count"] = 0
+                        norm_series.append(bb)
+                    else:
+                        norm_series.append(b)
+                trends_map[origin] = norm_series
         except Exception:
             trends_map = {}
+
 
         # Volatility regimes (hour)
         try:
