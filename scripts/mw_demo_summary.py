@@ -838,16 +838,100 @@ else:
         now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
         printed = 0
 
-        # --- Fix A: rich feature path + coverage print
+        # Rich features path (guarded by env)
         use_rich = _demo_rich_scores_enabled()
         if use_rich:
             md.append("\n_rich features on_")
-        # harvest summary maps if available
-        trends_map  = _pick_trends_map_from_locals()
-        regimes_map = _pick_regimes_map_from_locals()
-        metrics_map = _pick_metrics_map_from_locals()
-        bursts_map  = _pick_bursts_map_from_locals()
 
+        # --- compute analytics directly (do NOT rely on locals()) ---
+        trends_map, regimes_map, metrics_map, bursts_map = {}, {}, {}, {}
+        leadership_by_origin = {}
+
+        # Origin trends (hourly); series sorted chronologically → we can sum last k
+        try:
+            from src.analytics.origin_trends import compute_origin_trends
+            _tr = compute_origin_trends(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour",
+            )
+            for item in _tr.get("origins", []) or []:
+                o = item.get("origin")
+                series = item.get("series", []) or []
+                if o:
+                    trends_map[o] = series
+        except Exception:
+            trends_map = {}
+
+        # Volatility regimes (hour)
+        try:
+            from src.analytics.volatility_regimes import compute_volatility_regimes
+            _vr = compute_volatility_regimes(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=30, interval="hour", lookback=72,
+            )
+            for r in _vr.get("origins", []) or []:
+                o = r.get("origin")
+                if o:
+                    regimes_map[o] = {"regime": (r.get("regime") or "normal")}
+        except Exception:
+            regimes_map = {}
+
+        # Precision & recall (7d)
+        try:
+            from src.analytics.source_metrics import compute_source_metrics
+            _sm = compute_source_metrics(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, min_count=1,
+            )
+            for r in _sm.get("origins", []) or []:
+                o = r.get("origin")
+                if o:
+                    metrics_map[o] = {
+                        "precision": float(r.get("precision", 0.0) or 0.0),
+                        "recall": float(r.get("recall", 0.0) or 0.0),
+                    }
+        except Exception:
+            metrics_map = {}
+
+        # Bursts (for latest z-score)
+        try:
+            from src.analytics.burst_detection import compute_bursts
+            _bd = compute_bursts(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour", z_thresh=2.0,
+            )
+            for item in _bd.get("origins", []) or []:
+                o = item.get("origin")
+                if o:
+                    bursts_map[o] = list(item.get("bursts", []) or [])
+        except Exception:
+            bursts_map = {}
+
+        # Lead–lag: strongest leadership |r| per origin (optional feature)
+        try:
+            from src.analytics.lead_lag import compute_lead_lag
+            _ll = compute_lead_lag(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour", max_lag=24, use="flags",
+            )
+            for p in _ll.get("pairs", []) or []:
+                leader = p.get("leader"); corr = p.get("correlation")
+                if leader is None or corr is None:
+                    continue
+                try:
+                    v = abs(float(corr))
+                except Exception:
+                    continue
+                leadership_by_origin[leader] = max(leadership_by_origin.get(leader, 0.0), v)
+        except Exception:
+            leadership_by_origin = {}
+
+        # --- build feature cache + coverage ---
         feats_cache = {}
         nonzero_seen = False
         if use_rich:
@@ -859,26 +943,29 @@ else:
                     metrics_map=metrics_map,
                     bursts_by_origin=bursts_map,
                 )
+                # inject leadership strength if available
+                feats["leadership_max_r"] = float(leadership_by_origin.get(o, 0.0))
                 feats_cache[o] = feats
-                # track coverage (any non-zero among useful features)
-                if any(abs(v) > 1e-12 for v in feats.values()):
+                if any(abs(v or 0.0) > 1e-12 for v in feats.values()):
                     nonzero_seen = True
 
+        # scoring loop
         for o in candidates:
             try:
                 if use_rich and feats_cache.get(o):
                     res = infer_score({"features": feats_cache[o]})
                 else:
                     res = infer_score({"origin": o, "timestamp": now_bucket})
+
                 p = res.get("prob_trigger_next_6h")
                 if isinstance(p, (int, float)):
                     line = f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h"
 
-                    # --- Fix B: show top contributions if provided
+                    # Top contributions (if returned)
                     contribs = res.get("contributions")
-                    extra = _pretty_contribs(contribs, top=3)
-                    if extra:
-                        line += extra
+                    if isinstance(contribs, dict) and contribs:
+                        top = sorted(contribs.items(), key=lambda kv: abs(kv[1]), reverse=True)[:3]
+                        line += " (" + ", ".join(f"{k}={v:+.2f}" for k, v in top) + ")"
 
                     md.append(line)
                     printed += 1
@@ -893,7 +980,6 @@ else:
                 res = {"prob_trigger_next_6h": 0.0}
             md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
 
-        # Optional note about feature coverage when rich is enabled
         if use_rich and not nonzero_seen:
             md.append("_(rich features had zero coverage; fell back to defaults internally)_")
 
