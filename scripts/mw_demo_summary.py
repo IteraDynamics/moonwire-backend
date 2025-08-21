@@ -874,7 +874,7 @@ else:
             for r in _vr.get("origins", []) or []:
                 o = r.get("origin")
                 if o:
-                    regimes_map[o] = {"regime": (r.get("regime") or "normal")}
+                    regimes_map[o] = (r.get("regime") or "normal")
         except Exception:
             regimes_map = {}
 
