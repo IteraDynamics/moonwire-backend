@@ -33,14 +33,45 @@ class TrainOutputs:
     demo: bool
 
 
-def _mk_arrays(rows: List[Dict[str, Any]], feat_order: List[str]) -> Tuple[np.ndarray, np.ndarray]:
-    X: List[List[float]] = []
-    y: List[int] = []
+def _mk_arrays(rows: List[Any], feat_order: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Tolerant converter:
+      - dict rows with {"features": {...}, "label": 0/1} OR {"x":[...], "y":0/1}
+      - object rows with attributes .x (list/array) and .y (int)
+    """
+    X_list: List[List[float]] = []
+    y_list: List[int] = []
+
     for r in rows:
-        f = r.get("features", {}) or {}
-        X.append([float(f.get(k, 0.0) or 0.0) for k in feat_order])
-        y.append(int(r.get("label", 0)))
-    return np.array(X, dtype=float), np.array(y, dtype=int)
+        # Object form: e.g., FeatureRow(ts, origin, x, y)
+        if hasattr(r, "x") and hasattr(r, "y"):
+            xvec = [float(v) for v in list(getattr(r, "x"))]
+            X_list.append(xvec)
+            y_list.append(int(getattr(r, "y")))
+            continue
+
+        # Dict form with explicit vector
+        if isinstance(r, dict) and "x" in r and "y" in r:
+            xvec = [float(v) for v in list(r.get("x") or [])]
+            X_list.append(xvec)
+            y_list.append(int(r.get("y", 0)))
+            continue
+
+        # Dict form with feature map + label
+        if isinstance(r, dict):
+            f = r.get("features", {}) or {}
+            xvec = [float(f.get(k, 0.0) or 0.0) for k in feat_order]
+            yval = r.get("label", r.get("y", 0))
+            X_list.append(xvec)
+            y_list.append(int(yval))
+            continue
+
+        # Fallback (shouldn’t happen): skip row
+        continue
+
+    X = np.array(X_list, dtype=float)
+    y = np.array(y_list, dtype=int)
+    return X, y
 
 
 def _compute_coverage_from_X(X: np.ndarray, feat_order: List[str]) -> Dict[str, Dict[str, float]]:
