@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass  # kept for potential external use
+from dataclasses import asdict, dataclass  # reserved for external use if needed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -18,7 +18,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-# IMPORTANT: import the module, not copied constants (monkeypatch-friendly)
+# Import the module (not constants) so tests can monkeypatch attributes safely
 from src import paths
 from src.ml.feature_builder import build_examples, synth_demo_dataset
 
@@ -66,7 +66,7 @@ def _mk_arrays(rows: List[Any], feat_order: List[str]) -> Tuple[np.ndarray, np.n
             y_list.append(int(yval))
             continue
 
-        # Fallback (shouldn’t happen): skip row
+        # Fallback: skip row
         continue
 
     X = np.array(X_list, dtype=float)
@@ -110,16 +110,59 @@ def _git_sha() -> str | None:
         return None
 
 
+def _time_aware_cut_with_two_classes(y: np.ndarray, base_cut: int) -> int:
+    """
+    Choose a time-aware cut such that the training slice y[:cut]
+    contains both classes (0 and 1) when the overall dataset has both.
+
+    We start from base_cut (~80% of n), then:
+      - ensure cut >= minimal index that includes the first instance of each class
+      - if still single-class, expand cut forward until we include the missing class
+      - keep at least 1 sample for validation when n > 1
+    """
+    n = int(y.shape[0])
+    if n <= 1:
+        return 1 if n == 1 else 0
+
+    cut = min(max(1, base_cut), n - 1)
+    classes_all = set(int(v) for v in y.tolist())
+    if len(classes_all) < 2:
+        # Only one class overall — nothing we can do here
+        return cut
+
+    # First occurrence for each class
+    first_idx = {}
+    for cls in (0, 1):
+        idxs = np.where(y == cls)[0]
+        first_idx[cls] = int(idxs[0]) if idxs.size else None
+
+    # Minimal cut to include first instance of both classes
+    if first_idx[0] is not None and first_idx[1] is not None:
+        min_cut = max(first_idx[0], first_idx[1]) + 1
+        cut = max(cut, min_cut)
+        cut = min(cut, n - 1)
+
+    # If still single-class, expand forward
+    if len(set(int(v) for v in y[:cut].tolist())) < 2:
+        for i in range(cut, n - 1):
+            cut = i + 1
+            if len(set(int(v) for v in y[:cut].tolist())) >= 2:
+                break
+        cut = min(cut, n - 1)
+
+    return cut
+
+
 def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -> Dict[str, Any]:
     # Use paths.MODELS_DIR unless an explicit out_dir was provided (monkeypatch-friendly)
     out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute log file paths at call time from the CURRENT LOGS_DIR (monkeypatch-friendly)
+    # Compute log file paths at call time from CURRENT paths.LOGS_DIR
     flags_path = paths.LOGS_DIR / "retraining_log.jsonl"
     triggers_path = paths.LOGS_DIR / "retraining_triggered.jsonl"
 
-    # Build examples from those paths
+    # Build examples
     rows, feat_order = build_examples(
         flags_path,
         triggers_path,
@@ -135,19 +178,22 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
 
-    # Arrays + coverage (coverage over the full dataset used for training)
+    # Arrays + coverage (over the full training dataset)
     X, y = _mk_arrays(rows, feat_order)
     coverage = _compute_coverage_from_X(X, feat_order)
 
-    # Simple time-aware split: first 80% train, last 20% validate
+    # Time-aware split with safeguard for two classes in train (when possible)
     n = int(X.shape[0])
-    cut = max(1, int(0.8 * n))
-    if n > 1:
-        Xtr, ytr = X[:cut], y[:cut]
-        Xva, yva = X[cut:], y[cut:]
-    else:
+    if n == 1:
         Xtr, ytr = X, y
         Xva, yva = X, y
+    else:
+        base_cut = int(0.8 * n)
+        cut = _time_aware_cut_with_two_classes(y, base_cut)
+        # keep at least 1 validation sample when n > 1
+        cut = min(max(1, cut), n - 1)
+        Xtr, ytr = X[:cut], y[:cut]
+        Xva, yva = X[cut:], y[cut:]
 
     clf = LogisticRegression(
         solver="liblinear",
