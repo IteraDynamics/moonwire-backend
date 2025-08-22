@@ -104,3 +104,19 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
     if explain:
         out["contributions"] = _contributions(model, x, feat_order, top_n=top_n)
     return out
+
+# --- Back-compat shim for tests & callers expecting `score` ---
+def score(payload: dict, explain: bool = False):
+    """
+    Backward-compatible alias for infer_score.
+    Tests import `from src.ml.infer import score`, so keep this symbol.
+    """
+    return infer_score(payload, explain=explain)
+
+# Optional: make exports explicit
+__all__ = [
+    "infer_score",
+    "score",
+    "model_metadata",  # if you expose this helper
+]
+
