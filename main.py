@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.paths import LOGS_DIR, REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
 
 # Ensure logging directory exists at boot
-os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)  
 
 print("📁 Log directory initialized:")
 print(f"  - Impact log path: {REVIEWER_IMPACT_LOG_PATH}")
@@ -107,7 +107,7 @@ app.include_router(lead_lag_router, prefix="/internal")
 app.include_router(burst_detection_router)
 app.include_router(volatility_regimes_router)
 app.include_router(nowcast_router)
-app.include_router(trigger_likelihood_router)
+app.include_router(trigger_likelihood_router, prefix="/internal")
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():

@@ -25,12 +25,14 @@ from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 
-# ML inference (safe if artifacts missing; we'll guard in code)
+# ---- ML (trigger likelihood) import guard ----
+_ML_OK = False
+_ML_ERR = None
 try:
-    from src.ml.infer import score as infer_score, metadata as model_metadata
+    from src.ml.infer import score as infer_score, model_metadata
     _ML_OK = True
-except Exception:
-    _ML_OK = False
+except Exception as e:
+    _ML_ERR = f"{type(e).__name__}: {e}"
 
 
 
@@ -779,10 +781,19 @@ except Exception as e:
 
 
 # ---------- trigger likelihood v0 ----------
+# ---------- trigger likelihood v0 ----------
 md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+
+# Last-chance lazy import (in case top-level ran before PYTHONPATH was set)
 if not _ML_OK:
-    md.append("_Model unavailable in this build._")
+    try:
+        from src.ml.infer import score as infer_score, model_metadata
+        _ML_OK = True
+        _ML_ERR = None
+    except Exception as e:
+        _ML_ERR = f"{type(e).__name__}: {e}"
 else:
+    # ... keep the rest of your section exactly as-is (metadata line, rich features, scoring, etc.)
     # -- metadata line
     try:
         _meta = model_metadata()
@@ -1034,6 +1045,28 @@ else:
 
     except Exception:
         md.append("_No score available._")
+
+
+    # ---- small interpretability/coverage sub-block ----
+    try:
+        _m = model_metadata()
+        tfeat = _m.get("top_features") or []
+        covsum = _m.get("feature_coverage_summary") or _m.get("feature_coverage") or {}
+        low_cov = []
+        # Prefer summary (pct only); fall back to full coverage json
+        if isinstance(covsum, dict):
+            for k, v in list(covsum.items())[:]:
+                pct = float(v if isinstance(v, (int, float)) else v.get("nonzero_pct", 0.0))
+                if pct < 5.0:
+                    low_cov.append(k)
+        if tfeat:
+            md.append("\n_top learned features_: " + ", ".join(f"{d['feature']}({d['coef']:+.2f})" for d in tfeat))
+        if low_cov:
+            md.append("_low coverage_: " + ", ".join(sorted(set(low_cov))[:5]))
+    except Exception:
+        pass
+
+
 
 
 
