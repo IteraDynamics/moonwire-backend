@@ -107,7 +107,7 @@ app.include_router(lead_lag_router, prefix="/internal")
 app.include_router(burst_detection_router)
 app.include_router(volatility_regimes_router)
 app.include_router(nowcast_router)
-app.include_router(trigger_likelihood_router)
+app.include_router(trigger_likelihood_router, prefix="/internal")
 
 @app.head("/ping", include_in_schema=False)
 async def ping_head():
