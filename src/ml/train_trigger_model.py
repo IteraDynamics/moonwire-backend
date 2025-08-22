@@ -1,125 +1,185 @@
+# src/ml/train_trigger_model.py
 from __future__ import annotations
-import json, os, random
-from pathlib import Path
+
+import json
+import os
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Dict, Any, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 import joblib
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, average_precision_score, log_loss, brier_score_loss
+from sklearn.metrics import (
+    roc_auc_score,
+    average_precision_score,
+    log_loss,
+    brier_score_loss,
+)
 
+from src.paths import (
+    LOGS_DIR,
+    MODELS_DIR,
+    RETRAINING_LOG_PATH,
+    RETRAINING_TRIGGERED_LOG_PATH,
+)
 from src.ml.feature_builder import build_examples, synth_demo_dataset
-import src.paths as paths  # use live module attributes so monkeypatch works
-
-MODEL_NAME = "trigger_likelihood_v0"
 
 
-def _prepare_xy(rows) -> Tuple[np.ndarray, np.ndarray]:
-    X = np.array([r.x for r in rows], dtype=float)
-    y = np.array([r.y for r in rows], dtype=int)
-    return X, y
+@dataclass
+class TrainOutputs:
+    model_path: Path
+    meta_path: Path
+    coverage_path: Path
+    metrics: Dict[str, Any]
+    feature_order: List[str]
+    demo: bool
+
+
+def _mk_arrays(rows: List[Dict[str, Any]], feat_order: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+    X = []
+    y = []
+    for r in rows:
+        f = r.get("features", {}) or {}
+        X.append([float(f.get(k, 0.0) or 0.0) for k in feat_order])
+        y.append(int(r.get("label", 0)))
+    return np.array(X, dtype=float), np.array(y, dtype=int)
+
+
+def _compute_coverage_from_X(X: np.ndarray, feat_order: List[str]) -> Dict[str, Dict[str, float]]:
+    n = float(X.shape[0]) if X.size else 1.0
+    out: Dict[str, Dict[str, float]] = {}
+    if X.size == 0:
+        for k in feat_order:
+            out[k] = {"nonzero_pct": 0.0, "mean": 0.0, "min": 0.0, "max": 0.0}
+        return out
+    for i, k in enumerate(feat_order):
+        col = X[:, i]
+        nonzero = float(np.count_nonzero(col)) / n * 100.0
+        out[k] = {
+            "nonzero_pct": float(nonzero),
+            "mean": float(np.mean(col)),
+            "min": float(np.min(col)),
+            "max": float(np.max(col)),
+        }
+    return out
+
+
+def _top_coefficients(model: LogisticRegression, feat_order: List[str], top: int = 5) -> List[Dict[str, float]]:
+    if not hasattr(model, "coef_") or model.coef_ is None:
+        return []
+    coef = model.coef_.ravel().tolist()
+    pairs = list(zip(feat_order, coef))
+    pairs.sort(key=lambda kv: abs(kv[1]), reverse=True)
+    return [{"feature": k, "coef": float(v)} for k, v in pairs[:top]]
+
+
+def _git_sha() -> str | None:
+    try:
+        # Lightweight attempt; OK if it fails in CI
+        import subprocess
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        return sha
+    except Exception:
+        return None
 
 
 def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -> Dict[str, Any]:
-    # Use paths.MODELS_DIR unless an explicit out_dir was provided
-    out_dir = out_dir or paths.MODELS_DIR
+    out_dir = out_dir or MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build example paths from the CURRENT LOGS_DIR (monkeypatch-friendly)
-    flags_path = paths.LOGS_DIR / "retraining_log.jsonl"
-    triggers_path = paths.LOGS_DIR / "retraining_triggered.jsonl"
+    rows, feat_order = build_examples(
+        RETRAINING_LOG_PATH,
+        RETRAINING_TRIGGERED_LOG_PATH,
+        days=days,
+        interval=interval,
+    )
 
-    rows, feat_order = build_examples(flags_path, triggers_path, days=days, interval=interval)
-    meta_extras: Dict[str, Any] = {}
-
-    # If no rows, allow DEMO_MODE to seed
+    demo_used = False
     if not rows and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
-        rows, feat_order, meta_extras = synth_demo_dataset()
+        rows, feat_order, _meta_extras = synth_demo_dataset()
+        demo_used = True
 
-    # If still no rows → hard fail (keeps behavior when DEMO_MODE is off)
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
 
-    # --- Guard 1: single-class dataset → augment minimally with demo rows
-    y_all = np.array([r.y for r in rows], dtype=int)
-    if len(np.unique(y_all)) < 2:
-        demo_rows, _, _ = synth_demo_dataset()
-        random.seed(42)
-        # Pick a small deterministic slice spread across time
-        # Take every 10th sample from the first ~300 demo rows to include some positives
-        demo_slice = [demo_rows[i] for i in range(0, min(300, len(demo_rows)), 10)]
-        rows = rows + demo_slice
-        meta_extras["augmented_single_class"] = True
+    # Arrays
+    X, y = _mk_arrays(rows, feat_order)
 
-    # Time-aware split (sort by timestamp)
-    rows.sort(key=lambda r: r.ts)
-    n = len(rows)
-    split = max(int(n * 0.8), 1)
+    # Compute coverage prior to any split (summary of the dataset used to train)
+    coverage = _compute_coverage_from_X(X, feat_order)
 
-    # --- Guard 2: if training fold is still single-class, slide the split forward
-    def has_two_classes(arr: np.ndarray) -> bool:
-        return len(np.unique(arr)) >= 2
+    # Simple time-aware split: first 80% train, last 20% valid
+    n = X.shape[0]
+    cut = max(1, int(0.8 * n))
+    Xtr, ytr = X[:cut], y[:cut]
+    Xva, yva = X[cut:], y[cut:] if n > 1 else (X[:], y[:])
 
-    y_all = np.array([r.y for r in rows], dtype=int)
-    if not has_two_classes(y_all[:split]) and has_two_classes(y_all):
-        # Move split boundary forward until the train fold contains both classes,
-        # while preserving time order. Cap at n-1 to keep a non-empty val fold.
-        while split < n - 1 and not has_two_classes(y_all[:split]):
-            split += 1
-        meta_extras["split_adjusted_for_class_balance"] = True
-
-    tr, va = rows[:split], rows[split:]
-
-    Xtr, ytr = _prepare_xy(tr)
-    if len(va) > 0:
-        Xva = np.array([r.x for r in va], dtype=float)
-        yva = np.array([r.y for r in va], dtype=int)
-    else:
-        Xva = np.empty((0, Xtr.shape[1])); yva = np.empty((0,), dtype=int)
-
-    clf = LogisticRegression(max_iter=2000, class_weight="balanced", solver="liblinear")
+    clf = LogisticRegression(
+        solver="liblinear",
+        class_weight="balanced",
+        max_iter=2000,
+        n_jobs=None,
+    )
     clf.fit(Xtr, ytr)
 
-    p_tr = clf.predict_proba(Xtr)[:, 1]
-    metrics = {
-        "roc_auc_tr": float(roc_auc_score(ytr, p_tr)),
-        "pr_auc_tr": float(average_precision_score(ytr, p_tr)),
-        "logloss_tr": float(log_loss(ytr, p_tr, labels=[0, 1])),
-        "brier_tr": float(brier_score_loss(ytr, p_tr)),
-    }
-    if len(va) > 0:
-        p_va = clf.predict_proba(Xva)[:, 1]
-        metrics.update({
-            "roc_auc_va": float(roc_auc_score(yva, p_va)),
-            "pr_auc_va": float(average_precision_score(yva, p_va)),
-            "logloss_va": float(log_loss(yva, p_va, labels=[0, 1])),
-            "brier_va": float(brier_score_loss(yva, p_va)),
-        })
+    def _safe_metric(fn, y_true, y_pred, default: float = 0.0) -> float:
+        try:
+            return float(fn(y_true, y_pred))
+        except Exception:
+            return default
 
-    model_path = out_dir / f"{MODEL_NAME}.joblib"
+    # Predict probabilities
+    p_tr = clf.predict_proba(Xtr)[:, 1] if Xtr.size else np.array([])
+    p_va = clf.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
+
+    metrics = {
+        "roc_auc_tr": _safe_metric(roc_auc_score, ytr, p_tr, 0.5),
+        "roc_auc_va": _safe_metric(roc_auc_score, yva, p_va, 0.5),
+        "pr_auc_tr": _safe_metric(average_precision_score, ytr, p_tr, 0.0),
+        "pr_auc_va": _safe_metric(average_precision_score, yva, p_va, 0.0),
+        "logloss_tr": _safe_metric(log_loss, ytr, p_tr, 0.0),
+        "logloss_va": _safe_metric(log_loss, yva, p_va, 0.0),
+        "brier_tr": _safe_metric(brier_score_loss, ytr, p_tr, 0.0),
+        "brier_va": _safe_metric(brier_score_loss, yva, p_va, 0.0),
+    }
+
+    # Persist artifacts
+    model_path = out_dir / "trigger_likelihood_v0.joblib"
+    meta_path = out_dir / "trigger_likelihood_v0.meta.json"
+    coverage_path = out_dir / "feature_coverage.json"
+
     joblib.dump(clf, model_path)
 
-    meta = {
-        "model_name": MODEL_NAME,
+    # Save coverage JSON
+    with coverage_path.open("w") as f:
+        json.dump(coverage, f, indent=2)
+
+    # Prepare meta
+    meta: Dict[str, Any] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "git_sha": os.getenv("GITHUB_SHA", ""),
+        "git_sha": _git_sha(),
         "feature_order": feat_order,
         "metrics": metrics,
-        "demo": bool(meta_extras.get("demo", False)),
-        "notes": [k for k, v in meta_extras.items() if v],
+        "demo": bool(demo_used),
+        "artifacts": {
+            "model": str(model_path),
+            "feature_coverage": str(coverage_path),
+        },
+        # Save top-5 coefficients at train time for convenience
+        "top_features": _top_coefficients(clf, feat_order, top=5),
+        # Small inline coverage summary: keep just nonzero_pct to avoid bloat
+        "feature_coverage_summary": {k: round(v.get("nonzero_pct", 0.0), 2) for k, v in coverage.items()},
     }
-    (out_dir / f"{MODEL_NAME}.meta.json").write_text(json.dumps(meta, indent=2))
 
-    return {"model_path": str(model_path), "meta": meta}
+    with meta_path.open("w") as f:
+        json.dump(meta, f, indent=2)
 
-
-if __name__ == "__main__":
-    import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=14)
-    ap.add_argument("--interval", type=str, default="hour")
-    ap.add_argument("--out_dir", type=str, default=None)
-    args = ap.parse_args()
-    out = train(days=args.days, interval=args.interval, out_dir=Path(args.out_dir) if args.out_dir else None)
-    print(json.dumps(out, indent=2))
+    return {
+        "model_path": str(model_path),
+        "meta_path": str(meta_path),
+        "coverage_path": str(coverage_path),
+        "metrics": metrics,
+        "demo": demo_used,
+    }
