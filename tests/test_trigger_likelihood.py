@@ -75,3 +75,54 @@ def test_api_and_demo(tmp_path: Path, monkeypatch):
     data = r.json()
     assert "prob_trigger_next_6h" in data and 0.0 <= data["prob_trigger_next_6h"] <= 1.0
     assert data.get("demo", False) in (True, False)
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import json
+import os
+
+from fastapi.testclient import TestClient
+
+from src import paths
+from src.main import app
+from src.ml.train_trigger_model import train
+
+
+def _j(x): return json.dumps(x)
+
+def test_explain_returns_sorted_contribs(tmp_path: Path, monkeypatch):
+    # Ensure a model exists (train on demo if needed)
+    monkeypatch.setattr(paths, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setenv("DEMO_MODE", "true")
+    (tmp_path / "models").mkdir(parents=True, exist_ok=True)
+    # Minimal train to materialize artifacts
+    train(days=1, interval="hour", out_dir=tmp_path / "models")
+
+    client = TestClient(app)
+    payload = {"features": {"burst_z": 2.0, "count_6h": 4.0}}
+    res = client.post("/internal/trigger-likelihood/score?explain=true&top_n=3", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+    contrib = data.get("contributions")
+    assert isinstance(contrib, dict) and len(contrib) >= 1
+    # contributions should be sorted by |value| desc (top_n applied)
+    vals = list(contrib.values())
+    assert vals == sorted(vals, key=lambda v: abs(v), reverse=True)
+
+
+def test_metadata_includes_coverage_and_top_features(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(paths, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setenv("DEMO_MODE", "true")
+    (tmp_path / "models").mkdir(parents=True, exist_ok=True)
+    train(days=1, interval="hour", out_dir=tmp_path / "models")
+
+    client = TestClient(app)
+    res = client.get("/internal/trigger-likelihood/metadata")
+    assert res.status_code == 200
+    meta = res.json()
+    assert "metrics" in meta
+    assert "feature_order" in meta
+    # coverage available either as summary or full map
+    assert ("feature_coverage_summary" in meta) or ("feature_coverage" in meta)
+    assert "top_features" in meta and isinstance(meta["top_features"], list)
+
