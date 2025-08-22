@@ -4,7 +4,7 @@ from typing import Dict, Any
 
 from src.ml.infer import score as infer_score, metadata as infer_metadata
 
-router = APIRouter(prefix="/internal", tags=["internal"])
+router = APIRouter()
 
 @router.post("/trigger-likelihood/score")
 def trigger_likelihood_score(body: Dict[str, Any]):
