@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass  # (kept for compatibility if you use TrainOutputs later)
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -12,18 +12,14 @@ import joblib
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    roc_auc_score,
     average_precision_score,
-    log_loss,
     brier_score_loss,
+    log_loss,
+    roc_auc_score,
 )
 
-from src.paths import (
-    LOGS_DIR,
-    MODELS_DIR,
-    RETRAINING_LOG_PATH,
-    RETRAINING_TRIGGERED_LOG_PATH,
-)
+# IMPORTANT: import the module, not copied constants (monkeypatch-friendly)
+from src import paths
 from src.ml.feature_builder import build_examples, synth_demo_dataset
 
 
@@ -38,8 +34,8 @@ class TrainOutputs:
 
 
 def _mk_arrays(rows: List[Dict[str, Any]], feat_order: List[str]) -> Tuple[np.ndarray, np.ndarray]:
-    X = []
-    y = []
+    X: List[List[float]] = []
+    y: List[int] = []
     for r in rows:
         f = r.get("features", {}) or {}
         X.append([float(f.get(k, 0.0) or 0.0) for k in feat_order])
@@ -77,44 +73,46 @@ def _top_coefficients(model: LogisticRegression, feat_order: List[str], top: int
 
 def _git_sha() -> str | None:
     try:
-        # Lightweight attempt; OK if it fails in CI
         import subprocess
-        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-        return sha
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     except Exception:
         return None
 
 
 def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -> Dict[str, Any]:
-    out_dir = out_dir or MODELS_DIR
+    # Use paths.MODELS_DIR unless an explicit out_dir was provided (monkeypatch-friendly)
+    out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Build examples from CURRENT paths module attributes (play nice with tests)
     rows, feat_order = build_examples(
-        RETRAINING_LOG_PATH,
-        RETRAINING_TRIGGERED_LOG_PATH,
+        paths.RETRAINING_LOG_PATH,
+        paths.RETRAINING_TRIGGERED_LOG_PATH,
         days=days,
         interval=interval,
     )
 
     demo_used = False
     if not rows and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
-        rows, feat_order, _meta_extras = synth_demo_dataset()
+        rows, feat_order, _ = synth_demo_dataset()
         demo_used = True
 
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
 
-    # Arrays
+    # Arrays + coverage (coverage over the full dataset used for training)
     X, y = _mk_arrays(rows, feat_order)
-
-    # Compute coverage prior to any split (summary of the dataset used to train)
     coverage = _compute_coverage_from_X(X, feat_order)
 
-    # Simple time-aware split: first 80% train, last 20% valid
-    n = X.shape[0]
+    # Simple time-aware split: first 80% train, last 20% validate
+    n = int(X.shape[0])
     cut = max(1, int(0.8 * n))
-    Xtr, ytr = X[:cut], y[:cut]
-    Xva, yva = X[cut:], y[cut:] if n > 1 else (X[:], y[:])
+    if n > 1:
+        Xtr, ytr = X[:cut], y[:cut]
+        Xva, yva = X[cut:], y[cut:]
+    else:
+        Xtr, ytr = X, y
+        Xva, yva = X, y
 
     clf = LogisticRegression(
         solver="liblinear",
@@ -152,11 +150,9 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
 
     joblib.dump(clf, model_path)
 
-    # Save coverage JSON
     with coverage_path.open("w") as f:
         json.dump(coverage, f, indent=2)
 
-    # Prepare meta
     meta: Dict[str, Any] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": _git_sha(),
@@ -167,9 +163,7 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
             "model": str(model_path),
             "feature_coverage": str(coverage_path),
         },
-        # Save top-5 coefficients at train time for convenience
         "top_features": _top_coefficients(clf, feat_order, top=5),
-        # Small inline coverage summary: keep just nonzero_pct to avoid bloat
         "feature_coverage_summary": {k: round(v.get("nonzero_pct", 0.0), 2) for k, v in coverage.items()},
     }
 
