@@ -1,14 +1,13 @@
 import json, os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 import numpy as np
 from fastapi.testclient import TestClient
-
 from main import app
 import src.paths as paths
 from src.ml.train_trigger_model import train
 from src.ml.infer import score as infer_score
+
 
 def _j(d): return json.dumps(d, separators=(",", ":"))
 def _log(ts, origin): return {"timestamp": ts.isoformat(), "origin": origin}
@@ -75,18 +74,6 @@ def test_api_and_demo(tmp_path: Path, monkeypatch):
     data = r.json()
     assert "prob_trigger_next_6h" in data and 0.0 <= data["prob_trigger_next_6h"] <= 1.0
     assert data.get("demo", False) in (True, False)
-
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-import json
-import os
-
-from fastapi.testclient import TestClient
-
-from src import paths
-from src.main import app
-from src.ml.train_trigger_model import train
-
 
 def _j(x): return json.dumps(x)
 
