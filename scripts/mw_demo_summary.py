@@ -1036,6 +1036,28 @@ else:
         md.append("_No score available._")
 
 
+    # ---- small interpretability/coverage sub-block ----
+    try:
+        _m = model_metadata()
+        tfeat = _m.get("top_features") or []
+        covsum = _m.get("feature_coverage_summary") or _m.get("feature_coverage") or {}
+        low_cov = []
+        # Prefer summary (pct only); fall back to full coverage json
+        if isinstance(covsum, dict):
+            for k, v in list(covsum.items())[:]:
+                pct = float(v if isinstance(v, (int, float)) else v.get("nonzero_pct", 0.0))
+                if pct < 5.0:
+                    low_cov.append(k)
+        if tfeat:
+            md.append("\n_top learned features_: " + ", ".join(f"{d['feature']}({d['coef']:+.2f})" for d in tfeat))
+        if low_cov:
+            md.append("_low coverage_: " + ", ".join(sorted(set(low_cov))[:5]))
+    except Exception:
+        pass
+
+
+
+
 
 
 
