@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.paths import LOGS_DIR, REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
 
 # Ensure logging directory exists at boot
-os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)  
 
 print("📁 Log directory initialized:")
 print(f"  - Impact log path: {REVIEWER_IMPACT_LOG_PATH}")
