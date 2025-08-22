@@ -25,12 +25,15 @@ from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 
-# ML inference (safe if artifacts missing; we'll guard in code)
+# ---- ML (trigger likelihood) import guard ----
+_ML_OK = False
+_ML_ERR = None
 try:
+    # expose exactly these names for the summary section
     from src.ml.infer import score as infer_score, metadata as model_metadata
     _ML_OK = True
-except Exception:
-    _ML_OK = False
+except Exception as e:
+    _ML_ERR = f"{type(e).__name__}: {e}"
 
 
 
@@ -779,10 +782,25 @@ except Exception as e:
 
 
 # ---------- trigger likelihood v0 ----------
+# ---------- trigger likelihood v0 ----------
 md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+
+# Last-chance lazy import (in case top-level ran before PYTHONPATH was set)
+if not _ML_OK:
+    try:
+        from src.ml.infer import score as infer_score, metadata as model_metadata
+        _ML_OK = True
+        _ML_ERR = None
+    except Exception as e:
+        _ML_ERR = f"{type(e).__name__}: {e}"
+
 if not _ML_OK:
     md.append("_Model unavailable in this build._")
+    # Optional hint only when DEMO_MODE=true
+    if os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes") and _ML_ERR:
+        md.append(f"_hint: {_ML_ERR}_")
 else:
+    # ... keep the rest of your section exactly as-is (metadata line, rich features, scoring, etc.)
     # -- metadata line
     try:
         _meta = model_metadata()
