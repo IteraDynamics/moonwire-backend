@@ -1068,6 +1068,32 @@ else:
 
 
 
+# ---------- drift check ----------
+try:
+    from src.ml.drift import compute_drift
+    drift = compute_drift(hours=24, interval="hour", top=3)
+    md.append("\n### 🔎 Drift Check (features)")
+    if not drift.get("features"):
+        md.append("_No drift detected._")
+    else:
+        for f in drift["features"]:
+            k = f["feature"]; d = f["delta_mean"]; p = f["p_recent_nonzero"]; q = f["p_train_nonzero"]; sc = f["score"]
+            md.append(f"- {k}: Δmean={d:.2f}, nz% {p*100:.0f}→{q*100:.0f}, score={sc:.2f}")
+except Exception as e:
+    md.append(f"\n_⚠️ Drift check failed: {e}_")
+
+# ---------- live backtest ----------
+try:
+    from src.ml.infer import live_backtest_last_24h
+    lb = live_backtest_last_24h(interval="hour", threshold=0.5)
+    md.append("\n### 🧪 Live Backtest (24h)")
+    o = lb.get("overall", {})
+    md.append(f"- overall: precision={o.get('precision',0):.2f} | recall={o.get('recall',0):.2f} (tp={o.get('tp',0)}, fp={o.get('fp',0)}, fn={o.get('fn',0)})")
+    for po in (lb.get("per_origin") or [])[:3]:
+        md.append(f"- {po['origin']}: precision={po['precision']:.2f} | recall={po['recall']:.2f}")
+except Exception as e:
+    md.append(f"\n_⚠️ Live backtest failed: {e}_")
+
 
 
 
