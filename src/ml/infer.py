@@ -1,14 +1,16 @@
 # src/ml/infer.py
 from __future__ import annotations
-
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-
 import joblib
 import numpy as np
-
 from src.paths import MODELS_DIR
+from datetime import datetime, timedelta, timezone
+from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+from src.analytics.origin_utils import normalize_origin as _norm
+
+
 
 _MODEL_NAME = "trigger_likelihood_v0.joblib"
 _META_NAME = "trigger_likelihood_v0.meta.json"
@@ -120,3 +122,71 @@ __all__ = [
     "model_metadata",  # if you expose this helper
 ]
 
+# --- Online inference / live backtest (last 24h) ----------------------------
+def _load_jsonl(path) -> List[dict]:
+    try:
+        return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    except Exception:
+        return []
+
+def _parse_ts(v):
+    try:
+        return datetime.fromtimestamp(float(v), tz=timezone.utc)
+    except Exception:
+        try:
+            s = str(v); s = s[:-1] + "+00:00" if s.endswith("Z") else s
+            return datetime.fromisoformat(s).astimezone(timezone.utc)
+        except Exception:
+            return None
+
+def _label_has_trigger_between(triggers, origin: str, t0: datetime, t1: datetime) -> int:
+    o = _norm(origin)
+    for r in triggers:
+        if _norm(r.get("origin","")) != o: continue
+        ts = _parse_ts(r.get("timestamp"))
+        if ts and t0 < ts <= t1:
+            return 1
+    return 0
+
+def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Dict[str, Any]:
+    """Score each origin at each hourly bucket over the last 24h and compute precision/recall snapshot."""
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    buckets = [now - timedelta(hours=i) for i in range(24, 0, -1)]  # 24 exclusive to now
+    flags = _load_jsonl(RETRAINING_LOG_PATH)
+    origins = sorted({ _norm(r.get("origin","unknown")) for r in flags if _parse_ts(r.get("timestamp")) and _parse_ts(r.get("timestamp")) >= now - timedelta(hours=24) }) or ["twitter","reddit","rss_news"]
+    triggers = _load_jsonl(RETRAINING_TRIGGERED_LOG_PATH)
+
+    preds: List[Tuple[float,int]] = []
+    per_origin = []
+
+    for o in origins[:10]:  # cap
+        tp=fp=fn=tn=0
+        for t in buckets:
+            t_iso = t.isoformat()
+            try:
+                p = score({"origin": o, "timestamp": t_iso}).get("prob_trigger_next_6h", 0.0)
+            except Exception:
+                p = 0.0
+            y = _label_has_trigger_between(triggers, o, t, t + timedelta(hours=6))
+            yhat = 1 if p >= threshold else 0
+            preds.append((p,y))
+            if   yhat==1 and y==1: tp+=1
+            elif yhat==1 and y==0: fp+=1
+            elif yhat==0 and y==1: fn+=1
+            else: tn+=1
+        prec = tp/float(tp+fp) if (tp+fp)>0 else 0.0
+        rec  = tp/float(tp+fn) if (tp+fn)>0 else 0.0
+        per_origin.append({"origin": o, "precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn})
+
+    # overall
+    tp=sum(po["tp"] for po in per_origin); fp=sum(po["fp"] for po in per_origin)
+    fn=sum(po["fn"] for po in per_origin); tn=sum(po["tn"] for po in per_origin)
+    prec = tp/float(tp+fp) if (tp+fp)>0 else 0.0
+    rec  = tp/float(tp+fn) if (tp+fn)>0 else 0.0
+
+    return {
+        "window_hours": 24,
+        "threshold": threshold,
+        "overall": {"precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn},
+        "per_origin": per_origin[:3],
+    }
