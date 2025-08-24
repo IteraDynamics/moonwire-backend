@@ -1119,7 +1119,7 @@ for it in _items:
     )
 
 # Only show material drift (score >= threshold), top 3
-_DRIFT_SCORE_MIN = 1.0
+_DRIFT_SCORE_MIN = 0.6  # was 1.0
 _top = [x for x in _norm_items if x["score"] >= _DRIFT_SCORE_MIN]
 _top.sort(key=lambda x: x["score"], reverse=True)
 _top = _top[:3]
@@ -1133,14 +1133,19 @@ else:
             f"nz% {round(x['nz_train'])}→{round(x['nz_live'])}, "
             f"score={round(x['score'], 2)}"
         )
-
+            
+            
+            
 # ---------- live backtest (polish) ----------
 md.append("\n### 🧪 Live Backtest (24h)")
 _bt = (locals().get("live_backtest") or locals().get("backtest") or {}) or {}
 
-# Optional: show decision threshold if provided by the backtest
+# Optional: show decision threshold from backtest, else env override for display
 try:
     _th = _bt.get("threshold")
+    if _th is None:
+        _th_env = os.getenv("TL_DECISION_THRESHOLD")
+        _th = float(_th_env) if _th_env is not None else None
     _th_str = f" @thr={float(_th):.2f}" if _th is not None else ""
 except Exception:
     _th_str = ""
@@ -1162,13 +1167,10 @@ for org, stats in sorted(_by_origin.items()):
     tp = int(stats.get("tp", 0) or 0)
     fp = int(stats.get("fp", 0) or 0)
     fn = int(stats.get("fn", 0) or 0)
-
-    # Skip empty rows; also skip 'unknown' if empty
     if (tp + fp + fn) == 0:
         continue
     if org == "unknown" and (tp + fp + fn) == 0:
         continue
-
     try:
         prec = float(stats.get("precision", 0.0) or 0.0)
         rec  = float(stats.get("recall", 0.0) or 0.0)
@@ -1178,7 +1180,12 @@ for org, stats in sorted(_by_origin.items()):
         continue
 
 if _printed == 0 and not _overall:
-    md.append("_No activity in the window._")
+    # Demo fallback to avoid an empty section in CI demo runs
+    if os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
+        md.append("- twitter: precision=0.50 | recall=0.33 (demo)")
+        md.append("- reddit: precision=0.40 | recall=0.25 (demo)")
+    else:
+        md.append("_No activity in the window._")
 
 
 
