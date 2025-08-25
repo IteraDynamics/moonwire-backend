@@ -31,16 +31,37 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
 
-      # --- Train trigger likelihood model (smoke) ---
-      - name: Train trigger likelihood model (smoke)
+      # --- Train trigger likelihood models (post-tests, demo-safe) ---
+      - name: Train trigger likelihood v0 (smoke)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"        # allow seeding if logs are empty in CI
+          DEMO_MODE: "true"    # allow seeding if logs are empty in CI
         run: |
-          python -m src.ml.train_trigger_model --days 14 --interval hour
-          echo "Models in ./models:"
-          ls -lah models || true
+          python - <<'PY'
+          from src.ml.train_trigger_model import train
+          out = train(days=14, interval="hour")
+          print("v0 trained:", out)
+          PY
+
+      - name: Train ensemble v0.3 (best-effort)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DEMO_MODE: "true"
+        run: |
+          python - <<'PY'
+          try:
+              from src.ml.train_trigger_ensemble import train_ensemble
+              meta = train_ensemble(days=14, interval="hour")
+              print("ensemble trained:", meta)
+          except Exception as e:
+              print("Ensemble training skipped:", e)
+          PY
+
+      - name: Show model dir (debug)
+        if: ${{ success() }}
+        run: ls -lah models || true
 
       - name: Upload model artifacts
         if: ${{ success() }}
@@ -50,6 +71,10 @@ jobs:
           path: |
             models/trigger_likelihood_v0.joblib
             models/trigger_likelihood_v0.meta.json
+            models/feature_coverage.json
+            models/trigger_likelihood_rf.joblib
+            models/trigger_likelihood_gb.joblib
+            models/ensemble_meta.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -62,9 +87,9 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"          # <- enable demo seeding when no reviewers present
-          MPLBACKEND: "Agg"          # <- safe, headless matplotlib backend
-          DEMO_RICH_SCORES: "true"   # turn on richer ML scoring (safe to omit = off)
+          DEMO_MODE: "true"          # enable demo seeding when logs are empty
+          MPLBACKEND: "Agg"          # headless matplotlib
+          DEMO_RICH_SCORES: "true"   # richer ML scoring block in summary
         run: python scripts/mw_demo_summary.py
 
       - name: Show artifacts (debug)
@@ -83,7 +108,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           cat artifacts/demo_summary.md >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload artifacts
+      - name: Upload demo summary artifacts
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
