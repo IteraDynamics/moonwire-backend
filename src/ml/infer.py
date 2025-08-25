@@ -16,6 +16,101 @@ _MODEL_NAME = "trigger_likelihood_v0.joblib"
 _META_NAME = "trigger_likelihood_v0.meta.json"
 _COV_NAME = "feature_coverage.json"
 
+# --- Ensemble artifacts (v0.3) ---
+_ENS_META = "trigger_ensemble.meta.json"
+
+def _load_ensemble(models_dir: Path | None = None):
+    md = models_dir or MODELS_DIR
+    meta_path = md / _ENS_META
+    if not meta_path.exists():
+        raise FileNotFoundError("Ensemble meta not found")
+    with meta_path.open("r") as f:
+        meta = json.load(f)
+    feat_order = meta.get("feature_order") or []
+    weights = meta.get("weights") or {}
+    boot = meta.get("bootstrap") or {}
+    # Load models referenced in meta
+    models = {}
+    for key, info in (meta.get("models") or {}).items():
+        p = Path(info.get("path", ""))
+        if not p.is_absolute():
+            p = md / p.name  # allow relative stored path
+        models[key] = joblib.load(p)
+    return models, feat_order, weights, boot, meta
+
+
+def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
+    """
+    Ensemble probability with confidence band.
+    Returns:
+      {
+        "prob_trigger_next_6h": float,
+        "low": float,
+        "high": float,
+        "votes": {"lr": float, "rf": float, "gb": float},
+        "demo": bool
+      }
+    """
+    # Prefer features payload (like your CI summary does)
+    feats = payload.get("features")
+    if feats is None:
+        # safe fallback if someone passes origin/timestamp
+        return {"prob_trigger_next_6h": 0.062, "low": 0.05, "high": 0.07, "votes": {}, "demo": True}
+
+    try:
+        models, feat_order, weights, boot, meta = _load_ensemble(models_dir)
+    except Exception:
+        # Demo fallback
+        burst = float(payload.get("features", {}).get("burst_z", 0.0))
+        base = 1.0 / (1.0 + np.exp(-0.8 * burst))
+        low, high = max(0.0, base - 0.1), min(1.0, base + 0.1)
+        return {"prob_trigger_next_6h": float(base), "low": float(low), "high": float(high), "votes": {}, "demo": True}
+
+    x = _vectorize(feats, feat_order)
+
+    def _proba(m, xrow):
+        if hasattr(m, "predict_proba"):
+            return float(m.predict_proba(xrow)[0, 1])
+        # logistic-compatible fallback
+        return float(_sigmoid(m.decision_function(xrow))[0])
+
+    votes = {}
+    for key, m in models.items():
+        try:
+            votes[key] = _proba(m, x)
+        except Exception:
+            votes[key] = 0.0
+
+    # weighted average (weights normalized at train-time)
+    p = 0.0
+    if weights:
+        for k, w in weights.items():
+            p += float(w) * float(votes.get(k, 0.0))
+    else:
+        # equal weight fallback
+        if votes:
+            p = float(sum(votes.values()) / max(1, len(votes)))
+        else:
+            p = 0.0
+
+    # confidence band: mean ± std from bootstrap meta (clamped)
+    std = float(boot.get("std", 0.1))
+    low = max(0.0, p - std)
+    high = min(1.0, p + std)
+
+    return {
+        "prob_trigger_next_6h": float(p),
+        "low": float(low),
+        "high": float(high),
+        "votes": {k: float(v) for k, v in votes.items()},
+        "demo": bool(meta.get("demo", False)),
+    }
+
+
+
+
+#######
+
 
 def _artifact_paths(models_dir: Path | None = None) -> Tuple[Path, Path, Path]:
     md = models_dir or MODELS_DIR
@@ -224,3 +319,11 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
         "overall": {"precision": round(prec, 3), "recall": round(rec, 3), "tp": tp, "fp": fp, "fn": fn, "tn": tn},
         "per_origin": per_origin[:3],
     }
+
+
+__all__ = [
+    "infer_score",
+    "infer_score_ensemble",
+    "score",
+    "model_metadata",
+]
