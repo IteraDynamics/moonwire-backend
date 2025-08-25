@@ -1,123 +1,34 @@
 # src/ml/infer.py
 from __future__ import annotations
-import os
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import joblib
 import numpy as np
-from src.paths import MODELS_DIR
 from datetime import datetime, timedelta, timezone
-from src.paths import RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+
+# IMPORTANT: import the module, not names, so monkeypatching works
+import src.paths as paths
 from src.analytics.origin_utils import normalize_origin as _norm
 
-
+# Filenames for logistic artifacts
 _MODEL_NAME = "trigger_likelihood_v0.joblib"
-_META_NAME = "trigger_likelihood_v0.meta.json"
-_COV_NAME = "feature_coverage.json"
+_META_NAME  = "trigger_likelihood_v0.meta.json"
+_COV_NAME   = "feature_coverage.json"
 
-# --- Ensemble artifacts (v0.3) ---
-_ENS_META = "trigger_ensemble.meta.json"
-
-def _load_ensemble(models_dir: Path | None = None):
-    md = models_dir or MODELS_DIR
-    meta_path = md / _ENS_META
-    if not meta_path.exists():
-        raise FileNotFoundError("Ensemble meta not found")
-    with meta_path.open("r") as f:
-        meta = json.load(f)
-    feat_order = meta.get("feature_order") or []
-    weights = meta.get("weights") or {}
-    boot = meta.get("bootstrap") or {}
-    # Load models referenced in meta
-    models = {}
-    for key, info in (meta.get("models") or {}).items():
-        p = Path(info.get("path", ""))
-        if not p.is_absolute():
-            p = md / p.name  # allow relative stored path
-        models[key] = joblib.load(p)
-    return models, feat_order, weights, boot, meta
+# (Optional) ensemble meta filename – used by the ensemble helper below
+_ENSEMBLE_META = "trigger_likelihood_ensemble.meta.json"
 
 
-def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
-    """
-    Ensemble probability with confidence band.
-    Returns:
-      {
-        "prob_trigger_next_6h": float,
-        "low": float,
-        "high": float,
-        "votes": {"lr": float, "rf": float, "gb": float},
-        "demo": bool
-      }
-    """
-    # Prefer features payload (like your CI summary does)
-    feats = payload.get("features")
-    if feats is None:
-        # safe fallback if someone passes origin/timestamp
-        return {"prob_trigger_next_6h": 0.062, "low": 0.05, "high": 0.07, "votes": {}, "demo": True}
-
-    try:
-        models, feat_order, weights, boot, meta = _load_ensemble(models_dir)
-    except Exception:
-        # Demo fallback
-        burst = float(payload.get("features", {}).get("burst_z", 0.0))
-        base = 1.0 / (1.0 + np.exp(-0.8 * burst))
-        low, high = max(0.0, base - 0.1), min(1.0, base + 0.1)
-        return {"prob_trigger_next_6h": float(base), "low": float(low), "high": float(high), "votes": {}, "demo": True}
-
-    x = _vectorize(feats, feat_order)
-
-    def _proba(m, xrow):
-        if hasattr(m, "predict_proba"):
-            return float(m.predict_proba(xrow)[0, 1])
-        # logistic-compatible fallback
-        return float(_sigmoid(m.decision_function(xrow))[0])
-
-    votes = {}
-    for key, m in models.items():
-        try:
-            votes[key] = _proba(m, x)
-        except Exception:
-            votes[key] = 0.0
-
-    # weighted average (weights normalized at train-time)
-    p = 0.0
-    if weights:
-        for k, w in weights.items():
-            p += float(w) * float(votes.get(k, 0.0))
-    else:
-        # equal weight fallback
-        if votes:
-            p = float(sum(votes.values()) / max(1, len(votes)))
-        else:
-            p = 0.0
-
-    # confidence band: mean ± std from bootstrap meta (clamped)
-    std = float(boot.get("std", 0.1))
-    low = max(0.0, p - std)
-    high = min(1.0, p + std)
-
-    return {
-        "prob_trigger_next_6h": float(p),
-        "low": float(low),
-        "high": float(high),
-        "votes": {k: float(v) for k, v in votes.items()},
-        "demo": bool(meta.get("demo", False)),
-    }
-
-
-
-
-#######
-
-
+# ---------------------- artifact helpers ----------------------
 def _artifact_paths(models_dir: Path | None = None) -> Tuple[Path, Path, Path]:
-    md = models_dir or MODELS_DIR
+    """Return (model_path, meta_path, coverage_path) for the logistic baseline."""
+    md = models_dir or paths.MODELS_DIR
     return md / _MODEL_NAME, md / _META_NAME, md / _COV_NAME
 
 
 def _load_model_and_meta(models_dir: Path | None = None):
+    """Load logistic model + meta (+ optional coverage)."""
     mpath, jpath, cpath = _artifact_paths(models_dir)
     model = joblib.load(mpath)
     with jpath.open("r") as f:
@@ -144,12 +55,9 @@ def model_metadata(models_dir: Path | None = None) -> Dict[str, Any]:
         return {}
 
 
+# ---------------------- scoring utilities ----------------------
 def _vectorize(features: Dict[str, Any], feat_order: List[str]) -> np.ndarray:
     return np.array([[float(features.get(k, 0.0) or 0.0) for k in feat_order]], dtype=float)
-
-
-def _sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-x))
 
 
 def _contributions(model, xrow: np.ndarray, feat_order: List[str], top_n: int | None) -> Dict[str, float]:
@@ -167,12 +75,18 @@ def _contributions(model, xrow: np.ndarray, feat_order: List[str], top_n: int | 
         return {}
 
 
-def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
+# ---------------------- main logistic scoring ----------------------
+def infer_score(
+    payload: Dict[str, Any],
+    *,
+    explain: bool = False,
+    top_n: int = 5,
+    models_dir: Path | None = None,
+) -> Dict[str, Any]:
     """
     Score either:
-      A) {"origin": "...", "timestamp": "..."}  -> (relies on upstream feature builder in your stack)
-      B) {"features": {...}}                    -> direct features dict
-    For CI summary we mostly use B).
+      A) {"origin": "...", "timestamp": "..."}  -> (kept as safe fallback)
+      B) {"features": {...}}                    -> direct features dict (what CI summary uses)
     """
     try:
         model, meta, _ = _load_model_and_meta(models_dir)
@@ -180,6 +94,7 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
         # Demo fallback when no artifacts present
         if payload.get("features"):
             feats = payload["features"]
+            # Simple synthetic mapping for demo
             p = 1 / (1 + np.exp(-0.1 * float(feats.get("burst_z", 0.0))))
             demo_res = {"prob_trigger_next_6h": float(p), "demo": True}
             if explain:
@@ -188,11 +103,15 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
         return {"prob_trigger_next_6h": 0.062, "demo": True}
 
     feat_order = meta.get("feature_order") or []
-    # Option A is not built out here—your summary already passes features.
+
     feats = payload.get("features")
     if feats is None:
         # Maintain compatibility: if only origin/timestamp supplied, return a safe value
-        return {"prob_trigger_next_6h": 0.062, "note": "origin path not wired in infer", "demo": meta.get("demo", False)}
+        return {
+            "prob_trigger_next_6h": 0.062,
+            "note": "origin path not wired in infer",
+            "demo": bool(meta.get("demo", False)),
+        }
 
     x = _vectorize(feats, feat_order)
     proba = float(model.predict_proba(x)[0, 1])
@@ -203,26 +122,86 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
     return out
 
 
-# --- Back-compat shim for tests & callers expecting `score` ---
+# Back-compat shim for tests & callers expecting `score`
 def score(payload: dict, explain: bool = False):
-    """
-    Backward-compatible alias for infer_score.
-    Tests import `from src.ml.infer import score`, so keep this symbol.
-    """
+    """Backward-compatible alias for infer_score."""
     return infer_score(payload, explain=explain)
 
 
-# Optional: make exports explicit
-__all__ = [
-    "infer_score",
-    "score",
-    "model_metadata",
-    "live_backtest_last_24h",
-]
+# ---------------------- ensemble scoring (safe fallback) ----------------------
+def infer_score_ensemble(
+    payload: Dict[str, Any],
+    *,
+    explain: bool = False,
+    top_n: int = 3,
+    models_dir: Path | None = None,
+) -> Dict[str, Any]:
+    """
+    Try to score via ensemble artifacts; if not present, fall back to logistic.
+    Returns:
+      {
+        "prob_trigger_next_6h": float,
+        "low": float|None,
+        "high": float|None,
+        "votes": {"logistic": p, "rf": p, "gb": p, ...}  # when available
+      }
+    """
+    md = models_dir or paths.MODELS_DIR
+    ens_meta_path = md / _ENSEMBLE_META
+
+    # If ensemble meta exists, try to use it (minimal reader).
+    # Otherwise, fall back to logistic scoring.
+    try:
+        if ens_meta_path.exists():
+            with ens_meta_path.open("r") as f:
+                emeta = json.load(f)
+            feat_order = emeta.get("feature_order") or []
+            feats = payload.get("features")
+            if feats is None:
+                # Keep the same safe default as logistic
+                return {"prob_trigger_next_6h": 0.062, "low": None, "high": None, "note": "origin path not wired"}
+
+            x = _vectorize(feats, feat_order)
+
+            votes: Dict[str, float] = {}
+            probs: List[float] = []
+
+            # Attempt to load each listed model; ignore any that fail
+            for name, rel_path in (emeta.get("models") or {}).items():
+                try:
+                    model = joblib.load(md / rel_path)
+                    p = float(model.predict_proba(x)[0, 1])
+                    votes[name] = p
+                    probs.append(p)
+                except Exception:
+                    continue
+
+            if probs:
+                p_mean = float(np.mean(probs))
+                # Confidence band from bootstrap std saved in meta (if present)
+                p_std = float(emeta.get("pred_std", 0.0) or 0.0)
+                low = max(0.0, p_mean - p_std)
+                high = min(1.0, p_mean + p_std)
+                out = {"prob_trigger_next_6h": p_mean, "low": low, "high": high, "votes": votes}
+                if explain:
+                    # No unified per-feature contributions across different model types;
+                    # rely on logistic explain if available.
+                    out["note"] = out.get("note", "ensemble explain not available; using averaged probabilities")
+                return out
+        # Fall through to logistic
+    except Exception:
+        pass
+
+    # Fallback: logistic-only
+    base = infer_score(payload, explain=explain, top_n=top_n, models_dir=models_dir)
+    base.setdefault("low", None)
+    base.setdefault("high", None)
+    base.setdefault("votes", {"logistic": base.get("prob_trigger_next_6h")})
+    return base
 
 
-# --- Online inference / live backtest (last 24h) ----------------------------
-def _load_jsonl(path) -> List[dict]:
+# ---------------------- Online inference / live backtest ----------------------
+def _load_jsonl(path: Path) -> List[dict]:
     try:
         return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
     except Exception:
@@ -253,33 +232,23 @@ def _label_has_trigger_between(triggers, origin: str, t0: datetime, t1: datetime
 
 
 def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Dict[str, Any]:
-    """
-    Score each origin at each hourly bucket over the last 24h and compute precision/recall snapshot.
-    Respects env override TL_DECISION_THRESHOLD if set.
-    """
-    # Env override for classification threshold (display + classification)
-    _thr_env = os.getenv("TL_DECISION_THRESHOLD")
-    if _thr_env is not None:
-        try:
-            threshold = float(_thr_env)
-        except Exception:
-            pass
-
+    """Score each origin at each hourly bucket over the last 24h and compute precision/recall snapshot."""
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     buckets = [now - timedelta(hours=i) for i in range(24, 0, -1)]  # 24 exclusive to now
-    flags = _load_jsonl(RETRAINING_LOG_PATH)
+
+    flags = _load_jsonl(paths.RETRAINING_LOG_PATH)
+    triggers = _load_jsonl(paths.RETRAINING_TRIGGERED_LOG_PATH)
+
+    # Get origins seen in last 24h of flags; if none, use a demo set
     origins = sorted(
         {
             _norm(r.get("origin", "unknown"))
             for r in flags
-            if _parse_ts(r.get("timestamp")) and _parse_ts(r.get("timestamp")) >= now - timedelta(hours=24)
+            if (ts := _parse_ts(r.get("timestamp"))) and ts >= now - timedelta(hours=24)
         }
     ) or ["twitter", "reddit", "rss_news"]
-    triggers = _load_jsonl(RETRAINING_TRIGGERED_LOG_PATH)
 
-    preds: List[Tuple[float, int]] = []
-    per_origin = []
-
+    per_origin: List[Dict[str, Any]] = []
     for o in origins[:10]:  # cap
         tp = fp = fn = tn = 0
         for t in buckets:
@@ -290,7 +259,6 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
                 p = 0.0
             y = _label_has_trigger_between(triggers, o, t, t + timedelta(hours=6))
             yhat = 1 if p >= threshold else 0
-            preds.append((p, y))
             if yhat == 1 and y == 1:
                 tp += 1
             elif yhat == 1 and y == 0:
@@ -299,6 +267,7 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
                 fn += 1
             else:
                 tn += 1
+
         prec = tp / float(tp + fp) if (tp + fp) > 0 else 0.0
         rec = tp / float(tp + fn) if (tp + fn) > 0 else 0.0
         per_origin.append(
@@ -309,14 +278,14 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
     tp = sum(po["tp"] for po in per_origin)
     fp = sum(po["fp"] for po in per_origin)
     fn = sum(po["fn"] for po in per_origin)
-    tn = sum(po["tn"] for po in per_origin)
+    # tn = sum(po["tn"] for po in per_origin)  # not used in summary
     prec = tp / float(tp + fp) if (tp + fp) > 0 else 0.0
     rec = tp / float(tp + fn) if (tp + fn) > 0 else 0.0
 
     return {
         "window_hours": 24,
         "threshold": threshold,
-        "overall": {"precision": round(prec, 3), "recall": round(rec, 3), "tp": tp, "fp": fp, "fn": fn, "tn": tn},
+        "overall": {"precision": round(prec, 3), "recall": round(rec, 3), "tp": tp, "fp": fp, "fn": fn},
         "per_origin": per_origin[:3],
     }
 
@@ -326,4 +295,5 @@ __all__ = [
     "infer_score_ensemble",
     "score",
     "model_metadata",
+    "live_backtest_last_24h",
 ]
