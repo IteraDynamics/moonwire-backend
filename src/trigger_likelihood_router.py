@@ -4,6 +4,9 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, HTTPException, Query
+from src import paths
+import json
+import os
 
 from src.ml.infer import (
     infer_score,
@@ -40,19 +43,50 @@ def score_endpoint(
 
 
 @router.get("/trigger-likelihood/metadata")
-def metadata_endpoint():
+def trigger_likelihood_metadata():
     """
-    Returns metadata for available models.
-    Shape:
-      { "models": { "logistic": {...}, "rf": {...} } }
-    Falls back to logistic-only; 503 if nothing present.
+    Return metadata for available trigger-likelihood models.
+    - Always try logistic metadata (primary).
+    - Optionally attach random-forest metadata if present.
+    - Never 503 just because RF/ensemble is missing.
+    - Respect tests that monkeypatch paths.MODELS_DIR by passing it through.
     """
-    all_meta = model_metadata_all()
-    if all_meta:
-        return {"models": all_meta}
+    payload = {}
 
-    L = model_metadata()
-    if L:
-        return {"models": {"logistic": L}}
+    # 1) Logistic (primary)
+    try:
+        base = model_metadata(models_dir=paths.MODELS_DIR)
+    except Exception:
+        base = {}
 
-    raise HTTPException(status_code=503, detail="Model metadata unavailable")
+    if base:
+        payload["logistic"] = base
+
+    # 2) Random Forest (optional)
+    try:
+        rf_meta_path = paths.MODELS_DIR / "trigger_likelihood_rf.meta.json"
+        if rf_meta_path.exists():
+            with rf_meta_path.open("r") as f:
+                payload["random_forest"] = json.load(f)
+    except Exception:
+        # Don't fail the request just because RF isn't readable
+        pass
+
+    # 3) If nothing at all, return demo metadata (200) in DEMO_MODE; otherwise 503
+    if not payload:
+        if os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
+            return {
+                "demo": True,
+                "message": "No model artifacts found; returning demo metadata.",
+                "logistic": {
+                    "created_at": None,
+                    "metrics": {"roc_auc_va": 0.5},
+                    "feature_order": [],
+                    "feature_coverage": {},
+                    "top_features": [],
+                },
+            }
+        # No artifacts and not in demo mode → service unavailable
+        raise HTTPException(status_code=503, detail="No model artifacts available")
+
+    return payload
