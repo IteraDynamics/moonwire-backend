@@ -143,10 +143,40 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     coverage = _compute_coverage_from_X(X, feat_order)
 
     # Time-aware split
+        # Time-aware split
     n = X.shape[0]
     cut = max(1, int(0.8 * n))
     Xtr, ytr = X[:cut], y[:cut]
     Xva, yva = X[cut:], y[cut:] if n > 1 else (X[:], y[:])
+
+    # --- Fallback: ensure train has both classes ---
+    # Sometimes all positives fall into the last 20% window (validation).
+    # If training is single-class but the overall data has 2+ classes, move
+    # some validation rows into train (prefer positives). If still single-class,
+    # train on all data and leave validation empty.
+    import numpy as _np
+    if len(_np.unique(ytr)) < 2 and len(_np.unique(y)) >= 2 and Xva.size:
+        pos_idx = _np.where(yva == 1)[0]
+        if pos_idx.size > 0:
+            take = pos_idx  # move all positives into train
+        else:
+            # No positives in val (rare) — move a small slice anyway
+            take = _np.arange(min(10, yva.shape[0]))
+        # push into train
+        Xtr = _np.vstack([Xtr, Xva[take]])
+        ytr = _np.concatenate([ytr, yva[take]])
+        # remove from val
+        keep_mask = _np.ones(yva.shape[0], dtype=bool)
+        keep_mask[take] = False
+        Xva, yva = Xva[keep_mask], yva[keep_mask]
+
+    # If train is STILL single-class, last-resort: use all rows for training
+    if len(_np.unique(ytr)) < 2 and len(_np.unique(y)) >= 2:
+        Xtr, ytr = X, y
+        Xva = _np.empty((0, X.shape[1]), dtype=float)
+        yva = _np.empty((0,), dtype=int)
+
+
 
     # ---------------- Logistic ----------------
     lr = LogisticRegression(
