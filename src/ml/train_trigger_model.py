@@ -17,11 +17,7 @@ from sklearn.metrics import (
     brier_score_loss,
 )
 
-from src.paths import (
-    MODELS_DIR,
-    RETRAINING_LOG_PATH,
-    RETRAINING_TRIGGERED_LOG_PATH,
-)
+from src import paths
 from src.ml.feature_builder import build_examples, synth_demo_dataset
 
 
@@ -32,11 +28,10 @@ def _mk_arrays(rows: List[Any], feat_order: List[str]) -> Tuple[np.ndarray, np.n
     X: List[List[float]] = []
     y: List[int] = []
     for r in rows:
-        # dataclass path
-        if hasattr(r, "x") and hasattr(r, "y"):
+        if hasattr(r, "x") and hasattr(r, "y"):  # dataclass route
             X.append([float(v) for v in r.x])
             y.append(int(r.y))
-        else:
+        else:  # dict route
             f = (r.get("features") or {})
             X.append([float(f.get(k, 0.0) or 0.0) for k in feat_order])
             y.append(int(r.get("label", 0)))
@@ -77,17 +72,15 @@ def _git_sha() -> str | None:
         return None
 
 
-def _ensure_two_classes_in_train(Xtr: np.ndarray, ytr: np.ndarray, X: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _ensure_two_classes_in_train(
+    Xtr: np.ndarray, ytr: np.ndarray, X: np.ndarray, y: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     If the train split ended up with a single class, pull a few samples of the
     other class from the full dataset to guarantee at least two classes.
     """
-    if Xtr.size == 0:
+    if Xtr.size == 0 or np.unique(ytr).size >= 2:
         return Xtr, ytr
-    if np.unique(ytr).size >= 2:
-        return Xtr, ytr
-
-    # Find minority class in the whole dataset (the class not present in ytr)
     present = int(ytr[0])
     other = 1 - present
     idxs = np.where(y == other)[0]
@@ -96,13 +89,10 @@ def _ensure_two_classes_in_train(Xtr: np.ndarray, ytr: np.ndarray, X: np.ndarray
         Xtr_fix = np.vstack([Xtr, X[take]])
         ytr_fix = np.concatenate([ytr, y[take]])
         return Xtr_fix, ytr_fix
-
-    # Last resort: duplicate a sample and flip label with tiny jitter
-    Xjit = Xtr.copy()
-    Xjit[0:1] = Xjit[0:1] * 1.0  # no-op; keep numeric type
+    # Last resort: flip the label on one row
     yfix = ytr.copy()
     yfix[0] = 1 - yfix[0]
-    return Xjit, yfix
+    return Xtr, yfix
 
 
 def _metrics_dict(ytr, p_tr, yva, p_va) -> Dict[str, float]:
@@ -133,14 +123,15 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     Persists:
       - models/trigger_likelihood_v0.joblib + .meta.json (+ feature_coverage.json once)
       - models/trigger_likelihood_rf.joblib + .meta.json (if trained)
-    Returns a dict that ALWAYS includes 'model_path' for logistic to satisfy tests.
+    Returns a dict that ALWAYS includes 'model_path' (logistic) to satisfy tests.
     """
-    out_dir = out_dir or MODELS_DIR
+    out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # IMPORTANT: reference log paths via `paths` (monkeypatch-friendly)
     rows, feat_order = build_examples(
-        RETRAINING_LOG_PATH,
-        RETRAINING_TRIGGERED_LOG_PATH,
+        paths.RETRAINING_LOG_PATH,
+        paths.RETRAINING_TRIGGERED_LOG_PATH,
         days=days,
         interval=interval,
     )
@@ -153,7 +144,7 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
 
-    # Arrays + coverage (coverage over the full dataset used to train)
+    # Arrays + coverage
     X, y = _mk_arrays(rows, feat_order)
     coverage = _compute_coverage_from_X(X, feat_order)
 
@@ -173,17 +164,14 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
         max_iter=2000,
     )
     lr.fit(Xtr, ytr)
-
     p_tr_lr = lr.predict_proba(Xtr)[:, 1] if Xtr.size else np.array([])
     p_va_lr = lr.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
     metrics_lr = _metrics_dict(ytr, p_tr_lr, yva, p_va_lr)
 
-    # Paths
     model_path = out_dir / "trigger_likelihood_v0.joblib"
     meta_path = out_dir / "trigger_likelihood_v0.meta.json"
     coverage_path = out_dir / "feature_coverage.json"
 
-    # Save artifacts for logistic
     joblib.dump(lr, model_path)
     with coverage_path.open("w") as f:
         json.dump(coverage, f, indent=2)
@@ -199,18 +187,19 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
             "feature_coverage": str(coverage_path),
         },
         "top_features": _top_coefficients(lr, feat_order, top=5),
-        "feature_coverage_summary": {k: round(v.get("nonzero_pct", 0.0), 2) for k, v in coverage.items()},
+        "feature_coverage_summary": {
+            k: round(v.get("nonzero_pct", 0.0), 2) for k, v in coverage.items()
+        },
     }
     with meta_path.open("w") as f:
         json.dump(meta_lr, f, indent=2)
 
-    # ---------- Random Forest (optional, helps ensemble) ----------
+    # ---------- Random Forest (optional) ----------
     rf_trained = False
     rf_model_path = out_dir / "trigger_likelihood_rf.joblib"
     rf_meta_path = out_dir / "trigger_likelihood_rf.meta.json"
     metrics_rf: Dict[str, float] | None = None
     try:
-        # Only makes sense if we truly have two classes overall
         if np.unique(y).size >= 2:
             rf = RandomForestClassifier(
                 n_estimators=200,
@@ -233,7 +222,6 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
                 "demo": bool(demo_used),
                 "artifacts": {
                     "model": str(rf_model_path),
-                    # RF reuses same coverage file; no need to duplicate
                     "feature_coverage": str(coverage_path),
                 },
             }
@@ -241,21 +229,18 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
                 json.dump(meta_rf, f, indent=2)
             rf_trained = True
     except Exception:
-        # Non-fatal; ensemble can still run with logistic only
         rf_trained = False
         metrics_rf = None
 
-    # ---------- Return (preserve keys tests expect) ----------
+    # ---------- Return (tests expect 'model_path') ----------
     result: Dict[str, Any] = {
-        "model_path": str(model_path),        # required by tests
+        "model_path": str(model_path),
         "meta_path": str(meta_path),
         "coverage_path": str(coverage_path),
         "metrics": metrics_lr,
         "demo": demo_used,
     }
-    # Optional RF info (doesn't break tests)
     result["rf_model_path"] = str(rf_model_path) if rf_trained else None
     result["rf_meta_path"] = str(rf_meta_path) if rf_trained else None
     result["rf_metrics"] = metrics_rf
-
     return result
