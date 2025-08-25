@@ -24,6 +24,7 @@ from src.analytics.burst_detection import compute_bursts
 from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
+from src.ml.infer import infer_score_ensemble
 
 # ---- ML (trigger likelihood) import guard ----
 _ML_OK = False
@@ -1065,6 +1066,37 @@ else:
             md.append("_low coverage_: " + ", ".join(sorted(set(low_cov))[:5]))
     except Exception:
         pass
+
+
+# ---------- ensemble v0.3 ----------
+try:
+    from src.ml.infer import infer_score_ensemble as _ens_score
+    md.append("\n**Ensemble v0.3 (mean ± band)**")
+    printed = 0
+    for o in candidates:
+        feats = _build_summary_features_for_origin(
+            o,
+            trends_by_origin=trends_by_origin,
+            regimes_map=regimes_map,
+            metrics_map=metrics_map,
+            bursts_by_origin=bursts_map,
+        )
+        res = _ens_score({"features": feats})
+        p = float(res.get("prob_trigger_next_6h", 0.0))
+        lo = float(res.get("low", max(0.0, p - 0.1)))
+        hi = float(res.get("high", min(1.0, p + 0.1)))
+        votes = res.get("votes", {})
+        vote_bits = ", ".join(f"{k}={round(v*100,1)}%" for k, v in votes.items()) if votes else ""
+        demo_tag = " (demo)" if res.get("demo") else ""
+        line = f"- `{o}`: **{round(p*100,1)}%** ± {round((hi-lo)*100/2,1)}%{demo_tag}"
+        if vote_bits:
+            line += f"  _[{vote_bits}]_"
+        md.append(line)
+        printed += 1
+    if printed == 0:
+        md.append("- _no ensemble outputs_")
+except Exception as e:
+    md.append(f"\n_⚠️ Ensemble score failed: {e}_")
 
 
 
