@@ -130,8 +130,8 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
 
     # IMPORTANT: reference log paths via `paths` (monkeypatch-friendly)
     rows, feat_order = build_examples(
-        paths.RETRAINING_LOG_PATH,
-        paths.RETRAINING_TRIGGERED_LOG_PATH,
+        paths.LOGS_DIR / "retraining_log.jsonl",
+        paths.LOGS_DIR / "retraining_triggered.jsonl",
         days=days,
         interval=interval,
     )
