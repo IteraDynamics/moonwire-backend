@@ -1,51 +1,75 @@
 # src/trigger_likelihood_router.py
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import json
+from pathlib import Path
+from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query
 
-from src.ml.infer import infer_score, model_metadata
+from src.ml.infer import (
+    infer_score,                 # logistic path (v0 / v0.1 / v0.2)
+    infer_score_ensemble,        # ensemble path (v0.3)
+    model_metadata,              # logistic metadata (includes coverage, metrics, etc.)
+)
+from src.paths import MODELS_DIR
 
 router = APIRouter()
 
 
-class ScoreBody(BaseModel):
-    origin: Optional[str] = None
-    timestamp: Optional[str] = None
-    features: Optional[Dict[str, Any]] = None
+def _normalize_use(value: str) -> str:
+    v = (value or "logistic").strip().lower()
+    if v not in ("logistic", "ensemble"):
+        raise HTTPException(status_code=422, detail="Invalid 'use' parameter; must be 'logistic' or 'ensemble'.")
+    return v
 
 
 @router.post("/trigger-likelihood/score")
-async def score_endpoint(
-    body: ScoreBody,
-    request: Request,
-    explain: bool = Query(False, description="Return top-N feature contributions"),
-    top_n: int = Query(5, ge=1, le=20),
-):
+def score_trigger(
+    body: dict,
+    use: str = Query("logistic", description="Which model to use: 'logistic' or 'ensemble'"),
+    explain: Optional[bool] = Query(False, description="If true (logistic only), include feature contributions."),
+) -> Any:
+    """
+    Score trigger likelihood.
+    - When use=logistic: returns {"prob_trigger_next_6h", ...} (and optional "contributions" if explain=true)
+    - When use=ensemble: returns {"prob_trigger_next_6h", "low", "high", "votes", "demo"}
+    """
+    mode = _normalize_use(use)
     try:
-        payload = body.dict(exclude_none=True)
-        res = infer_score(payload, explain=explain, top_n=top_n)
-        return res
+        if mode == "ensemble":
+            return infer_score_ensemble(body)
+        # default: logistic
+        return infer_score(body, explain=bool(explain))
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=503, detail=f"score failed: {e}")
 
 
 @router.get("/trigger-likelihood/metadata")
-async def metadata_endpoint():
-    meta = model_metadata()
-    if not meta:
-        # Demo-friendly shape if artifacts missing
-        return {
-            "demo": True,
-            "metrics": {"roc_auc_va": 0.99},
-            "feature_order": [
-                "count_1h", "count_6h", "count_24h", "count_72h",
-                "burst_z", "regime_calm", "regime_normal", "regime_turbulent",
-                "precision_7d", "recall_7d", "leadership_max_r",
-            ],
-            "feature_coverage_summary": {},
-            "top_features": [{"feature": "burst_z", "coef": 0.1}],
-        }
-    return meta
+def trigger_likelihood_metadata(
+    use: str = Query("logistic", description="Which model to use: 'logistic' or 'ensemble'"),
+) -> Any:
+    """
+    Return model metadata.
+    - logistic: returns merged meta (metrics, feature_order, coverage, top_features, etc.)
+    - ensemble: returns the raw ensemble meta (weights, per-model metrics, bootstrap bands, feature_order, etc.)
+    """
+    mode = _normalize_use(use)
+    if mode == "logistic":
+        meta = model_metadata()
+        if not meta:
+            # For metadata we intentionally 503 when artifacts are missing (tests rely on this behavior).
+            raise HTTPException(status_code=503, detail="logistic metadata not available")
+        return meta
+
+    # Ensemble meta lives in MODELS_DIR / trigger_ensemble.meta.json
+    meta_path: Path = MODELS_DIR / "trigger_ensemble.meta.json"
+    if not meta_path.exists():
+        # Keep parity with logistic behavior: surface as 503 if missing.
+        raise HTTPException(status_code=503, detail="ensemble meta not found")
+    try:
+        return json.loads(meta_path.read_text())
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"failed to read ensemble meta: {e}")
