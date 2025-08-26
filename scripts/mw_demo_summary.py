@@ -26,6 +26,10 @@ from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
 
+# Cache the exact rich features used in the logistic bullets so the ensemble
+# can reuse them (prevents 0.0% votes that happen when only origin is passed).
+__MW_RICH_BY_ORIGIN__: dict[str, dict] = {}
+
 # --- Safe-import guard for pytest: ensure any stray top-level uses no-op cleanly.
 if __name__ != "__main__":
     lines, origins = [], []
@@ -1074,70 +1078,166 @@ else:
 
 
 # --- Ensemble v0.4 (log+rf+gb) summary line (safe if artifacts missing) ---
+# ---------- Trigger Likelihood v0 (next 6h) + Ensemble v0.4 ----------
+md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+
+# lazy-global cache so Ensemble reuses the exact features we scored with
+if "__MW_RICH_BY_ORIGIN__" not in globals():
+    __MW_RICH_BY_ORIGIN__ = {}
+
 try:
-    from src.ml.infer import infer_score_ensemble
-
-    # Section header
-    md.append("")
-    md.append("**🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)**")
-
-    # Pick up to 3 origins the same way you already do elsewhere
+    from src.ml.infer import infer_score, model_metadata
+except Exception as _e:
+    md.append(f"_Model unavailable in this build._\nhint: {type(_e).__name__}: {getattr(_e, 'args', [''])[0]}")
+else:
+    # Metadata line
+    _meta = {}
     try:
-        candidates = pick_candidate_origins(
-            origins_rows,
-            locals().get("yield_data"),
-            top=3,
-        )
+        _meta = model_metadata()
     except Exception:
-        candidates = ["twitter", "reddit", "rss_news"]
+        _meta = {}
+    if _meta:
+        _metrics = _meta.get("metrics", {}) or {}
+        _auc = _metrics.get("roc_auc_va") or _metrics.get("roc_auc_tr")
+        bits = []
+        if _meta.get("created_at"): bits.append(f"model@{_meta['created_at']}")
+        if _auc is not None:
+            try: bits.append(f"AUC={float(_auc):.2f}")
+            except Exception: bits.append(f"AUC={_auc}")
+        if _meta.get("demo"): bits.append("demo")
+        if bits: md.append("- " + " • ".join(bits))
 
-    # Reuse rich features if we have them; otherwise we'll fall back to origin+timestamp
-    feats_map = (
-        locals().get("rich_feats")
-        or locals().get("features_by_origin")
-        or locals().get("rich_features")
-        or {}
-    )
+    md.append("rich features on")
 
-    now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+    # Gather summary sources so we can synthesize features the same way as elsewhere
+    trends_by_origin = locals().get("trends_by_origin") or {}
+    regimes_map      = locals().get("regimes_map") or {}  # could be {"origin": {"regime": "..."} } or {"origin":"..."}
+    metrics_rows     = locals().get("reviewer_metrics_rows") or locals().get("metrics_rows") or []
+    leadlag_pairs    = locals().get("leadlag_pairs") or []
+    bursts_map       = locals().get("bursts_by_origin") or locals().get("bursts_map") or {}
 
+    # choose feature builder present in this repo
+    fb = None
+    try:
+        fb = locals().get("_build_summary_features_for_origin") or locals().get("build_summary_features_for_origin")
+    except Exception:
+        fb = None
+
+    # pick candidates (same helper you already use elsewhere)
+    try:
+        yield_data_local = locals().get("yield_data")
+    except Exception:
+        yield_data_local = None
+    candidates = pick_candidate_origins(locals().get("origins_rows", []), yield_data_local, top=3)
+
+    # score each origin with *rich features* and remember those features for ensemble
     printed = 0
     for o in candidates:
+        # synthesize features
+        feats = {
+            "count_1h": 0.0, "count_6h": 0.0, "count_24h": 0.0, "count_72h": 0.0,
+            "burst_z": 0.0,
+            "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
+            "precision_7d": 0.0, "recall_7d": 0.0,
+            "leadership_max_r": 0.0,
+        }
         try:
-            feats = feats_map.get(o)
-            payload = {"features": feats} if isinstance(feats, dict) else {
-                "origin": o,
-                "timestamp": now_bucket,
-            }
-            res = infer_score_ensemble(payload)
+            if fb:
+                # try new underscore builder first
+                try:
+                    feats = fb(
+                        o,
+                        trends_by_origin=trends_by_origin,
+                        regimes_map=regimes_map,
+                        metrics_map={r["origin"]: r for r in metrics_rows if isinstance(r, dict) and r.get("origin")} if metrics_rows else {},
+                        bursts_by_origin=bursts_map,
+                    )
+                except TypeError:
+                    # fall back to older signature
+                    feats = fb(
+                        o,
+                        trends_by_origin=trends_by_origin,
+                        regimes_map=regimes_map,
+                        metrics_rows=metrics_rows,
+                        leadlag_pairs=leadlag_pairs,
+                        bursts_map=bursts_map,
+                    )
+        except Exception:
+            # keep zeroed feats
+            pass
+
+        # cache the exact features for ensemble
+        try:
+            __MW_RICH_BY_ORIGIN__[o] = dict(feats)
+        except Exception:
+            pass
+
+        # non-zero feature count (diagnostic)
+        try:
+            nz = sum(1 for v in feats.values() if isinstance(v, (int, float)) and float(v) != 0.0)
+            total = len(feats)
+        except Exception:
+            nz, total = 0, len(feats)
+
+        # score with logistic path (back-compat)
+        try:
+            res = infer_score({"features": feats})
+            p = res.get("prob_trigger_next_6h")
+            if isinstance(p, (int, float)):
+                md.append(f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h")
+                md.append(f"(nz-features={nz}/{total})")
+                printed += 1
         except Exception:
             continue
 
-        p = res.get("prob_trigger_next_6h")
-        if not isinstance(p, (int, float)):
+    if printed == 0:
+        # deterministic probe so the section isn’t empty
+        try:
+            res = infer_score({"features": {"burst_z": 2.0}})
+            md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
+        except Exception:
+            md.append("_No score available._")
+
+# --- Ensemble v0.4 (log+rf+gb) summary line (uses cached rich features) ---
+md.append("\n### 🏯 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
+try:
+    from src.ml.infer import infer_score_ensemble
+except Exception as _e:
+    md.append(f"_Ensemble summary unavailable ({_e.__class__.__name__})._")
+    md.append("")
+else:
+    origins_for_ensemble = list(__MW_RICH_BY_ORIGIN__.keys()) or ["twitter", "reddit", "rss_news"]
+    printed = 0
+    for o in origins_for_ensemble[:3]:
+        payload = {"features": __MW_RICH_BY_ORIGIN__.get(o)} if __MW_RICH_BY_ORIGIN__.get(o) else {"origin": o}
+        try:
+            res = infer_score_ensemble(payload)
+        except Exception as e:
+            md.append(f"- {o}: _ensemble failed ({e.__class__.__name__})_")
             continue
 
-        lo = float(res.get("low", p))
-        hi = float(res.get("high", p))
+        p   = float(res.get("prob_trigger_next_6h", 0.0))
+        low = float(res.get("low", p))
+        high = float(res.get("high", p))
         votes = res.get("votes") or res.get("per_model") or {}
-        demo  = bool(res.get("demo")) or len(votes) < 2
+        demo_suffix = " (demo fallback)" if res.get("demo") else ""
 
-        band_pp = ((hi - lo) / 2.0) * 100.0
-        md.append(f"- **{o}**: {float(p)*100:.1f}% ± {band_pp:.1f}pp")
+        band_pp = ((high - low) / 2.0) * 100.0
+        md.append(f"- **{o}**: {p*100:.1f}% ± {band_pp:.1f}pp")
 
         if votes:
-            vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
-            md.append(f"  (votes: {vparts})")
-        if demo:
-            md.append("  _(demo fallback)_")
+            parts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
+            md.append(f"  (votes: {parts}){demo_suffix}")
+        else:
+            md.append(f"  (no per-model votes available){demo_suffix}")
 
         printed += 1
 
     if printed == 0:
-        md.append("_Ensemble available but no eligible origins to score._")
+        md.append("_Ensemble available but nothing scored._")
 
-except Exception as e:
-    md.append(f"_Ensemble summary unavailable ({e.__class__.__name__}: {e})._")
+    md.append("")
+# ---------------------------------------------------------------------------
 
 
 
