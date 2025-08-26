@@ -964,6 +964,9 @@ try:
             md.append(f"- **{o}**: {p*100:.1f}%")
 
         votes = res.get("votes") or res.get("per_model") or {}
+        nonzero = sum(1 for v in votes.values() if float(v) > 1e-6)
+        if nonzero <= 1:
+            md.append("  _(demo fallback: other learners inactive)_")
         if votes:
             vtxt = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
             md.append(f"  (votes: {vtxt})")
