@@ -1305,5 +1305,8 @@ except Exception as e:
 print(f"Wrote: {ART/'demo_summary.md'}")
 
 
+# --- safe footer ---
 if __name__ == "__main__":
-    main()  # or whatever your entrypoint function is
+    # Summary was already built and written above.
+    # Keep this as a no-op to avoid NameError and return 0 exit code.
+    pass
