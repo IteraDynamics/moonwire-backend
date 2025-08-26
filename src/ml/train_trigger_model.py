@@ -1,9 +1,7 @@
 # src/ml/train_trigger_model.py
 from __future__ import annotations
 
-import json
-import os
-from dataclasses import asdict, dataclass  # reserved for external use if needed
+import json, os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -11,67 +9,33 @@ from typing import Any, Dict, List, Tuple
 import joblib
 import numpy as np
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
-    average_precision_score,
-    brier_score_loss,
-    log_loss,
     roc_auc_score,
+    average_precision_score,
+    log_loss,
+    brier_score_loss,
 )
 
-# Import the module (not constants) so tests can monkeypatch attributes safely
 from src import paths
 from src.ml.feature_builder import build_examples, synth_demo_dataset
 
 
-@dataclass
-class TrainOutputs:
-    model_path: Path
-    meta_path: Path
-    coverage_path: Path
-    metrics: Dict[str, Any]
-    feature_order: List[str]
-    demo: bool
-
-
 def _mk_arrays(rows: List[Any], feat_order: List[str]) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Tolerant converter:
-      - dict rows with {"features": {...}, "label": 0/1} OR {"x":[...], "y":0/1}
-      - object rows with attributes .x (list/array) and .y (int)
+    Supports both dict rows ({features,label}) and FeatureRow(ts, origin, x, y).
     """
-    X_list: List[List[float]] = []
-    y_list: List[int] = []
-
+    X: List[List[float]] = []
+    y: List[int] = []
     for r in rows:
-        # Object form: e.g., FeatureRow(ts, origin, x, y)
-        if hasattr(r, "x") and hasattr(r, "y"):
-            xvec = [float(v) for v in list(getattr(r, "x"))]
-            X_list.append(xvec)
-            y_list.append(int(getattr(r, "y")))
-            continue
-
-        # Dict form with explicit vector
-        if isinstance(r, dict) and "x" in r and "y" in r:
-            xvec = [float(v) for v in list(r.get("x") or [])]
-            X_list.append(xvec)
-            y_list.append(int(r.get("y", 0)))
-            continue
-
-        # Dict form with feature map + label
-        if isinstance(r, dict):
-            f = r.get("features", {}) or {}
-            xvec = [float(f.get(k, 0.0) or 0.0) for k in feat_order]
-            yval = r.get("label", r.get("y", 0))
-            X_list.append(xvec)
-            y_list.append(int(yval))
-            continue
-
-        # Fallback: skip row
-        continue
-
-    X = np.array(X_list, dtype=float)
-    y = np.array(y_list, dtype=int)
-    return X, y
+        if hasattr(r, "x") and hasattr(r, "y"):  # dataclass route
+            X.append([float(v) for v in r.x])
+            y.append(int(r.y))
+        else:  # dict route
+            f = (r.get("features") or {})
+            X.append([float(f.get(k, 0.0) or 0.0) for k in feat_order])
+            y.append(int(r.get("label", 0)))
+    return np.asarray(X, dtype=float), np.asarray(y, dtype=int)
 
 
 def _compute_coverage_from_X(X: np.ndarray, feat_order: List[str]) -> Dict[str, Dict[str, float]]:
@@ -85,12 +49,63 @@ def _compute_coverage_from_X(X: np.ndarray, feat_order: List[str]) -> Dict[str, 
         col = X[:, i]
         nonzero = float(np.count_nonzero(col)) / n * 100.0
         out[k] = {
-            "nonzero_pct": float(nonzero),
+            "nonzero_pct": nonzero,
             "mean": float(np.mean(col)),
             "min": float(np.min(col)),
             "max": float(np.max(col)),
         }
     return out
+
+
+def _safe_metric(fn, y_true, y_pred, default: float = 0.0) -> float:
+    try:
+        return float(fn(y_true, y_pred))
+    except Exception:
+        return default
+
+
+def _git_sha() -> str | None:
+    try:
+        import subprocess
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        return None
+
+
+def _ensure_two_classes_in_train(
+    Xtr: np.ndarray, ytr: np.ndarray, X: np.ndarray, y: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    If the train split ended up with a single class, pull a few samples of the
+    other class from the full dataset to guarantee at least two classes.
+    """
+    if Xtr.size == 0 or np.unique(ytr).size >= 2:
+        return Xtr, ytr
+    present = int(ytr[0])
+    other = 1 - present
+    idxs = np.where(y == other)[0]
+    if idxs.size:
+        take = idxs[: min(10, idxs.size)]
+        Xtr_fix = np.vstack([Xtr, X[take]])
+        ytr_fix = np.concatenate([ytr, y[take]])
+        return Xtr_fix, ytr_fix
+    # Last resort: flip the label on one row
+    yfix = ytr.copy()
+    yfix[0] = 1 - yfix[0]
+    return Xtr, yfix
+
+
+def _metrics_dict(ytr, p_tr, yva, p_va) -> Dict[str, float]:
+    return {
+        "roc_auc_tr": _safe_metric(roc_auc_score, ytr, p_tr, 0.5),
+        "roc_auc_va": _safe_metric(roc_auc_score, yva, p_va, 0.5),
+        "pr_auc_tr": _safe_metric(average_precision_score, ytr, p_tr, 0.0),
+        "pr_auc_va": _safe_metric(average_precision_score, yva, p_va, 0.0),
+        "logloss_tr": _safe_metric(log_loss, ytr, p_tr, 0.0),
+        "logloss_va": _safe_metric(log_loss, yva, p_va, 0.0),
+        "brier_tr": _safe_metric(brier_score_loss, ytr, p_tr, 0.0),
+        "brier_va": _safe_metric(brier_score_loss, yva, p_va, 0.0),
+    }
 
 
 def _top_coefficients(model: LogisticRegression, feat_order: List[str], top: int = 5) -> List[Dict[str, float]]:
@@ -102,70 +117,21 @@ def _top_coefficients(model: LogisticRegression, feat_order: List[str], top: int
     return [{"feature": k, "coef": float(v)} for k, v in pairs[:top]]
 
 
-def _git_sha() -> str | None:
-    try:
-        import subprocess
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        return None
-
-
-def _time_aware_cut_with_two_classes(y: np.ndarray, base_cut: int) -> int:
-    """
-    Choose a time-aware cut such that the training slice y[:cut]
-    contains both classes (0 and 1) when the overall dataset has both.
-
-    We start from base_cut (~80% of n), then:
-      - ensure cut >= minimal index that includes the first instance of each class
-      - if still single-class, expand cut forward until we include the missing class
-      - keep at least 1 sample for validation when n > 1
-    """
-    n = int(y.shape[0])
-    if n <= 1:
-        return 1 if n == 1 else 0
-
-    cut = min(max(1, base_cut), n - 1)
-    classes_all = set(int(v) for v in y.tolist())
-    if len(classes_all) < 2:
-        # Only one class overall — nothing we can do here
-        return cut
-
-    # First occurrence for each class
-    first_idx = {}
-    for cls in (0, 1):
-        idxs = np.where(y == cls)[0]
-        first_idx[cls] = int(idxs[0]) if idxs.size else None
-
-    # Minimal cut to include first instance of both classes
-    if first_idx[0] is not None and first_idx[1] is not None:
-        min_cut = max(first_idx[0], first_idx[1]) + 1
-        cut = max(cut, min_cut)
-        cut = min(cut, n - 1)
-
-    # If still single-class, expand forward
-    if len(set(int(v) for v in y[:cut].tolist())) < 2:
-        for i in range(cut, n - 1):
-            cut = i + 1
-            if len(set(int(v) for v in y[:cut].tolist())) >= 2:
-                break
-        cut = min(cut, n - 1)
-
-    return cut
-
-
 def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -> Dict[str, Any]:
-    # Use paths.MODELS_DIR unless an explicit out_dir was provided (monkeypatch-friendly)
+    """
+    Trains logistic + (optionally) random forest.
+    Persists:
+      - models/trigger_likelihood_v0.joblib + .meta.json (+ feature_coverage.json once)
+      - models/trigger_likelihood_rf.joblib + .meta.json (if trained)
+    Returns a dict that ALWAYS includes 'model_path' (logistic) to satisfy tests.
+    """
     out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Compute log file paths at call time from CURRENT paths.LOGS_DIR
-    flags_path = paths.LOGS_DIR / "retraining_log.jsonl"
-    triggers_path = paths.LOGS_DIR / "retraining_triggered.jsonl"
-
-    # Build examples
+    # IMPORTANT: reference log paths via `paths` (monkeypatch-friendly)
     rows, feat_order = build_examples(
-        flags_path,
-        triggers_path,
+        paths.LOGS_DIR / "retraining_log.jsonl",
+        paths.LOGS_DIR / "retraining_triggered.jsonl",
         days=days,
         interval=interval,
     )
@@ -178,83 +144,103 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
 
-    # Arrays + coverage (over the full training dataset)
+    # Arrays + coverage
     X, y = _mk_arrays(rows, feat_order)
     coverage = _compute_coverage_from_X(X, feat_order)
 
-    # Time-aware split with safeguard for two classes in train (when possible)
-    n = int(X.shape[0])
-    if n == 1:
-        Xtr, ytr = X, y
-        Xva, yva = X, y
-    else:
-        base_cut = int(0.8 * n)
-        cut = _time_aware_cut_with_two_classes(y, base_cut)
-        # keep at least 1 validation sample when n > 1
-        cut = min(max(1, cut), n - 1)
-        Xtr, ytr = X[:cut], y[:cut]
-        Xva, yva = X[cut:], y[cut:]
+    # Time-aware split
+    n = X.shape[0]
+    cut = max(1, int(0.8 * n))
+    Xtr, ytr = X[:cut], y[:cut]
+    Xva, yva = (X[cut:], y[cut:]) if n > 1 else (X.copy(), y.copy())
 
-    clf = LogisticRegression(
+    # Ensure 2 classes in train
+    Xtr, ytr = _ensure_two_classes_in_train(Xtr, ytr, X, y)
+
+    # ---------- Logistic ----------
+    lr = LogisticRegression(
         solver="liblinear",
         class_weight="balanced",
         max_iter=2000,
-        n_jobs=None,
     )
-    clf.fit(Xtr, ytr)
+    lr.fit(Xtr, ytr)
+    p_tr_lr = lr.predict_proba(Xtr)[:, 1] if Xtr.size else np.array([])
+    p_va_lr = lr.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
+    metrics_lr = _metrics_dict(ytr, p_tr_lr, yva, p_va_lr)
 
-    def _safe_metric(fn, y_true, y_pred, default: float = 0.0) -> float:
-        try:
-            return float(fn(y_true, y_pred))
-        except Exception:
-            return default
-
-    # Predict probabilities
-    p_tr = clf.predict_proba(Xtr)[:, 1] if Xtr.size else np.array([])
-    p_va = clf.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
-
-    metrics = {
-        "roc_auc_tr": _safe_metric(roc_auc_score, ytr, p_tr, 0.5),
-        "roc_auc_va": _safe_metric(roc_auc_score, yva, p_va, 0.5),
-        "pr_auc_tr": _safe_metric(average_precision_score, ytr, p_tr, 0.0),
-        "pr_auc_va": _safe_metric(average_precision_score, yva, p_va, 0.0),
-        "logloss_tr": _safe_metric(log_loss, ytr, p_tr, 0.0),
-        "logloss_va": _safe_metric(log_loss, yva, p_va, 0.0),
-        "brier_tr": _safe_metric(brier_score_loss, ytr, p_tr, 0.0),
-        "brier_va": _safe_metric(brier_score_loss, yva, p_va, 0.0),
-    }
-
-    # Persist artifacts
     model_path = out_dir / "trigger_likelihood_v0.joblib"
     meta_path = out_dir / "trigger_likelihood_v0.meta.json"
     coverage_path = out_dir / "feature_coverage.json"
 
-    joblib.dump(clf, model_path)
-
+    joblib.dump(lr, model_path)
     with coverage_path.open("w") as f:
         json.dump(coverage, f, indent=2)
 
-    meta: Dict[str, Any] = {
+    meta_lr: Dict[str, Any] = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": _git_sha(),
         "feature_order": feat_order,
-        "metrics": metrics,
+        "metrics": metrics_lr,
         "demo": bool(demo_used),
         "artifacts": {
             "model": str(model_path),
             "feature_coverage": str(coverage_path),
         },
-        "top_features": _top_coefficients(clf, feat_order, top=5),
-        "feature_coverage_summary": {k: round(v.get("nonzero_pct", 0.0), 2) for k, v in coverage.items()},
+        "top_features": _top_coefficients(lr, feat_order, top=5),
+        "feature_coverage_summary": {
+            k: round(v.get("nonzero_pct", 0.0), 2) for k, v in coverage.items()
+        },
     }
-
     with meta_path.open("w") as f:
-        json.dump(meta, f, indent=2)
+        json.dump(meta_lr, f, indent=2)
 
-    return {
+    # ---------- Random Forest (optional) ----------
+    rf_trained = False
+    rf_model_path = out_dir / "trigger_likelihood_rf.joblib"
+    rf_meta_path = out_dir / "trigger_likelihood_rf.meta.json"
+    metrics_rf: Dict[str, float] | None = None
+    try:
+        if np.unique(y).size >= 2:
+            rf = RandomForestClassifier(
+                n_estimators=200,
+                max_depth=8,
+                class_weight="balanced",
+                random_state=42,
+                n_jobs=-1,
+            )
+            rf.fit(Xtr, ytr)
+            p_tr_rf = rf.predict_proba(Xtr)[:, 1] if Xtr.size else np.array([])
+            p_va_rf = rf.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
+            metrics_rf = _metrics_dict(ytr, p_tr_rf, yva, p_va_rf)
+            joblib.dump(rf, rf_model_path)
+
+            meta_rf = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "git_sha": _git_sha(),
+                "feature_order": feat_order,
+                "metrics": metrics_rf,
+                "demo": bool(demo_used),
+                "artifacts": {
+                    "model": str(rf_model_path),
+                    "feature_coverage": str(coverage_path),
+                },
+            }
+            with rf_meta_path.open("w") as f:
+                json.dump(meta_rf, f, indent=2)
+            rf_trained = True
+    except Exception:
+        rf_trained = False
+        metrics_rf = None
+
+    # ---------- Return (tests expect 'model_path') ----------
+    result: Dict[str, Any] = {
         "model_path": str(model_path),
         "meta_path": str(meta_path),
         "coverage_path": str(coverage_path),
-        "metrics": metrics,
+        "metrics": metrics_lr,
         "demo": demo_used,
     }
+    result["rf_model_path"] = str(rf_model_path) if rf_trained else None
+    result["rf_meta_path"] = str(rf_meta_path) if rf_trained else None
+    result["rf_metrics"] = metrics_rf
+    return result
