@@ -26,6 +26,14 @@ from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
 
+# --- Import-time safety: ensure 'lines' exists if any accidental top-level
+# appends slipped in (pytest imports this module for tests).
+try:  # noqa: SIM105
+    lines  # type: ignore  # just probing existence
+except NameError:
+    lines: list[str] = []
+
+
 # ---- ML (trigger likelihood) import guard ----
 _ML_OK = False
 _ML_ERR = None
@@ -1287,3 +1295,7 @@ except Exception as e:
 # ---------- write file ----------
 (ART / "demo_summary.md").write_text("\n".join(md))
 print(f"Wrote: {ART/'demo_summary.md'}")
+
+
+if __name__ == "__main__":
+    main()  # or whatever your entrypoint function is
