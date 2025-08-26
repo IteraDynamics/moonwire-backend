@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,26 @@ _GB_META    = "trigger_likelihood_gb.meta.json"
 
 _COV_NAME   = "feature_coverage.json"
 
+# --------------------------------------------------------------------
+# Cosmetic floor (OFF by default; enable with CI_SUMMARY_COSMETIC_FLOOR=1)
+# --------------------------------------------------------------------
+_COSMETIC_FLOOR = float(os.getenv("ENSEMBLE_COSMETIC_FLOOR", "0.021"))  # ~2.1%
+_COSMETIC_CEIL  = 1.0 - _COSMETIC_FLOOR
+
+def _floor_prob(p: float) -> float:
+    try:
+        p = float(p)
+    except Exception:
+        return _COSMETIC_FLOOR
+    if p <= 0.0:
+        return _COSMETIC_FLOOR
+    if p >= 1.0:
+        return _COSMETIC_CEIL
+    return p
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    v = os.getenv(name, default).lower()
+    return v in ("1", "true", "yes", "on")
 
 # --------------------------
 # Loaders / Metadata
@@ -39,10 +60,8 @@ def _paths_for(kind: str, models_dir: Optional[Path] = None) -> Tuple[Path, Path
         return md / _GB_MODEL, md / _GB_META
     raise ValueError(f"unknown model kind: {kind}")
 
-
 def _coverage_path(models_dir: Optional[Path] = None) -> Path:
     return (models_dir or paths.MODELS_DIR) / _COV_NAME
-
 
 def _load_one(kind: str, models_dir: Optional[Path] = None):
     """Return (model, meta) or (None, None)."""
@@ -57,7 +76,6 @@ def _load_one(kind: str, models_dir: Optional[Path] = None):
     except Exception:
         meta = {}
     return model, meta
-
 
 def model_metadata(models_dir: Optional[Path] = None) -> Dict[str, Any]:
     """
@@ -85,24 +103,20 @@ def model_metadata(models_dir: Optional[Path] = None) -> Dict[str, Any]:
     out["artifacts"] = {"feature_coverage": str(cov_path)}
     return out
 
-
 # --------------------------
 # Vectorization / utils
 # --------------------------
 def _vectorize(features: Dict[str, Any], feat_order: List[str]) -> np.ndarray:
     return np.array([[float(features.get(k, 0.0) or 0.0) for k in feat_order]], dtype=float)
 
-
 def _sigmoid(x: float | np.ndarray) -> float | np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
-
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
     try:
         return float(v)
     except Exception:
         return default
-
 
 def _contributions_logistic(model, xrow: np.ndarray, feat_order: List[str], top_n: Optional[int]) -> Dict[str, float]:
     try:
@@ -114,7 +128,6 @@ def _contributions_logistic(model, xrow: np.ndarray, feat_order: List[str], top_
         return contrib
     items = sorted(contrib.items(), key=lambda kv: abs(kv[1]), reverse=True)[:top_n]
     return {k: float(v) for k, v in items}
-
 
 # --------------------------
 # Core logistic inference
@@ -147,11 +160,9 @@ def infer_score(
         out["contributions"] = {"burst_z": float(0.1 * _safe_float(feats.get("burst_z", 0.0), 0.0))}
     return out
 
-
 def score(payload: Dict[str, Any], explain: bool = False):
     """Backward-compatible alias used by tests."""
     return infer_score(payload, explain=explain)
-
 
 # --------------------------
 # Ensemble inference
@@ -160,8 +171,15 @@ def infer_score_ensemble(
     payload: Dict[str, Any],
     *,
     models_dir: Optional[Path] = None,
+    apply_floor: Optional[bool] = None,  # None = read CI_SUMMARY_COSMETIC_FLOOR (default OFF)
 ) -> Dict[str, Any]:
-    """Average available learners (logistic, rf, gb)."""
+    """
+    Average available learners (logistic, rf, gb).
+    - By default returns raw model probabilities.
+    - If apply_floor=True (or CI_SUMMARY_COSMETIC_FLOOR=1), applies a cosmetic
+      floor/ceiling for nicer CI summary display and returns `votes_floored`
+      plus mean/low/high computed from the floored votes.
+    """
     feats = payload.get("features") or {}
     votes: Dict[str, float] = {}
     used: List[str] = []
@@ -202,34 +220,60 @@ def infer_score_ensemble(
             except Exception:
                 pass
 
-    # If nothing loaded (e.g., in CI demo), provide a safe logistic-like proxy.
+    # Decide if we apply cosmetic floor
+    if apply_floor is None:
+        apply_floor = _env_truthy("CI_SUMMARY_COSMETIC_FLOOR", default="0")
+
+    # If nothing loaded (e.g., CI demo), provide a safe logistic-like proxy.
     if not votes:
-        p = float(_sigmoid(0.1 * _safe_float(feats.get("burst_z", 0.0), 0.0)))
-        return {
-            "prob_trigger_next_6h": p,
-            "low": p,
-            "high": p,
-            "votes": {"logistic": p},   # use 'logistic' key so tests see a known learner
-            "per_model": {"logistic": p},
+        p_raw = float(_sigmoid(0.1 * _safe_float(feats.get("burst_z", 0.0), 0.0)))
+        p_floor = _floor_prob(p_raw) if apply_floor else p_raw
+        out = {
+            "prob_trigger_next_6h": p_floor,
+            "low": p_floor,
+            "high": p_floor,
+            "votes": {"logistic": p_raw},            # raw
+            "per_model": {"logistic": p_raw},        # alias (raw)
             "models_used": [],
             "demo": True,
         }
+        if apply_floor:
+            out["votes_floored"] = {"logistic": p_floor}
+            out["used_cosmetic_floor"] = True
+        return out
 
-    probs = list(votes.values())
-    mean_p = float(sum(probs) / len(probs))
-    low_p  = float(min(probs))
-    high_p = float(max(probs))
-
-    return {
-        "prob_trigger_next_6h": mean_p,
-        "low": low_p,
-        "high": high_p,
-        "votes": votes,         # preferred
-        "per_model": votes,     # alias
-        "models_used": used,
-        "demo": False,
-    }
-
+    # Compute mean/low/high either from raw or floored votes
+    if apply_floor:
+        votes_floored = {k: _floor_prob(v) for k, v in votes.items()}
+        probs = list(votes_floored.values())
+        mean_p = float(sum(probs) / len(probs))
+        low_p  = float(min(probs))
+        high_p = float(max(probs))
+        return {
+            "prob_trigger_next_6h": mean_p,
+            "low": low_p,
+            "high": high_p,
+            "votes": votes,                   # raw
+            "votes_floored": votes_floored,   # for display
+            "per_model": votes,               # alias (raw)
+            "models_used": used,
+            "used_cosmetic_floor": True,
+            "demo": False,
+        }
+    else:
+        probs = list(votes.values())
+        mean_p = float(sum(probs) / len(probs))
+        low_p  = float(min(probs))
+        high_p = float(max(probs))
+        return {
+            "prob_trigger_next_6h": mean_p,
+            "low": low_p,
+            "high": high_p,
+            "votes": votes,         # raw
+            "per_model": votes,     # alias (raw)
+            "models_used": used,
+            "demo": False,
+        }
 
 # --------------------------
 # Live backtest (last 24h)
@@ -239,7 +283,6 @@ def _load_jsonl(path: Path) -> List[dict]:
         return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
     except Exception:
         return []
-
 
 def _parse_ts(v: Any) -> Optional[datetime]:
     try:
@@ -254,7 +297,6 @@ def _parse_ts(v: Any) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def _label_has_trigger_between(triggers: List[dict], origin: str, t0: datetime, t1: datetime) -> int:
     o = _norm(origin)
     for r in triggers:
@@ -264,7 +306,6 @@ def _label_has_trigger_between(triggers: List[dict], origin: str, t0: datetime, 
         if ts and t0 < ts <= t1:
             return 1
     return 0
-
 
 def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Dict[str, Any]:
     """
@@ -324,7 +365,6 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
         "overall": {"precision": round(prec, 3), "recall": round(rec, 3), "tp": tp, "fp": fp, "fn": fn},
         "per_origin": per_origin[:3],
     }
-
 
 __all__ = [
     "infer_score",
