@@ -1084,7 +1084,7 @@ try:
         origin_list = ["twitter", "reddit", "rss_news"]
 
     for o in origin_list:
-        # Ensure we have features for this origin
+        # Ensure features exist
         feats = (feats_cache or {}).get(o)
         if feats is None:
             feats = _build_summary_features_for_origin(
@@ -1096,24 +1096,34 @@ try:
             )
 
         ens = infer_score_ensemble({"features": feats})
-        mean_p = float(ens.get("prob", 0.0))
-        low_p  = float(ens.get("band_low", mean_p))
-        high_p = float(ens.get("band_high", mean_p))
-        votes  = ens.get("votes", {}) or {}
 
-        # Print row
+        # Mean probability: prefer new key, fallback to old, then votes-average
+        mean_p = ens.get("prob_trigger_next_6h", ens.get("prob", None))
+        votes = ens.get("votes", {}) or {}
+        if mean_p is None:
+            probs = [float(v) for v in votes.values()]
+            mean_p = float(sum(probs) / len(probs)) if probs else 0.0
+        else:
+            mean_p = float(mean_p)
+
+        low_p  = float(ens.get("band_low",  mean_p))
+        high_p = float(ens.get("band_high", mean_p))
+
         md.append(f"\n- **{o}**: {100.0*mean_p:.1f}% (±{100.0*(high_p - low_p)/2:.1f}%)")
 
         if votes:
+            # show only models that actually returned a vote
             ordered = [k for k in ("logistic", "rf", "gb") if k in votes]
             votes_s = ", ".join(f"{k}={100.0*votes[k]:.1f}%" for k in ordered)
             md.append(f"  \n  ○ votes: {votes_s}")
             if len(ordered) == 1:
-                md.append(f"  \n  _(only {ordered[0]} available)_")
+                md.append("  \n  _(only {0} available)_".format(ordered[0]))
         else:
             md.append("  \n  _(demo fallback)_")
+
 except Exception as e:
     md.append(f"\n⚠️ Ensemble score failed: {e}")
+
 
 # ---------- drift check (polish) ----------
 md.append("\n### 🔎 Drift Check (features)")
