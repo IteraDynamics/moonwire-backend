@@ -1068,61 +1068,33 @@ else:
         pass
 
 
-# --- Ensemble v0.4 (mean ± band) -------------------------------------------
-md.append("")
-md.append("**Ensemble v0.4 (mean ± band)**")
-try:
-    # Build a safe origins list (feats_cache -> trends_map -> default)
-    origin_list = []
+# --- Ensemble v0.4 (mean ± band) --------------------------------------------
+lines.append("")
+lines.append("**Ensemble v0.4 (mean ± band)**")
+
+for o in origins:
     try:
-        origin_list = list((feats_cache or {}).keys())
-    except Exception:
-        origin_list = []
-    if not origin_list:
-        origin_list = list((trends_map or {}).keys())
-    if not origin_list:
-        origin_list = ["twitter", "reddit", "rss_news"]
+        # however you build features per origin; reuse your existing helper/var
+        feats = rich_feats.get(o, rich_feats_any)  # keep your current source of features
+        out = infer_score_ensemble({"features": feats})
+    except Exception as e:
+        lines.append(f"- ⚠️ Ensemble score failed for {o}: {e}")
+        continue
 
-    for o in origin_list:
-        # Ensure features exist
-        feats = (feats_cache or {}).get(o)
-        if feats is None:
-            feats = _build_summary_features_for_origin(
-                o,
-                trends_by_origin=trends_map,
-                regimes_map=regimes_map,
-                metrics_map=metrics_map,
-                bursts_by_origin=bursts_by_origin,
-            )
+    mean = float(out.get("prob_trigger_next_6h", 0.0))
+    low  = float(out.get("low", mean))
+    high = float(out.get("high", mean))
 
-        ens = infer_score_ensemble({"features": feats})
+    votes = (out.get("votes") or out.get("per_model") or {})
+    vote_items = ", ".join(f"{k}={v*100:.1f}%" for k, v in votes.items())
 
-        # Mean probability: prefer new key, fallback to old, then votes-average
-        mean_p = ens.get("prob_trigger_next_6h", ens.get("prob", None))
-        votes = ens.get("votes", {}) or {}
-        if mean_p is None:
-            probs = [float(v) for v in votes.values()]
-            mean_p = float(sum(probs) / len(probs)) if probs else 0.0
-        else:
-            mean_p = float(mean_p)
-
-        low_p  = float(ens.get("band_low",  mean_p))
-        high_p = float(ens.get("band_high", mean_p))
-
-        md.append(f"\n- **{o}**: {100.0*mean_p:.1f}% (±{100.0*(high_p - low_p)/2:.1f}%)")
-
-        if votes:
-            # show only models that actually returned a vote
-            ordered = [k for k in ("logistic", "rf", "gb") if k in votes]
-            votes_s = ", ".join(f"{k}={100.0*votes[k]:.1f}%" for k in ordered)
-            md.append(f"  \n  ○ votes: {votes_s}")
-            if len(ordered) == 1:
-                md.append("  \n  _(only {0} available)_".format(ordered[0]))
-        else:
-            md.append("  \n  _(demo fallback)_")
-
-except Exception as e:
-    md.append(f"\n⚠️ Ensemble score failed: {e}")
+    # width shown as ± half-range (same as before)
+    band_half = (high - low) / 2.0
+    lines.append(f"- **{o}**: {mean*100:.1f}% (±{band_half*100:.1f}%)")
+    if vote_items:
+        lines.append(f"  - votes: {vote_items}")
+    if out.get("demo") or len(votes) <= 1:
+        lines.append("  - *(demo fallback or single-model)*")
 
 
 # ---------- drift check (polish) ----------
