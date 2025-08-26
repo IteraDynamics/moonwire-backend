@@ -104,25 +104,39 @@ def _flatten_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
 def trigger_likelihood_metadata():
     """
     GET /internal/trigger-likelihood/metadata
-    Returns model meta (logistic, rf, gb if present), coverage, metrics, etc.
-    Robust to loader hiccups by falling back to direct file reads.
+    Return model meta (logistic, rf, gb if present), coverage, metrics, etc.
+    Strategy:
+      1) If any per-model meta files exist, assemble a nested dict and flatten.
+      2) Else try the helper model_metadata(models_dir=...).
+      3) Else fallback to any *.meta.json.
     """
     models_dir = paths.MODELS_DIR  # dynamic, respects monkeypatch in tests
-    meta: Dict[str, Any] = {}
 
-    # First try the official helper, pointing at the (possibly patched) models_dir
+    # 1) Prefer assembling an explicit nested view from per-model files
+    lg = _load_json(models_dir / "trigger_likelihood_v0.meta.json")
+    rf = _load_json(models_dir / "trigger_likelihood_rf.meta.json")
+    gb = _load_json(models_dir / "trigger_likelihood_gb.meta.json")
+
+    if any([lg, rf, gb]):
+        nested = {}
+        if isinstance(lg, dict) and lg:
+            nested["logistic"] = lg
+        if isinstance(rf, dict) and rf:
+            nested["rf"] = rf
+        if isinstance(gb, dict) and gb:
+            nested["gb"] = gb
+        # _flatten_meta will add top-level 'metrics' (from logistic) for back-compat,
+        # while preserving the nested blocks ('logistic','rf','gb').
+        return _flatten_meta(nested)
+
+    # 2) Fall back to the helper (might return only a flat logistic meta)
+    meta = {}
     try:
         meta = model_metadata(models_dir=models_dir) or {}
     except Exception:
         meta = {}
 
-    # Fallback: read logistic meta directly
-    if not meta:
-        lg = _load_json(models_dir / "trigger_likelihood_v0.meta.json")
-        if lg:
-            meta = lg
-
-    # Fallback: any *.meta.json in the dir
+    # 3) Last resort: any *.meta.json
     if not meta:
         try:
             for p in sorted(models_dir.glob("*.meta.json")):
