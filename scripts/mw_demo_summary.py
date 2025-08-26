@@ -1068,55 +1068,40 @@ else:
         pass
 
 
-
-# --- Ensemble v0.4 (mean ± band) ---------------------------------------------
-md.append("\n**Ensemble v0.4 (mean ± band)**\n")
+# --- Ensemble v0.4 (mean ± band) -------------------------------------------
+md.append("")
+md.append("**Ensemble v0.4 (mean ± band)**")
 try:
-    for o in candidates:
-        # 1) Get the SAME rich features used above (prefer cache)
-        feats = None
-        try:
-            feats = feats_cache.get(o) if 'feats_cache' in locals() and isinstance(feats_cache, dict) else None
-        except Exception:
-            feats = None
+    # we assume feats_cache[origin] exists from the rich-features section;
+    # if not, build it on the fly via _build_summary_features_for_origin(...)
+    for o in origins:
+        feats = feats_cache.get(o)
+        if feats is None:
+            feats = _build_summary_features_for_origin(
+                o,
+                trends_by_origin=trends_map,
+                regimes_map=regimes_map,
+                metrics_map=metrics_map,
+                bursts_by_origin=bursts_by_origin,
+            )
 
-        if not feats:
-            # Fallback: rebuild from summary maps if available
-            try:
-                feats = _build_summary_features_for_origin(
-                    o,
-                    trends_by_origin=trends_map if 'trends_map' in locals() else None,
-                    regimes_map=regimes_map if 'regimes_map' in locals() else None,
-                    metrics_map=metrics_map if 'metrics_map' in locals() else None,
-                    bursts_by_origin=bursts_by_origin if 'bursts_by_origin' in locals() else None,
-                )
-            except Exception:
-                feats = {}
+        ens = infer_score_ensemble({"features": feats})
+        # Use values as returned by infer; do NOT treat missing votes as 0.0
+        mean_p = float(ens.get("prob", 0.0))
+        low_p  = float(ens.get("band_low", mean_p))
+        high_p = float(ens.get("band_high", mean_p))
+        votes  = ens.get("votes", {}) or {}
 
-        # 2) Ensemble score USING FEATURES (avoid origin/timestamp path)
-        res = infer_score_ensemble({"features": feats})  # <-- key fix
-
-        # 3) Render mean ± band
-        p  = float(res.get("prob_trigger_next_6h", 0.0)) * 100.0
-        lo = float(res.get("low",  res.get("prob_trigger_next_6h", 0.0))) * 100.0
-        hi = float(res.get("high", res.get("prob_trigger_next_6h", 0.0))) * 100.0
-        band = max(abs(p - lo), abs(hi - p))
-        md.append(f"- **{o}**: {p:.1f}% (±{band:.1f}%)")
-
-        # 4) Per-model votes (only print present models)
-        votes = res.get("votes", {}) or {}
-        parts = []
-        for k in ("logistic", "rf", "gb"):
-            v = votes.get(k)
-            if isinstance(v, (int, float)):
-                parts.append(f"{k}={float(v)*100:.1f}%")
-        if parts:
-            md.append("  \n  ○ votes: " + ", ".join(parts))
-
-        # 5) Demo/missing-model hint
-        if res.get("demo") or len(parts) <= 1:
-            md.append("\n  \n  _(demo fallback)_")
-
+        # Pretty print
+        md.append(f"\n- **{o}**: {100.0*mean_p:.1f}% (±{100.0*(high_p - low_p)/2:.1f}%)")
+        if votes:
+            ordered = [k for k in ("logistic","rf","gb") if k in votes]
+            votes_s = ", ".join(f"{k}={100.0*votes[k]:.1f}%" for k in ordered)
+            md.append(f"  \n  ○ votes: {votes_s}")
+            if len(ordered) == 1:
+                md.append(f"  \n  _(only {ordered[0]} available)_")
+        else:
+            md.append("  \n  _(demo fallback)_")
 except Exception as e:
     md.append(f"\n⚠️ Ensemble score failed: {e}")
 
