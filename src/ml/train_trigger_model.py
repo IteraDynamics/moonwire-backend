@@ -261,10 +261,12 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build examples using live paths (monkeypatch-friendly)
+    # Build examples using CURRENT LOGS_DIR (truly monkeypatch-friendly)
+    log_path  = paths.LOGS_DIR / "retraining_log.jsonl"
+    trig_path = paths.LOGS_DIR / "retraining_triggered.jsonl"
     rows, feat_order = build_examples(
-        paths.RETRAINING_LOG_PATH,
-        paths.RETRAINING_TRIGGERED_LOG_PATH,
+        log_path,
+        trig_path,
         days=days,
         interval=interval,
     )
