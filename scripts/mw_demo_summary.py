@@ -26,12 +26,9 @@ from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
 
-# --- Import-time safety: ensure 'lines' exists if any accidental top-level
-# appends slipped in (pytest imports this module for tests).
-try:  # noqa: SIM105
-    lines  # type: ignore  # just probing existence
-except NameError:
-    lines: list[str] = []
+# --- Safe-import guard for pytest: ensure any stray top-level uses no-op cleanly.
+if __name__ != "__main__":
+    lines, origins = [], []
 
 
 # ---- ML (trigger likelihood) import guard ----
