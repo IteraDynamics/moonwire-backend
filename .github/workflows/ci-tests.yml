@@ -31,42 +31,41 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
 
-      # --- Train trigger likelihood models (smoke) ---
-      - name: Train trigger likelihood models (logistic + RF)
+      # ---------- Train models (smoke; non-blocking for metrics) ----------
+      - name: Train Trigger Likelihood models (logistic + RF + GB)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"        # allow seeding if logs are empty in CI
+          DEMO_MODE: "true"     # allow seeding in CI if logs are empty
         run: |
-          python -m src.ml.train_trigger_model --days 14 --interval hour
+          python - << 'PY'
+          from pathlib import Path
+          import os
+          from src.ml.train_trigger_model import train
+          # Train once; module trains logistic (+rf/+gb if available)
+          out = train(days=14, interval="hour", out_dir=Path("models"))
+          print("Train outputs:", out)
+          PY
           echo "Models in ./models:"
           ls -lah models || true
 
-      # Upload logistic artifacts
-      - name: Upload logistic model artifacts
+      - name: Upload model artifacts (logistic + RF + GB)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: trigger-likelihood-v0
+          name: trigger-likelihood-models
           path: |
             models/trigger_likelihood_v0.joblib
             models/trigger_likelihood_v0.meta.json
-          if-no-files-found: warn
-          retention-days: 14
-
-      # Upload Random Forest artifacts (may be missing locally; warn only)
-      - name: Upload RF model artifacts
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trigger-likelihood-rf
-          path: |
+            models/feature_coverage.json
             models/trigger_likelihood_rf.joblib
             models/trigger_likelihood_rf.meta.json
+            models/trigger_likelihood_gb.joblib
+            models/trigger_likelihood_gb.meta.json
           if-no-files-found: warn
           retention-days: 14
 
-      # --- Demo summary & artifacts (read-only, post-tests) ---
+      # ---------- Demo summary & artifacts (read-only, post-tests) ----------
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
@@ -75,9 +74,9 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"          # enable demo seeding when no reviewers present
-          MPLBACKEND: "Agg"          # safe, headless matplotlib backend
-          DEMO_RICH_SCORES: "true"   # richer ML scoring in summary
+          DEMO_MODE: "true"        # enable demo seeding when needed
+          MPLBACKEND: "Agg"        # safe headless matplotlib backend
+          DEMO_RICH_SCORES: "true" # richer ML scoring in summary
         run: python scripts/mw_demo_summary.py
 
       - name: Show artifacts (debug)
@@ -96,7 +95,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           cat artifacts/demo_summary.md >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload demo-summary artifact
+      - name: Upload demo summary artifacts
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
@@ -104,18 +103,3 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
-
-        - name: Upload model artifacts
-          if: ${{ success() }}
-          uses: actions/upload-artifact@v4
-          with:
-            name: trigger-likelihood-v0
-            path: |
-            models/trigger_likelihood_v0.joblib
-            models/trigger_likelihood_v0.meta.json
-            models/trigger_likelihood_rf.joblib
-            models/trigger_likelihood_rf.meta.json
-            models/trigger_likelihood_gb.joblib
-            models/trigger_likelihood_gb.meta.json
-            if-no-files-found: warn
-            retention-days: 14
