@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from src import paths
 from src.ml.train_trigger_model import train
-from src.main import app
+from main import app
 
 def test_gb_trains_and_metadata(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(paths, "MODELS_DIR", tmp_path / "models")
