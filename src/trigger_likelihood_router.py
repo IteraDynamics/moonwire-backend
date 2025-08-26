@@ -8,7 +8,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from src.ml.infer import infer_score, infer_score_ensemble, model_metadata
-from src.paths import MODELS_DIR
+from src import paths  # <- import the module, not MODELS_DIR constant
 
 router = APIRouter()  # main.py mounts with prefix="/internal"
 
@@ -107,22 +107,25 @@ def trigger_likelihood_metadata():
     Returns model meta (logistic, rf, gb if present), coverage, metrics, etc.
     Robust to loader hiccups by falling back to direct file reads.
     """
+    models_dir = paths.MODELS_DIR  # dynamic, respects monkeypatch in tests
     meta: Dict[str, Any] = {}
+
+    # First try the official helper, pointing at the (possibly patched) models_dir
     try:
-        meta = model_metadata() or {}
+        meta = model_metadata(models_dir=models_dir) or {}
     except Exception:
         meta = {}
 
+    # Fallback: read logistic meta directly
     if not meta:
-        # Try direct logistic meta first (common in tests)
-        lg = _load_json(MODELS_DIR / "trigger_likelihood_v0.meta.json")
+        lg = _load_json(models_dir / "trigger_likelihood_v0.meta.json")
         if lg:
             meta = lg
 
+    # Fallback: any *.meta.json in the dir
     if not meta:
-        # Try any *.meta.json present (take first reasonable one)
         try:
-            for p in sorted(MODELS_DIR.glob("*.meta.json")):
+            for p in sorted(models_dir.glob("*.meta.json")):
                 obj = _load_json(p)
                 if isinstance(obj, dict) and obj:
                     meta = obj
