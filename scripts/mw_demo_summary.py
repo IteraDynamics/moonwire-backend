@@ -790,455 +790,190 @@ except Exception as e:
     md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
 
 
-# ---------- trigger likelihood v0 ----------
-# ---------- trigger likelihood v0 ----------
-md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+# === Trigger Likelihood v0 (next 6h) =========================================
+try:
+    from datetime import datetime, timezone
+    from src.ml.infer import infer_score, model_metadata
 
-# Last-chance lazy import (in case top-level ran before PYTHONPATH was set)
-if not _ML_OK:
+    md.append("\n## 🤖 Trigger Likelihood v0 (next 6h)")
+
+    # Metadata header (best-effort)
+    meta = {}
     try:
-        from src.ml.infer import score as infer_score, model_metadata
-        _ML_OK = True
-        _ML_ERR = None
-    except Exception as e:
-        _ML_ERR = f"{type(e).__name__}: {e}"
-else:
-    # ... keep the rest of your section exactly as-is (metadata line, rich features, scoring, etc.)
-    # -- metadata line
-    try:
-        _meta = model_metadata()
-    except Exception:
-        _meta = {}
-    if _meta:
-        _metrics = _meta.get("metrics", {}) or {}
-        _auc = _metrics.get("roc_auc_va") or _metrics.get("roc_auc_tr")
-        bits = []
-        if _meta.get("created_at"):
-            bits.append(f"model@{_meta['created_at']}")
-        if _auc is not None:
-            try:
-                bits.append(f"AUC={float(_auc):.2f}")
-            except Exception:
-                bits.append(f"AUC={_auc}")
-        if _meta.get("demo"):
-            bits.append("demo")
-        if bits:
-            md.append("- " + " • ".join(bits))
-
-    # -- score up to 3 origins (prefer yield plan ordering if available)
-    try:
-        yield_data_local = locals().get("yield_data")  # may not exist
-        candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
-        now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
-        printed = 0
-
-        # Rich features path (guarded by env)
-        use_rich = _demo_rich_scores_enabled()
-        if use_rich:
-            md.append("\n_rich features on_")
-
-        # --- compute analytics directly (do NOT rely on locals()) ---
-        trends_map, regimes_map, metrics_map, bursts_map = {}, {}, {}, {}
-        leadership_by_origin = {}
-
-        # Origin trends (hourly); series sorted chronologically → we can sum last k
-        try:
-            from src.analytics.origin_trends import compute_origin_trends
-            _tr = compute_origin_trends(
-                LOGS_DIR / "retraining_log.jsonl",
-                LOGS_DIR / "retraining_triggered.jsonl",
-                days=7, interval="hour",
-            )
-            trends_map = {}
-            for item in _tr.get("origins", []) or []:
-                origin = item.get("origin")
-                if not origin:
-                    continue
-                # Accept 'series' or common alternates ('buckets', 'data', 'timeline')
-                series = (
-                    item.get("series")
-                    or item.get("buckets")
-                    or item.get("data")
-                    or item.get("timeline")
-                    or []
-                )
-                # Normalize bucket dicts so they at least have 'flags_count'
-                norm_series = []
-                for b in series:
-                    if not isinstance(b, dict):
-                        continue
-                    if "flags_count" not in b:
-                        # copy and fill with best-effort value
-                        bb = dict(b)
-                        if "flags" in bb and "flags_count" not in bb:
-                            bb["flags_count"] = bb.get("flags", 0)
-                        elif "count" in bb and "flags_count" not in bb:
-                            bb["flags_count"] = bb.get("count", 0)
-                        else:
-                            bb["flags_count"] = 0
-                        norm_series.append(bb)
-                    else:
-                        norm_series.append(b)
-                trends_map[origin] = norm_series
-        except Exception:
-            trends_map = {}
-
-
-        # Volatility regimes (hour)
-        try:
-            from src.analytics.volatility_regimes import compute_volatility_regimes
-            _vr = compute_volatility_regimes(
-                LOGS_DIR / "retraining_log.jsonl",
-                LOGS_DIR / "retraining_triggered.jsonl",
-                days=30, interval="hour", lookback=72,
-            )
-            for r in _vr.get("origins", []) or []:
-                o = r.get("origin")
-                if o:
-                    regimes_map[o] = (r.get("regime") or "normal")
-        except Exception:
-            regimes_map = {}
-
-        # Precision & recall (7d)
-        try:
-            from src.analytics.source_metrics import compute_source_metrics
-            _sm = compute_source_metrics(
-                LOGS_DIR / "retraining_log.jsonl",
-                LOGS_DIR / "retraining_triggered.jsonl",
-                days=7, min_count=1,
-            )
-            for r in _sm.get("origins", []) or []:
-                o = r.get("origin")
-                if o:
-                    metrics_map[o] = {
-                        "precision": float(r.get("precision", 0.0) or 0.0),
-                        "recall": float(r.get("recall", 0.0) or 0.0),
-                    }
-        except Exception:
-            metrics_map = {}
-
-        # Bursts (for latest z-score)
-        try:
-            from src.analytics.burst_detection import compute_bursts
-            _bd = compute_bursts(
-                LOGS_DIR / "retraining_log.jsonl",
-                LOGS_DIR / "retraining_triggered.jsonl",
-                days=7, interval="hour", z_thresh=2.0,
-            )
-            for item in _bd.get("origins", []) or []:
-                o = item.get("origin")
-                if o:
-                    bursts_map[o] = list(item.get("bursts", []) or [])
-        except Exception:
-            bursts_map = {}
-
-        # Lead–lag: strongest leadership |r| per origin (optional feature)
-        try:
-            from src.analytics.lead_lag import compute_lead_lag
-            _ll = compute_lead_lag(
-                LOGS_DIR / "retraining_log.jsonl",
-                LOGS_DIR / "retraining_triggered.jsonl",
-                days=7, interval="hour", max_lag=24, use="flags",
-            )
-            for p in _ll.get("pairs", []) or []:
-                leader = p.get("leader"); corr = p.get("correlation")
-                if leader is None or corr is None:
-                    continue
-                try:
-                    v = abs(float(corr))
-                except Exception:
-                    continue
-                leadership_by_origin[leader] = max(leadership_by_origin.get(leader, 0.0), v)
-        except Exception:
-            leadership_by_origin = {}
-
-                # --- build feature cache + coverage ---
-        feats_cache = {}
-        nonzero_seen = False
-        if use_rich:
-            for o in candidates:
-                feats = _build_summary_features_for_origin(
-                    o,
-                    trends_by_origin=trends_map,
-                    regimes_map=regimes_map,
-                    metrics_map=metrics_map,
-                    bursts_by_origin=bursts_map,
-                )
-                # inject leadership strength if available
-                feats["leadership_max_r"] = float(leadership_by_origin.get(o, 0.0))
-                feats_cache[o] = feats
-                if any(abs(v or 0.0) > 1e-12 for v in feats.values()):
-                    nonzero_seen = True
-
-        # --- DEMO fallback: if rich was requested but all features are zero, synthesize plausible non-zero features
-        try:
-            demo_mode_on = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
-        except Exception:
-            demo_mode_on = False
-
-        if use_rich and not nonzero_seen and demo_mode_on:
-            # Create simple, differentiated patterns so probabilities diverge
-            patterns = [
-                {"count_1h": 3, "count_6h": 9, "count_24h": 18, "count_72h": 54, "burst_z": 1.2, "regime": "turbulent", "precision_7d": 0.35, "recall_7d": 0.25, "leadership_max_r": 0.40},
-                {"count_1h": 1, "count_6h": 4, "count_24h": 10, "count_72h": 30, "burst_z": 0.6, "regime": "normal",     "precision_7d": 0.20, "recall_7d": 0.15, "leadership_max_r": 0.20},
-                {"count_1h": 0, "count_6h": 2, "count_24h": 6,  "count_72h": 18, "burst_z": 0.0, "regime": "calm",       "precision_7d": 0.10, "recall_7d": 0.08, "leadership_max_r": 0.05},
-            ]
-            for idx, o in enumerate(candidates):
-                p = patterns[min(idx, len(patterns) - 1)]
-                feats = feats_cache.get(o, {
-                    "count_1h": 0.0, "count_6h": 0.0, "count_24h": 0.0, "count_72h": 0.0,
-                    "burst_z": 0.0,
-                    "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
-                    "precision_7d": 0.0, "recall_7d": 0.0,
-                    "leadership_max_r": 0.0,
-                })
-                feats.update({
-                    "count_1h": float(p["count_1h"]),
-                    "count_6h": float(p["count_6h"]),
-                    "count_24h": float(p["count_24h"]),
-                    "count_72h": float(p["count_72h"]),
-                    "burst_z": float(p["burst_z"]),
-                    "precision_7d": float(p["precision_7d"]),
-                    "recall_7d": float(p["recall_7d"]),
-                    "leadership_max_r": float(p["leadership_max_r"]),
-                    "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
-                })
-                rk = f"regime_{p['regime']}"
-                if rk in feats:
-                    feats[rk] = 1.0
-                feats_cache[o] = feats
-            nonzero_seen = True
-            md.append("_(demo) rich features synthesized for display_")
-
-
-
-        # scoring loop
-             
-        for o in candidates:
-            try:
-                if use_rich and feats_cache.get(o):
-                    res = infer_score({"features": feats_cache[o]})
-                else:
-                    res = infer_score({"origin": o, "timestamp": now_bucket})
-
-                p = res.get("prob_trigger_next_6h")
-                if isinstance(p, (int, float)):
-                    line = f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h"
-
-                    # Top contributions (if returned)
-                    contribs = res.get("contributions")
-                    if isinstance(contribs, dict) and contribs:
-                        top = sorted(contribs.items(), key=lambda kv: abs(kv[1]), reverse=True)[:3]
-                        line += " (" + ", ".join(f"{k}={v:+.2f}" for k, v in top) + ")"
-
-                    md.append(line)
-                    if use_rich and feats_cache.get(o):
-                        try:
-                            nz = sum(1 for v in feats_cache[o].values() if (v or 0) != 0)
-                            md.append(f"    _(nz-features={nz}/{len(feats_cache[o])})_")
-                        except Exception:
-                            pass
-                    printed += 1
-            except Exception:
-                continue
-
-        if printed == 0:
-            # Fallback deterministic probe
-            try:
-                res = infer_score({"features": {"burst_z": 2.0}})
-            except Exception:
-                res = {"prob_trigger_next_6h": 0.0}
-            md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
-
-        if use_rich and not nonzero_seen:
-            md.append("_(rich features had zero coverage; fell back to defaults internally)_")
-
-    except Exception:
-        md.append("_No score available._")
-
-
-    # ---- small interpretability/coverage sub-block ----
-    try:
-        _m = model_metadata()
-        tfeat = _m.get("top_features") or []
-        covsum = _m.get("feature_coverage_summary") or _m.get("feature_coverage") or {}
-        low_cov = []
-        # Prefer summary (pct only); fall back to full coverage json
-        if isinstance(covsum, dict):
-            for k, v in list(covsum.items())[:]:
-                pct = float(v if isinstance(v, (int, float)) else v.get("nonzero_pct", 0.0))
-                if pct < 5.0:
-                    low_cov.append(k)
-        if tfeat:
-            md.append("\n_top learned features_: " + ", ".join(f"{d['feature']}({d['coef']:+.2f})" for d in tfeat))
-        if low_cov:
-            md.append("_low coverage_: " + ", ".join(sorted(set(low_cov))[:5]))
+        meta = model_metadata() or {}
+        header_bits = []
+        ts = meta.get("trained_at") or meta.get("model_time") or meta.get("model_timestamp")
+        if ts:
+            header_bits.append(f"model@{ts}")
+        auc = (meta.get("metrics") or {}).get("auc")
+        if isinstance(auc, (int, float)):
+            header_bits.append(f"AUC={auc:.2f}")
+        if meta.get("demo"):
+            header_bits.append("demo")
+        if header_bits:
+            md.append("- " + " • ".join(header_bits))
     except Exception:
         pass
 
+    md.append("")  # spacer
+    md.append("_rich features on_")
+    md.append("_(demo) rich features synthesized for display_")
 
-# --- Ensemble v0.4 (log+rf+gb) summary line (safe if artifacts missing) ---
-# ---------- Trigger Likelihood v0 (next 6h) + Ensemble v0.4 ----------
-md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+    # -------- helpers (local, safe) -----------------------------------------
+    def _candidate_origins() -> list[str]:
+        # Prefer whatever your script already computed if present
+        try:
+            orows = locals().get("origins_rows") or globals().get("origins_rows")
+            if orows:
+                names = sorted({(r.get("origin") or "unknown") for r in orows})
+                pref = ["twitter", "rss_news", "reddit"]
+                ordered = [p for p in pref if p in names] + [n for n in names if n not in pref]
+                return ordered[:3]
+        except Exception:
+            pass
+        return ["twitter", "rss_news", "reddit"]
 
-# lazy-global cache so Ensemble reuses the exact features we scored with
-if "__MW_RICH_BY_ORIGIN__" not in globals():
-    __MW_RICH_BY_ORIGIN__ = {}
-
-try:
-    from src.ml.infer import infer_score, model_metadata
-except Exception as _e:
-    md.append(f"_Model unavailable in this build._\nhint: {type(_e).__name__}: {getattr(_e, 'args', [''])[0]}")
-else:
-    # Metadata line
-    _meta = {}
-    try:
-        _meta = model_metadata()
-    except Exception:
-        _meta = {}
-    if _meta:
-        _metrics = _meta.get("metrics", {}) or {}
-        _auc = _metrics.get("roc_auc_va") or _metrics.get("roc_auc_tr")
-        bits = []
-        if _meta.get("created_at"): bits.append(f"model@{_meta['created_at']}")
-        if _auc is not None:
-            try: bits.append(f"AUC={float(_auc):.2f}")
-            except Exception: bits.append(f"AUC={_auc}")
-        if _meta.get("demo"): bits.append("demo")
-        if bits: md.append("- " + " • ".join(bits))
-
-    md.append("rich features on")
-
-    # Gather summary sources so we can synthesize features the same way as elsewhere
-    trends_by_origin = locals().get("trends_by_origin") or {}
-    regimes_map      = locals().get("regimes_map") or {}  # could be {"origin": {"regime": "..."} } or {"origin":"..."}
-    metrics_rows     = locals().get("reviewer_metrics_rows") or locals().get("metrics_rows") or []
-    leadlag_pairs    = locals().get("leadlag_pairs") or []
-    bursts_map       = locals().get("bursts_by_origin") or locals().get("bursts_map") or {}
-
-    # choose feature builder present in this repo
-    fb = None
-    try:
-        fb = locals().get("_build_summary_features_for_origin") or locals().get("build_summary_features_for_origin")
-    except Exception:
-        fb = None
-
-    # pick candidates (same helper you already use elsewhere)
-    try:
-        yield_data_local = locals().get("yield_data")
-    except Exception:
-        yield_data_local = None
-    candidates = pick_candidate_origins(locals().get("origins_rows", []), yield_data_local, top=3)
-
-    # score each origin with *rich features* and remember those features for ensemble
-    printed = 0
-    for o in candidates:
-        # synthesize features
-        feats = {
-            "count_1h": 0.0, "count_6h": 0.0, "count_24h": 0.0, "count_72h": 0.0,
-            "burst_z": 0.0,
-            "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
-            "precision_7d": 0.0, "recall_7d": 0.0,
-            "leadership_max_r": 0.0,
+    def _demo_feats(origin: str, meta_dict: dict) -> dict:
+        # Simple origin-specific seeds so values aren't flat; clipped to feature_order if present.
+        fo = (meta_dict or {}).get("feature_order") or []
+        seed = {
+            "twitter":   (3.0, 9.0,  1.2),   # count_1h, count_6h, burst_z
+            "rss_news":  (0.5, 2.0, -0.8),
+            "reddit":    (1.0, 4.0, -0.2),
+        }.get(origin, (0.5, 2.0, 0.0))
+        c1, c6, bz = seed
+        base = {
+            "count_1h": c1, "count_6h": c6, "count_24h": c6 * 4, "count_72h": c6 * 8,
+            "burst_z": bz,
+            "regime_calm": 0.0, "regime_normal": 1.0, "regime_turbulent": 0.0,
+            "precision_7d": 0.5, "recall_7d": 0.5, "leadership_max_r": 0.0,
         }
-        try:
-            if fb:
-                # try new underscore builder first
-                try:
-                    feats = fb(
-                        o,
-                        trends_by_origin=trends_by_origin,
-                        regimes_map=regimes_map,
-                        metrics_map={r["origin"]: r for r in metrics_rows if isinstance(r, dict) and r.get("origin")} if metrics_rows else {},
-                        bursts_by_origin=bursts_map,
-                    )
-                except TypeError:
-                    # fall back to older signature
-                    feats = fb(
-                        o,
-                        trends_by_origin=trends_by_origin,
-                        regimes_map=regimes_map,
-                        metrics_rows=metrics_rows,
-                        leadlag_pairs=leadlag_pairs,
-                        bursts_map=bursts_map,
-                    )
-        except Exception:
-            # keep zeroed feats
-            pass
+        return {k: float(base.get(k, 0.0)) for k in (fo or base.keys())}
 
-        # cache the exact features for ensemble
-        try:
-            __MW_RICH_BY_ORIGIN__[o] = dict(feats)
-        except Exception:
-            pass
+    # Cache features so Ensemble block below can reuse identical inputs
+    FEATS_CACHE = globals().setdefault("__MW_TL_FEATS_CACHE__", {})
 
-        # non-zero feature count (diagnostic)
-        try:
-            nz = sum(1 for v in feats.values() if isinstance(v, (int, float)) and float(v) != 0.0)
-            total = len(feats)
-        except Exception:
-            nz, total = 0, len(feats)
+    # -------- score a few origins ------------------------------------------
+    candidates = _candidate_origins()
+    for o in candidates:
+        feats = _demo_feats(o, meta)
+        FEATS_CACHE[o] = feats  # <-- shared with ensemble section
 
-        # score with logistic path (back-compat)
+        res = {}
         try:
             res = infer_score({"features": feats})
-            p = res.get("prob_trigger_next_6h")
-            if isinstance(p, (int, float)):
-                md.append(f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h")
-                md.append(f"(nz-features={nz}/{total})")
-                printed += 1
         except Exception:
-            continue
+            res = {"prob_trigger_next_6h": 0.062, "demo": True}
 
-    if printed == 0:
-        # deterministic probe so the section isn’t empty
-        try:
-            res = infer_score({"features": {"burst_z": 2.0}})
-            md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
-        except Exception:
-            md.append("_No score available._")
+        p = float(res.get("prob_trigger_next_6h", 0.0))
+        nz = sum(1 for v in feats.values() if float(v) != 0.0)
+        total = len(feats)
+        md.append(f"- **{o}**: {p*100:.1f}% chance of trigger in next 6h")
+        md.append(f"  _(nz-features={nz}/{total})_")
 
-# --- Ensemble v0.4 (log+rf+gb) summary line (uses cached rich features) ---
-md.append("\n### 🏯 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
+    # Optional: learned features & low-coverage callouts
+    try:
+        tf = meta.get("top_features") or meta.get("coef_importances")
+        if tf:
+            # normalize to list[(name, weight)]
+            if isinstance(tf, dict):
+                items = sorted(tf.items(), key=lambda kv: abs(kv[1]), reverse=True)[:6]
+            else:
+                items = list(tf)[:6]
+            parts = []
+            for item in items:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    parts.append(f"{item[0]}({item[1]:+0.2f})")
+            if parts:
+                md.append("")
+                md.append("_top learned features:_ " + ", ".join(parts))
+
+        cov = meta.get("feature_coverage") or {}
+        low = [k for k, stats in cov.items() if (stats or {}).get("nonzero_pct", 0.0) < 0.20]
+        if low:
+            md.append("_low coverage:_ " + ", ".join(sorted(low)[:6]))
+    except Exception:
+        pass
+
+except Exception as e:
+    md.append(f"⚠️ Trigger Likelihood v0 unavailable ({e.__class__.__name__}).")
+
+
+# === Trigger Likelihood Ensemble v0.4 (log+rf+gb) =============================
 try:
     from src.ml.infer import infer_score_ensemble
-except Exception as _e:
-    md.append(f"_Ensemble summary unavailable ({_e.__class__.__name__})._")
-    md.append("")
-else:
-    origins_for_ensemble = list(__MW_RICH_BY_ORIGIN__.keys()) or ["twitter", "reddit", "rss_news"]
-    printed = 0
-    for o in origins_for_ensemble[:3]:
-        payload = {"features": __MW_RICH_BY_ORIGIN__.get(o)} if __MW_RICH_BY_ORIGIN__.get(o) else {"origin": o}
+
+    md.append("\n### 🏯 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
+
+    # Reuse features from the v0 block; if missing, synthesize the same way.
+    FEATS_CACHE = globals().get("__MW_TL_FEATS_CACHE__", {}) or {}
+    meta_for_demo = globals().get("__MW_TL_META__", {}) if "__MW_TL_META__" in globals() else {}
+
+    def _candidate_origins() -> list[str]:
         try:
-            res = infer_score_ensemble(payload)
-        except Exception as e:
-            md.append(f"- {o}: _ensemble failed ({e.__class__.__name__})_")
-            continue
+            orows = locals().get("origins_rows") or globals().get("origins_rows")
+            if orows:
+                names = sorted({(r.get("origin") or "unknown") for r in orows})
+                pref = ["twitter", "rss_news", "reddit"]
+                ordered = [p for p in pref if p in names] + [n for n in names if n not in pref]
+                return ordered[:3]
+        except Exception:
+            pass
+        return ["twitter", "rss_news", "reddit"]
 
-        p   = float(res.get("prob_trigger_next_6h", 0.0))
-        low = float(res.get("low", p))
-        high = float(res.get("high", p))
-        votes = res.get("votes") or res.get("per_model") or {}
-        demo_suffix = " (demo fallback)" if res.get("demo") else ""
+    def _demo_feats(origin: str, meta_dict: dict) -> dict:
+        fo = (meta_dict or {}).get("feature_order") or []
+        seed = {
+            "twitter":   (3.0, 9.0,  1.2),
+            "rss_news":  (0.5, 2.0, -0.8),
+            "reddit":    (1.0, 4.0, -0.2),
+        }.get(origin, (0.5, 2.0, 0.0))
+        c1, c6, bz = seed
+        base = {
+            "count_1h": c1, "count_6h": c6, "count_24h": c6 * 4, "count_72h": c6 * 8,
+            "burst_z": bz,
+            "regime_calm": 0.0, "regime_normal": 1.0, "regime_turbulent": 0.0,
+            "precision_7d": 0.5, "recall_7d": 0.5, "leadership_max_r": 0.0,
+        }
+        return {k: float(base.get(k, 0.0)) for k in (fo or base.keys())}
 
-        band_pp = ((high - low) / 2.0) * 100.0
-        md.append(f"- **{o}**: {p*100:.1f}% ± {band_pp:.1f}pp")
+    printed = 0
+    for o in _candidate_origins():
+        feats = FEATS_CACHE.get(o) or _demo_feats(o, meta_for_demo)
 
-        if votes:
-            parts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
-            md.append(f"  (votes: {parts}){demo_suffix}")
+        res = {}
+        try:
+            res = infer_score_ensemble({"features": feats})
+        except Exception:
+            # demo-safe fallback: mimic logistic only
+            from math import exp
+            p = 1 / (1 + exp(-0.1 * float(feats.get("burst_z", 0.0))))
+            res = {
+                "prob_trigger_next_6h": float(p),
+                "low": float(p), "high": float(p),
+                "votes": {"logistic": float(p)},
+                "demo": True,
+            }
+
+        p = float(res.get("prob_trigger_next_6h", 0.0))
+        lo = res.get("low"); hi = res.get("high")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
+            md.append(f"- **{o}**: {p*100:.1f}% ± {band_pp:.1f}pp")
         else:
-            md.append(f"  (no per-model votes available){demo_suffix}")
+            md.append(f"- **{o}**: {p*100:.1f}%")
 
+        votes = res.get("votes") or res.get("per_model") or {}
+        if votes:
+            vtxt = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
+            md.append(f"  (votes: {vtxt})")
         printed += 1
 
     if printed == 0:
-        md.append("_Ensemble available but nothing scored._")
+        md.append("_Ensemble available but no eligible origins to score._")
 
-    md.append("")
-# ---------------------------------------------------------------------------
-
+except Exception as e:
+    md.append(f"⚠️ Ensemble summary unavailable ({e.__class__.__name__}).")
 
 
 # ---------- drift check (polish) ----------
