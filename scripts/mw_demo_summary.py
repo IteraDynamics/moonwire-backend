@@ -1072,10 +1072,20 @@ else:
 md.append("")
 md.append("**Ensemble v0.4 (mean ± band)**")
 try:
-    # we assume feats_cache[origin] exists from the rich-features section;
-    # if not, build it on the fly via _build_summary_features_for_origin(...)
-    for o in origins:
-        feats = feats_cache.get(o)
+    # Build a safe origins list (feats_cache -> trends_map -> default)
+    origin_list = []
+    try:
+        origin_list = list((feats_cache or {}).keys())
+    except Exception:
+        origin_list = []
+    if not origin_list:
+        origin_list = list((trends_map or {}).keys())
+    if not origin_list:
+        origin_list = ["twitter", "reddit", "rss_news"]
+
+    for o in origin_list:
+        # Ensure we have features for this origin
+        feats = (feats_cache or {}).get(o)
         if feats is None:
             feats = _build_summary_features_for_origin(
                 o,
@@ -1086,16 +1096,16 @@ try:
             )
 
         ens = infer_score_ensemble({"features": feats})
-        # Use values as returned by infer; do NOT treat missing votes as 0.0
         mean_p = float(ens.get("prob", 0.0))
         low_p  = float(ens.get("band_low", mean_p))
         high_p = float(ens.get("band_high", mean_p))
         votes  = ens.get("votes", {}) or {}
 
-        # Pretty print
+        # Print row
         md.append(f"\n- **{o}**: {100.0*mean_p:.1f}% (±{100.0*(high_p - low_p)/2:.1f}%)")
+
         if votes:
-            ordered = [k for k in ("logistic","rf","gb") if k in votes]
+            ordered = [k for k in ("logistic", "rf", "gb") if k in votes]
             votes_s = ", ".join(f"{k}={100.0*votes[k]:.1f}%" for k in ordered)
             md.append(f"  \n  ○ votes: {votes_s}")
             if len(ordered) == 1:
