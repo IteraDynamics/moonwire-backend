@@ -1068,55 +1068,57 @@ else:
         pass
 
 
-# ---------- Ensemble v0.4 (log+rf+gb) ----------
 
+# --- Ensemble v0.4 (mean ± band) ---------------------------------------------
 md.append("\n**Ensemble v0.4 (mean ± band)**\n")
 try:
-    # Reuse the same candidates you just scored above
-    try:
-        yield_data_local = locals().get("yield_data")
-    except Exception:
-        yield_data_local = None
-    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
-    now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
-
-    had_any = False
     for o in candidates:
+        # 1) Get the SAME rich features used above (prefer cache)
         feats = None
-        if '_build_summary_features_for_origin' in globals():
+        try:
+            feats = feats_cache.get(o) if 'feats_cache' in locals() and isinstance(feats_cache, dict) else None
+        except Exception:
+            feats = None
+
+        if not feats:
+            # Fallback: rebuild from summary maps if available
             try:
                 feats = _build_summary_features_for_origin(
                     o,
                     trends_by_origin=trends_map if 'trends_map' in locals() else None,
                     regimes_map=regimes_map if 'regimes_map' in locals() else None,
                     metrics_map=metrics_map if 'metrics_map' in locals() else None,
-                    bursts_by_origin=bursts_map if 'bursts_map' in locals() else None,
+                    bursts_by_origin=bursts_by_origin if 'bursts_by_origin' in locals() else None,
                 )
             except Exception:
-                feats = None
-        if not feats:
-            # fallback: lean on the same simple features used in the TL v0 section
-            feats = {"burst_z": 2.0}
+                feats = {}
 
-        res = infer_score_ensemble({"features": feats})
-        p = float(res.get("prob_trigger_next_6h", 0.0))
-        lo = float(res.get("lo", p))
-        hi = float(res.get("hi", p))
-        votes = res.get("votes", {})
-        md.append(f"- **{o}**: **{round(p*100,1)}%** (±{round((hi-lo)*100/2,1)}%)")
-        if votes:
-            pretty = ", ".join(f"{k}={round(v*100,1)}%" for k,v in votes.items())
-            md.append(f"  \n  ○ votes: {pretty}")
-        if res.get("demo"):
-            md.append("  \n  _(demo fallback)_")
-        had_any = True
+        # 2) Ensemble score USING FEATURES (avoid origin/timestamp path)
+        res = infer_score_ensemble({"features": feats})  # <-- key fix
 
-    if not had_any:
-        md.append("_no ensemble votes available_")
+        # 3) Render mean ± band
+        p  = float(res.get("prob_trigger_next_6h", 0.0)) * 100.0
+        lo = float(res.get("low",  res.get("prob_trigger_next_6h", 0.0))) * 100.0
+        hi = float(res.get("high", res.get("prob_trigger_next_6h", 0.0))) * 100.0
+        band = max(abs(p - lo), abs(hi - p))
+        md.append(f"- **{o}**: {p:.1f}% (±{band:.1f}%)")
+
+        # 4) Per-model votes (only print present models)
+        votes = res.get("votes", {}) or {}
+        parts = []
+        for k in ("logistic", "rf", "gb"):
+            v = votes.get(k)
+            if isinstance(v, (int, float)):
+                parts.append(f"{k}={float(v)*100:.1f}%")
+        if parts:
+            md.append("  \n  ○ votes: " + ", ".join(parts))
+
+        # 5) Demo/missing-model hint
+        if res.get("demo") or len(parts) <= 1:
+            md.append("\n  \n  _(demo fallback)_")
+
 except Exception as e:
-    md.append(f"⚠️ Ensemble score failed: {e}")
-
-
+    md.append(f"\n⚠️ Ensemble score failed: {e}")
 
 # ---------- drift check (polish) ----------
 md.append("\n### 🔎 Drift Check (features)")
