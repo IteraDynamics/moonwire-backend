@@ -1076,42 +1076,70 @@ else:
 # --- Ensemble v0.4 (log+rf+gb) summary line (safe if artifacts missing) ---
 try:
     from src.ml.infer import infer_score_ensemble
-    md.append("\n### 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
-    # pick up to 3 origins the same way you already do elsewhere:
+
+    # Section header
+    md.append("")
+    md.append("**🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)**")
+
+    # Pick up to 3 origins the same way you already do elsewhere
     try:
-        yield_data_local = locals().get("yield_data")
+        candidates = pick_candidate_origins(
+            origins_rows,
+            locals().get("yield_data"),
+            top=3,
+        )
     except Exception:
-        yield_data_local = None
-    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
+        candidates = ["twitter", "reddit", "rss_news"]
+
+    # Reuse rich features if we have them; otherwise we'll fall back to origin+timestamp
+    feats_map = (
+        locals().get("rich_feats")
+        or locals().get("features_by_origin")
+        or locals().get("rich_features")
+        or {}
+    )
 
     now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+
     printed = 0
     for o in candidates:
         try:
-            res = infer_score_ensemble({"origin": o, "timestamp": now_bucket})
+            feats = feats_map.get(o)
+            payload = {"features": feats} if isinstance(feats, dict) else {
+                "origin": o,
+                "timestamp": now_bucket,
+            }
+            res = infer_score_ensemble(payload)
         except Exception:
             continue
+
         p = res.get("prob_trigger_next_6h")
-        lo = res.get("low"); hi = res.get("high")
+        if not isinstance(p, (int, float)):
+            continue
+
+        lo = float(res.get("low", p))
+        hi = float(res.get("high", p))
         votes = res.get("votes") or res.get("per_model") or {}
+        demo  = bool(res.get("demo")) or len(votes) < 2
 
-        if isinstance(p, (int, float)):
-            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-                band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
-                md.append(f"- {o}: **{float(p)*100:.1f}%** ± {band_pp:.1f}pp")
-            else:
-                md.append(f"- {o}: **{float(p)*100:.1f}%**")
+        band_pp = ((hi - lo) / 2.0) * 100.0
+        md.append(f"- **{o}**: {float(p)*100:.1f}% ± {band_pp:.1f}pp")
 
-            if votes:
-                vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
-                md.append(f"  (votes: {vparts})")
-            printed += 1
+        if votes:
+            vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
+            md.append(f"  (votes: {vparts})")
+        if demo:
+            md.append("  _(demo fallback)_")
+
+        printed += 1
 
     if printed == 0:
         md.append("_Ensemble available but no eligible origins to score._")
 
 except Exception as e:
-    md.append(f"_Ensemble summary unavailable ({e.__class__.__name__})._")
+    md.append(f"_Ensemble summary unavailable ({e.__class__.__name__}: {e})._")
+
+
 
 # ---------- drift check (polish) ----------
 md.append("\n### 🔎 Drift Check (features)")
