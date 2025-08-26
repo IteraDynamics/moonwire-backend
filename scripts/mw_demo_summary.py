@@ -1073,34 +1073,45 @@ else:
         pass
 
 
-# --- Ensemble v0.4 (mean ± band) --------------------------------------------
-lines.append("")
-lines.append("**Ensemble v0.4 (mean ± band)**")
-
-for o in origins:
+# --- Ensemble v0.4 (log+rf+gb) summary line (safe if artifacts missing) ---
+try:
+    from src.ml.infer import infer_score_ensemble
+    md.append("\n### 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
+    # pick up to 3 origins the same way you already do elsewhere:
     try:
-        # however you build features per origin; reuse your existing helper/var
-        feats = rich_feats.get(o, rich_feats_any)  # keep your current source of features
-        out = infer_score_ensemble({"features": feats})
-    except Exception as e:
-        lines.append(f"- ⚠️ Ensemble score failed for {o}: {e}")
-        continue
+        yield_data_local = locals().get("yield_data")
+    except Exception:
+        yield_data_local = None
+    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
 
-    mean = float(out.get("prob_trigger_next_6h", 0.0))
-    low  = float(out.get("low", mean))
-    high = float(out.get("high", mean))
+    now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+    printed = 0
+    for o in candidates:
+        try:
+            res = infer_score_ensemble({"origin": o, "timestamp": now_bucket})
+        except Exception:
+            continue
+        p = res.get("prob_trigger_next_6h")
+        lo = res.get("low"); hi = res.get("high")
+        votes = res.get("votes") or res.get("per_model") or {}
 
-    votes = (out.get("votes") or out.get("per_model") or {})
-    vote_items = ", ".join(f"{k}={v*100:.1f}%" for k, v in votes.items())
+        if isinstance(p, (int, float)):
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
+                md.append(f"- {o}: **{float(p)*100:.1f}%** ± {band_pp:.1f}pp")
+            else:
+                md.append(f"- {o}: **{float(p)*100:.1f}%**")
 
-    # width shown as ± half-range (same as before)
-    band_half = (high - low) / 2.0
-    lines.append(f"- **{o}**: {mean*100:.1f}% (±{band_half*100:.1f}%)")
-    if vote_items:
-        lines.append(f"  - votes: {vote_items}")
-    if out.get("demo") or len(votes) <= 1:
-        lines.append("  - *(demo fallback or single-model)*")
+            if votes:
+                vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
+                md.append(f"  (votes: {vparts})")
+            printed += 1
 
+    if printed == 0:
+        md.append("_Ensemble available but no eligible origins to score._")
+
+except Exception as e:
+    md.append(f"_Ensemble summary unavailable ({e.__class__.__name__})._")
 
 # ---------- drift check (polish) ----------
 md.append("\n### 🔎 Drift Check (features)")
