@@ -790,20 +790,20 @@ except Exception as e:
     md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
 
 
-# --- Ensemble v0.4 (log+rf+gb) summary (safe if artifacts missing) ---
+# --- Trigger Likelihood Ensemble v0.4 (log+rf+gb) ---
 try:
     from src.ml.infer import infer_score_ensemble
 
     md.append("\n### 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
 
-    # Use same candidate selection you already use above; fall back if yield_data isn't defined.
-    try:
-        yield_data_local = locals().get("yield_data")
-    except Exception:
-        yield_data_local = None
+    # Use the same origin picker you already use elsewhere:
+    candidates = pick_candidate_origins(
+        origins_rows,
+        locals().get("yield_data"),  # safe if missing
+        top=3,
+    )
 
-    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
-    
+    # <- THIS is where feats_maps goes (right after candidates):
     feats_maps = (
         locals().get("rich_feats_by_origin")
         or locals().get("display_features_by_origin")
@@ -811,42 +811,44 @@ try:
         or locals().get("feats_by_origin")
         or {}
     )
-    
+
     now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
-
     printed = 0
-    for o in candidates:
-        try:
-            res = infer_score_ensemble({"origin": o, "timestamp": now_bucket})
-        except Exception:
-            continue
 
-        votes = res.get("votes") or res.get("per_model") or {}
-        # Only print when at least TWO learners contribute (e.g., logistic+rf, logistic+gb, rf+gb...)
-        if len(votes) < 2:
+    for o in candidates:
+        # Prefer rich features; fall back to origin+timestamp if none found.
+        feats = feats_maps.get(o) or {}
+        payload = {"features": feats} if feats else {"origin": o, "timestamp": now_bucket}
+
+        try:
+            res = infer_score_ensemble(payload)
+        except Exception as e:
+            md.append(f"- {o}: _ensemble failed ({e.__class__.__name__})_")
             continue
 
         p = res.get("prob_trigger_next_6h")
         lo = res.get("low"); hi = res.get("high")
+        votes = res.get("votes") or res.get("per_model") or {}
 
         if isinstance(p, (int, float)):
             if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
                 band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
-                md.append(f"- {o}: **{float(p)*100:.1f}%** ± {band_pp:.1f}pp")
+                md.append(f"- **{o}**: {float(p)*100:.1f}% ± {band_pp:.1f}pp")
             else:
-                md.append(f"- {o}: **{float(p)*100:.1f}%**")
+                md.append(f"- **{o}**: {float(p)*100:.1f}%")
 
-            # Show per-model votes
-            vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
-            md.append(f"  (votes: {vparts})")
+            if votes:
+                vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
+                md.append(f"  (votes: {vparts})")
+
             printed += 1
 
-    # Nothing printed? Be explicit instead of silent.
     if printed == 0:
-        md.append("_Ensemble skipped — only one learner available (logistic)._")
+        md.append("_Ensemble available but no eligible origins to score._")
 
 except Exception as e:
     md.append(f"_Ensemble summary unavailable ({e.__class__.__name__})._")
+
 
 # ---------- drift check (polish) ----------
 md.append("\n### 🔎 Drift Check (features)")
