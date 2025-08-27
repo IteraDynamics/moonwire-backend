@@ -171,20 +171,29 @@ def infer_score_ensemble(
     payload: Dict[str, Any],
     *,
     models_dir: Optional[Path] = None,
-    apply_floor: Optional[bool] = None,  # None = read CI_SUMMARY_COSMETIC_FLOOR (default OFF)
 ) -> Dict[str, Any]:
     """
     Average available learners (logistic, rf, gb).
-    - By default returns raw model probabilities.
-    - If apply_floor=True (or CI_SUMMARY_COSMETIC_FLOOR=1), applies a cosmetic
-      floor/ceiling for nicer CI summary display and returns `votes_floored`
-      plus mean/low/high computed from the floored votes.
+    IMPORTANT: RF/GB are only included if the payload has enough non-zero features
+    for that model's feature_order (prevents averaging in meaningless 0.0 votes).
     """
     feats = payload.get("features") or {}
     votes: Dict[str, float] = {}
     used: List[str] = []
 
-    # logistic
+    def _nz_count(order: List[str]) -> int:
+        # how many features are actually present / non-zero for this model?
+        c = 0
+        for k in order:
+            try:
+                v = float(feats.get(k, 0.0) or 0.0)
+            except Exception:
+                v = 0.0
+            if abs(v) > 1e-12:
+                c += 1
+        return c
+
+    # --- logistic (always allowed; falls back to demo if artifacts missing) ---
     l_model, l_meta = _load_one("logistic", models_dir)
     if l_model and l_meta:
         order = l_meta.get("feature_order") or []
@@ -196,84 +205,65 @@ def infer_score_ensemble(
             except Exception:
                 pass
 
-    # rf
+    # --- rf (require a few non-zero features to contribute) ---
     rf_model, rf_meta = _load_one("rf", models_dir)
     if rf_model and rf_meta:
         order = rf_meta.get("feature_order") or []
-        if order:
+        if order and _nz_count(order) >= 3:
             x = _vectorize(feats, order)
             try:
-                votes["rf"] = float(rf_model.predict_proba(x)[0, 1])
+                p_rf = float(rf_model.predict_proba(x)[0, 1])
+                votes["rf"] = p_rf
                 used.append("rf")
             except Exception:
-                pass
+                pass  # do not inject zeros
 
-    # gb
+    # --- gb (same gating) ---
     gb_model, gb_meta = _load_one("gb", models_dir)
     if gb_model and gb_meta:
         order = gb_meta.get("feature_order") or []
-        if order:
+        if order and _nz_count(order) >= 3:
             x = _vectorize(feats, order)
             try:
-                votes["gb"] = float(gb_model.predict_proba(x)[0, 1])
+                p_gb = float(gb_model.predict_proba(x)[0, 1])
+                votes["gb"] = p_gb
                 used.append("gb")
             except Exception:
                 pass
 
-    # Decide if we apply cosmetic floor
-    if apply_floor is None:
-        apply_floor = _env_truthy("CI_SUMMARY_COSMETIC_FLOOR", default="0")
-
-    # If nothing loaded (e.g., CI demo), provide a safe logistic-like proxy.
+    # If nothing usable voted, provide a safe, clearly-marked demo fallback.
     if not votes:
-        p_raw = float(_sigmoid(0.1 * _safe_float(feats.get("burst_z", 0.0), 0.0)))
-        p_floor = _floor_prob(p_raw) if apply_floor else p_raw
-        out = {
-            "prob_trigger_next_6h": p_floor,
-            "low": p_floor,
-            "high": p_floor,
-            "votes": {"logistic": p_raw},            # raw
-            "per_model": {"logistic": p_raw},        # alias (raw)
+        # demo-ish logistic proxy on burst_z only
+        bz = 0.0
+        try:
+            bz = float(feats.get("burst_z", 0.0) or 0.0)
+        except Exception:
+            bz = 0.0
+        p = float(_sigmoid(0.1 * bz))
+        return {
+            "prob_trigger_next_6h": p,
+            "low": p,
+            "high": p,
+            "votes": {"logistic": p},
+            "per_model": {"logistic": p},
             "models_used": [],
             "demo": True,
         }
-        if apply_floor:
-            out["votes_floored"] = {"logistic": p_floor}
-            out["used_cosmetic_floor"] = True
-        return out
 
-    # Compute mean/low/high either from raw or floored votes
-    if apply_floor:
-        votes_floored = {k: _floor_prob(v) for k, v in votes.items()}
-        probs = list(votes_floored.values())
-        mean_p = float(sum(probs) / len(probs))
-        low_p  = float(min(probs))
-        high_p = float(max(probs))
-        return {
-            "prob_trigger_next_6h": mean_p,
-            "low": low_p,
-            "high": high_p,
-            "votes": votes,                   # raw
-            "votes_floored": votes_floored,   # for display
-            "per_model": votes,               # alias (raw)
-            "models_used": used,
-            "used_cosmetic_floor": True,
-            "demo": False,
-        }
-    else:
-        probs = list(votes.values())
-        mean_p = float(sum(probs) / len(probs))
-        low_p  = float(min(probs))
-        high_p = float(max(probs))
-        return {
-            "prob_trigger_next_6h": mean_p,
-            "low": low_p,
-            "high": high_p,
-            "votes": votes,         # raw
-            "per_model": votes,     # alias (raw)
-            "models_used": used,
-            "demo": False,
-        }
+    probs = list(votes.values())
+    mean_p = float(sum(probs) / len(probs))
+    low_p  = float(min(probs))
+    high_p = float(max(probs))
+
+    return {
+        "prob_trigger_next_6h": mean_p,
+        "low": low_p,
+        "high": high_p,
+        "votes": votes,         # preferred
+        "per_model": votes,     # alias
+        "models_used": used,
+        "demo": False,
+    }
 
 # --------------------------
 # Live backtest (last 24h)
