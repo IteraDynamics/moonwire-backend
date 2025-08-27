@@ -792,6 +792,7 @@ except Exception as e:
 
 # ---------- trigger likelihood v0 ----------
 md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+rich_feats_by_origin: dict[str, dict] = {}
 
 # Last-chance lazy import (in case top-level ran before PYTHONPATH was set)
 if not _ML_OK:
@@ -968,6 +969,8 @@ else:
                 feats_cache[o] = feats
                 if any(abs(v or 0.0) > 1e-12 for v in feats.values()):
                     nonzero_seen = True
+             
+             
 
         # --- DEMO fallback: if rich was requested but all features are zero, synthesize plausible non-zero features
         try:
@@ -1077,82 +1080,46 @@ else:
 
 
 
-
 # --- Trigger Likelihood Ensemble v0.4 (log+rf+gb) ---
+from src.ml.infer import infer_score_ensemble, model_metadata
+
+md.append("\n### 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
+
+# Show which model artifacts exist (based on meta files)
 try:
-    from src.ml.infer import infer_score_ensemble, model_metadata
+    meta_all = model_metadata()
+    present = [k for k in ("logistic", "rf", "gb") if k in meta_all]
+    if present:
+        md.append(f"\nmodels present: {', '.join(present)}\n")
+except Exception:
+    pass
 
-    md.append("\n### 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
-
-    # Which model artifacts are present right now?
-    try:
-        meta_all = model_metadata()
-        present_models = [k for k in ("logistic", "rf", "gb") if k in (meta_all or {})]
-    except Exception:
-        present_models = ["logistic"]  # safe default
-
-    if present_models and present_models != ["logistic"]:
-        md.append(f"_models present: {', '.join(present_models)}_")
-    else:
-        md.append("_models present: logistic (rf/gb missing at runtime)_")
-
-    # Pick up to 3 origins (same helper you already use)
-    candidates = pick_candidate_origins(
-        origins_rows,
-        locals().get("yield_data"),
-        top=3,
-    )
-
-    # Try to reuse the rich features you already computed for the v0 block
-    feats_maps = (
-        locals().get("rich_feats_by_origin")
-        or locals().get("display_features_by_origin")
-        or locals().get("display_feats")
-        or locals().get("feats_by_origin")
-        or {}
-    )
-
-    now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
-    printed = 0
-
+# Use the SAME features we used for the v0 bullets
+candidates = list(rich_feats_by_origin.keys())[:3]  # keep your own selection if you prefer
+if not candidates:
+    md.append("_No eligible origins for ensemble._\n")
+else:
     for o in candidates:
-        feats = feats_maps.get(o) or {}
-        payload = {"features": feats} if feats else {"origin": o, "timestamp": now_bucket}
-
+        feats = rich_feats_by_origin.get(o, {})  # <- critical: pass features, not origin-only
+        rich_feats_by_origin[o] = feats
         try:
-            res = infer_score_ensemble(payload)
+            res = infer_score_ensemble({"features": feats})
         except Exception as e:
-            md.append(f"- **{o}**: _ensemble failed ({e.__class__.__name__})_")
+            md.append(f"- {o}: _ensemble error ({e.__class__.__name__})_\n")
             continue
 
-        p = res.get("prob_trigger_next_6h")
-        lo = res.get("low"); hi = res.get("high")
+        p   = float(res.get("prob_trigger_next_6h", 0.0))
+        lo  = float(res.get("low", p))
+        hi  = float(res.get("high", p))
+        band_pp = (hi - lo) * 50.0  # min/max → half-range in percentage points
+
+        md.append(f"- **{o}**: {p*100:.1f}% ± {band_pp:.1f}pp")
         votes = res.get("votes") or res.get("per_model") or {}
-        used = res.get("models_used") or []
+        if votes:
+            vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
+            md.append(f"  (votes: {vparts})")
+        md.append("")  # newline after each item
 
-        if isinstance(p, (int, float)):
-            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-                band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
-                md.append(f"- **{o}**: {float(p)*100:.1f}% ± {band_pp:.1f}pp")
-            else:
-                md.append(f"- **{o}**: {float(p)*100:.1f}%")
-
-            # Show votes for whatever models actually scored
-            if votes:
-                vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
-                md.append(f"  (votes: {vparts})")
-
-            # If only logistic voted, be explicit so we know why bands look flat
-            if set(votes.keys()) == {"logistic"}:
-                md.append("  _(only logistic available at runtime)_")
-
-            printed += 1
-
-    if printed == 0:
-        md.append("_Ensemble available but no eligible origins to score._")
-
-except Exception as e:
-    md.append(f"_Ensemble summary unavailable ({e.__class__.__name__})._")
 
 
 
