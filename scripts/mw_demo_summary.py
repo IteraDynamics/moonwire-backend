@@ -790,81 +790,83 @@ except Exception as e:
     md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
 
 
-# === Trigger Likelihood Ensemble v0.4 (log+rf+gb) =============================
+# --- Trigger Likelihood Ensemble v0.4 (log+rf+gb) ---
 try:
-    from src.ml.infer import infer_score_ensemble
+    from src.ml.infer import infer_score_ensemble, model_metadata
 
-    md.append("\n### 🏯 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
+    md.append("\n### 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
 
-    # Reuse features from the v0 block; if missing, synthesize the same way.
-    FEATS_CACHE = globals().get("__MW_TL_FEATS_CACHE__", {}) or {}
-    meta_for_demo = globals().get("__MW_TL_META__", {}) if "__MW_TL_META__" in globals() else {}
+    # Which model artifacts are present right now?
+    try:
+        meta_all = model_metadata()
+        present_models = [k for k in ("logistic", "rf", "gb") if k in (meta_all or {})]
+    except Exception:
+        present_models = ["logistic"]  # safe default
 
-    def _candidate_origins() -> list[str]:
-        try:
-            orows = locals().get("origins_rows") or globals().get("origins_rows")
-            if orows:
-                names = sorted({(r.get("origin") or "unknown") for r in orows})
-                pref = ["twitter", "rss_news", "reddit"]
-                ordered = [p for p in pref if p in names] + [n for n in names if n not in pref]
-                return ordered[:3]
-        except Exception:
-            pass
-        return ["twitter", "rss_news", "reddit"]
+    if present_models and present_models != ["logistic"]:
+        md.append(f"_models present: {', '.join(present_models)}_")
+    else:
+        md.append("_models present: logistic (rf/gb missing at runtime)_")
 
-    def _demo_feats(origin: str, meta_dict: dict) -> dict:
-        fo = (meta_dict or {}).get("feature_order") or []
-        seed = {
-            "twitter":   (3.0, 9.0,  1.2),
-            "rss_news":  (0.5, 2.0, -0.8),
-            "reddit":    (1.0, 4.0, -0.2),
-        }.get(origin, (0.5, 2.0, 0.0))
-        c1, c6, bz = seed
-        base = {
-            "count_1h": c1, "count_6h": c6, "count_24h": c6 * 4, "count_72h": c6 * 8,
-            "burst_z": bz,
-            "regime_calm": 0.0, "regime_normal": 1.0, "regime_turbulent": 0.0,
-            "precision_7d": 0.5, "recall_7d": 0.5, "leadership_max_r": 0.0,
-        }
-        return {k: float(base.get(k, 0.0)) for k in (fo or base.keys())}
+    # Pick up to 3 origins (same helper you already use)
+    candidates = pick_candidate_origins(
+        origins_rows,
+        locals().get("yield_data"),
+        top=3,
+    )
 
+    # Try to reuse the rich features you already computed for the v0 block
+    feats_maps = (
+        locals().get("rich_feats_by_origin")
+        or locals().get("display_features_by_origin")
+        or locals().get("display_feats")
+        or locals().get("feats_by_origin")
+        or {}
+    )
+
+    now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
     printed = 0
-    for o in _candidate_origins():
-        feats = FEATS_CACHE.get(o) or _demo_feats(o, meta_for_demo)
 
-        res = {}
+    for o in candidates:
+        feats = feats_maps.get(o) or {}
+        payload = {"features": feats} if feats else {"origin": o, "timestamp": now_bucket}
+
         try:
-            res = infer_score_ensemble({"features": feats})
-        except Exception:
-            # demo-safe fallback: mimic logistic only
-            from math import exp
-            p = 1 / (1 + exp(-0.1 * float(feats.get("burst_z", 0.0))))
-            res = {
-                "prob_trigger_next_6h": float(p),
-                "low": float(p), "high": float(p),
-                "votes": {"logistic": float(p)},
-                "demo": True,
-            }
+            res = infer_score_ensemble(payload)
+        except Exception as e:
+            md.append(f"- **{o}**: _ensemble failed ({e.__class__.__name__})_")
+            continue
 
-        p = float(res.get("prob_trigger_next_6h", 0.0))
+        p = res.get("prob_trigger_next_6h")
         lo = res.get("low"); hi = res.get("high")
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-            band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
-            md.append(f"- **{o}**: {p*100:.1f}% ± {band_pp:.1f}pp")
-        else:
-            md.append(f"- **{o}**: {p*100:.1f}%")
-
         votes = res.get("votes") or res.get("per_model") or {}
-        if votes:
-            vtxt = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
-            md.append(f"  (votes: {vtxt})")
-        printed += 1
+        used = res.get("models_used") or []
+
+        if isinstance(p, (int, float)):
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
+                md.append(f"- **{o}**: {float(p)*100:.1f}% ± {band_pp:.1f}pp")
+            else:
+                md.append(f"- **{o}**: {float(p)*100:.1f}%")
+
+            # Show votes for whatever models actually scored
+            if votes:
+                vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
+                md.append(f"  (votes: {vparts})")
+
+            # If only logistic voted, be explicit so we know why bands look flat
+            if set(votes.keys()) == {"logistic"}:
+                md.append("  _(only logistic available at runtime)_")
+
+            printed += 1
 
     if printed == 0:
         md.append("_Ensemble available but no eligible origins to score._")
 
 except Exception as e:
-    md.append(f"⚠️ Ensemble summary unavailable ({e.__class__.__name__}).")
+    md.append(f"_Ensemble summary unavailable ({e.__class__.__name__})._")
+
+
 
 # ---------- drift check (polish) ----------
 md.append("\n### 🔎 Drift Check (features)")
