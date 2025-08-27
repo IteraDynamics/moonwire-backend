@@ -790,6 +790,294 @@ except Exception as e:
     md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
 
 
+# ---------- trigger likelihood v0 ----------
+md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
+
+# Last-chance lazy import (in case top-level ran before PYTHONPATH was set)
+if not _ML_OK:
+    try:
+        from src.ml.infer import score as infer_score, model_metadata
+        _ML_OK = True
+        _ML_ERR = None
+    except Exception as e:
+        _ML_ERR = f"{type(e).__name__}: {e}"
+else:
+    # ... keep the rest of your section exactly as-is (metadata line, rich features, scoring, etc.)
+    # -- metadata line
+    try:
+        _meta = model_metadata()
+    except Exception:
+        _meta = {}
+    if _meta:
+        _metrics = _meta.get("metrics", {}) or {}
+        _auc = _metrics.get("roc_auc_va") or _metrics.get("roc_auc_tr")
+        bits = []
+        if _meta.get("created_at"):
+            bits.append(f"model@{_meta['created_at']}")
+        if _auc is not None:
+            try:
+                bits.append(f"AUC={float(_auc):.2f}")
+            except Exception:
+                bits.append(f"AUC={_auc}")
+        if _meta.get("demo"):
+            bits.append("demo")
+        if bits:
+            md.append("- " + " • ".join(bits))
+
+    # -- score up to 3 origins (prefer yield plan ordering if available)
+    try:
+        yield_data_local = locals().get("yield_data")  # may not exist
+        candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
+        now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+        printed = 0
+
+        # Rich features path (guarded by env)
+        use_rich = _demo_rich_scores_enabled()
+        if use_rich:
+            md.append("\n_rich features on_")
+
+        # --- compute analytics directly (do NOT rely on locals()) ---
+        trends_map, regimes_map, metrics_map, bursts_map = {}, {}, {}, {}
+        leadership_by_origin = {}
+
+        # Origin trends (hourly); series sorted chronologically → we can sum last k
+        try:
+            from src.analytics.origin_trends import compute_origin_trends
+            _tr = compute_origin_trends(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour",
+            )
+            trends_map = {}
+            for item in _tr.get("origins", []) or []:
+                origin = item.get("origin")
+                if not origin:
+                    continue
+                # Accept 'series' or common alternates ('buckets', 'data', 'timeline')
+                series = (
+                    item.get("series")
+                    or item.get("buckets")
+                    or item.get("data")
+                    or item.get("timeline")
+                    or []
+                )
+                # Normalize bucket dicts so they at least have 'flags_count'
+                norm_series = []
+                for b in series:
+                    if not isinstance(b, dict):
+                        continue
+                    if "flags_count" not in b:
+                        # copy and fill with best-effort value
+                        bb = dict(b)
+                        if "flags" in bb and "flags_count" not in bb:
+                            bb["flags_count"] = bb.get("flags", 0)
+                        elif "count" in bb and "flags_count" not in bb:
+                            bb["flags_count"] = bb.get("count", 0)
+                        else:
+                            bb["flags_count"] = 0
+                        norm_series.append(bb)
+                    else:
+                        norm_series.append(b)
+                trends_map[origin] = norm_series
+        except Exception:
+            trends_map = {}
+
+
+        # Volatility regimes (hour)
+        try:
+            from src.analytics.volatility_regimes import compute_volatility_regimes
+            _vr = compute_volatility_regimes(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=30, interval="hour", lookback=72,
+            )
+            for r in _vr.get("origins", []) or []:
+                o = r.get("origin")
+                if o:
+                    regimes_map[o] = (r.get("regime") or "normal")
+        except Exception:
+            regimes_map = {}
+
+        # Precision & recall (7d)
+        try:
+            from src.analytics.source_metrics import compute_source_metrics
+            _sm = compute_source_metrics(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, min_count=1,
+            )
+            for r in _sm.get("origins", []) or []:
+                o = r.get("origin")
+                if o:
+                    metrics_map[o] = {
+                        "precision": float(r.get("precision", 0.0) or 0.0),
+                        "recall": float(r.get("recall", 0.0) or 0.0),
+                    }
+        except Exception:
+            metrics_map = {}
+
+        # Bursts (for latest z-score)
+        try:
+            from src.analytics.burst_detection import compute_bursts
+            _bd = compute_bursts(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour", z_thresh=2.0,
+            )
+            for item in _bd.get("origins", []) or []:
+                o = item.get("origin")
+                if o:
+                    bursts_map[o] = list(item.get("bursts", []) or [])
+        except Exception:
+            bursts_map = {}
+
+        # Lead–lag: strongest leadership |r| per origin (optional feature)
+        try:
+            from src.analytics.lead_lag import compute_lead_lag
+            _ll = compute_lead_lag(
+                LOGS_DIR / "retraining_log.jsonl",
+                LOGS_DIR / "retraining_triggered.jsonl",
+                days=7, interval="hour", max_lag=24, use="flags",
+            )
+            for p in _ll.get("pairs", []) or []:
+                leader = p.get("leader"); corr = p.get("correlation")
+                if leader is None or corr is None:
+                    continue
+                try:
+                    v = abs(float(corr))
+                except Exception:
+                    continue
+                leadership_by_origin[leader] = max(leadership_by_origin.get(leader, 0.0), v)
+        except Exception:
+            leadership_by_origin = {}
+
+                # --- build feature cache + coverage ---
+        feats_cache = {}
+        nonzero_seen = False
+        if use_rich:
+            for o in candidates:
+                feats = _build_summary_features_for_origin(
+                    o,
+                    trends_by_origin=trends_map,
+                    regimes_map=regimes_map,
+                    metrics_map=metrics_map,
+                    bursts_by_origin=bursts_map,
+                )
+                # inject leadership strength if available
+                feats["leadership_max_r"] = float(leadership_by_origin.get(o, 0.0))
+                feats_cache[o] = feats
+                if any(abs(v or 0.0) > 1e-12 for v in feats.values()):
+                    nonzero_seen = True
+
+        # --- DEMO fallback: if rich was requested but all features are zero, synthesize plausible non-zero features
+        try:
+            demo_mode_on = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
+        except Exception:
+            demo_mode_on = False
+
+        if use_rich and not nonzero_seen and demo_mode_on:
+            # Create simple, differentiated patterns so probabilities diverge
+            patterns = [
+                {"count_1h": 3, "count_6h": 9, "count_24h": 18, "count_72h": 54, "burst_z": 1.2, "regime": "turbulent", "precision_7d": 0.35, "recall_7d": 0.25, "leadership_max_r": 0.40},
+                {"count_1h": 1, "count_6h": 4, "count_24h": 10, "count_72h": 30, "burst_z": 0.6, "regime": "normal",     "precision_7d": 0.20, "recall_7d": 0.15, "leadership_max_r": 0.20},
+                {"count_1h": 0, "count_6h": 2, "count_24h": 6,  "count_72h": 18, "burst_z": 0.0, "regime": "calm",       "precision_7d": 0.10, "recall_7d": 0.08, "leadership_max_r": 0.05},
+            ]
+            for idx, o in enumerate(candidates):
+                p = patterns[min(idx, len(patterns) - 1)]
+                feats = feats_cache.get(o, {
+                    "count_1h": 0.0, "count_6h": 0.0, "count_24h": 0.0, "count_72h": 0.0,
+                    "burst_z": 0.0,
+                    "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
+                    "precision_7d": 0.0, "recall_7d": 0.0,
+                    "leadership_max_r": 0.0,
+                })
+                feats.update({
+                    "count_1h": float(p["count_1h"]),
+                    "count_6h": float(p["count_6h"]),
+                    "count_24h": float(p["count_24h"]),
+                    "count_72h": float(p["count_72h"]),
+                    "burst_z": float(p["burst_z"]),
+                    "precision_7d": float(p["precision_7d"]),
+                    "recall_7d": float(p["recall_7d"]),
+                    "leadership_max_r": float(p["leadership_max_r"]),
+                    "regime_calm": 0.0, "regime_normal": 0.0, "regime_turbulent": 0.0,
+                })
+                rk = f"regime_{p['regime']}"
+                if rk in feats:
+                    feats[rk] = 1.0
+                feats_cache[o] = feats
+            nonzero_seen = True
+            md.append("_(demo) rich features synthesized for display_")
+
+
+
+        # scoring loop
+             
+        for o in candidates:
+            try:
+                if use_rich and feats_cache.get(o):
+                    res = infer_score({"features": feats_cache[o]})
+                else:
+                    res = infer_score({"origin": o, "timestamp": now_bucket})
+
+                p = res.get("prob_trigger_next_6h")
+                if isinstance(p, (int, float)):
+                    line = f"- {o}: **{round(float(p)*100,1)}%** chance of trigger in next 6h"
+
+                    # Top contributions (if returned)
+                    contribs = res.get("contributions")
+                    if isinstance(contribs, dict) and contribs:
+                        top = sorted(contribs.items(), key=lambda kv: abs(kv[1]), reverse=True)[:3]
+                        line += " (" + ", ".join(f"{k}={v:+.2f}" for k, v in top) + ")"
+
+                    md.append(line)
+                    if use_rich and feats_cache.get(o):
+                        try:
+                            nz = sum(1 for v in feats_cache[o].values() if (v or 0) != 0)
+                            md.append(f"    _(nz-features={nz}/{len(feats_cache[o])})_")
+                        except Exception:
+                            pass
+                    printed += 1
+            except Exception:
+                continue
+
+        if printed == 0:
+            # Fallback deterministic probe
+            try:
+                res = infer_score({"features": {"burst_z": 2.0}})
+            except Exception:
+                res = {"prob_trigger_next_6h": 0.0}
+            md.append(f"- example (burst_z=2.0): **{round(float(res.get('prob_trigger_next_6h', 0))*100,1)}%**")
+
+        if use_rich and not nonzero_seen:
+            md.append("_(rich features had zero coverage; fell back to defaults internally)_")
+
+    except Exception:
+        md.append("_No score available._")
+
+
+    # ---- small interpretability/coverage sub-block ----
+    try:
+        _m = model_metadata()
+        tfeat = _m.get("top_features") or []
+        covsum = _m.get("feature_coverage_summary") or _m.get("feature_coverage") or {}
+        low_cov = []
+        # Prefer summary (pct only); fall back to full coverage json
+        if isinstance(covsum, dict):
+            for k, v in list(covsum.items())[:]:
+                pct = float(v if isinstance(v, (int, float)) else v.get("nonzero_pct", 0.0))
+                if pct < 5.0:
+                    low_cov.append(k)
+        if tfeat:
+            md.append("\n_top learned features_: " + ", ".join(f"{d['feature']}({d['coef']:+.2f})" for d in tfeat))
+        if low_cov:
+            md.append("_low coverage_: " + ", ".join(sorted(set(low_cov))[:5]))
+    except Exception:
+        pass
+
+
+
+
 # --- Trigger Likelihood Ensemble v0.4 (log+rf+gb) ---
 try:
     from src.ml.infer import infer_score_ensemble, model_metadata
