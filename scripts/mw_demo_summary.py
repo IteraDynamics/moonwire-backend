@@ -803,7 +803,15 @@ try:
         yield_data_local = None
 
     candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
-
+    
+    feats_maps = (
+        locals().get("rich_feats_by_origin")
+        or locals().get("display_features_by_origin")
+        or locals().get("display_feats")
+        or locals().get("feats_by_origin")
+        or {}
+    )
+    
     now_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
 
     printed = 0
