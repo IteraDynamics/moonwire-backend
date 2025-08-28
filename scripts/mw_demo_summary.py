@@ -1344,11 +1344,14 @@ if meta_path.exists():
     with open(meta_path, "r") as f:
         meta_debug = json.load(f)
     calib_debug = meta_debug.get("calibration", None)
-else:
-    calib_debug = "[demo] file not found"
 
-md.append("\n<details><summary>📦 Raw Calibration Meta</summary>\n\n")
-md.append("```json")
-md.append(json.dumps(calib_debug, indent=2))
-md.append("```\n</details>")
+    if calib_debug:
+        md.append("\n<details><summary>📦 Raw Calibration Meta</summary>\n\n")
+        md.append("```json")
+        md.append(json.dumps(calib_debug, indent=2))
+        md.append("```\n</details>")
+    else:
+        md.append("\n📦 Raw Calibration Meta: _empty_")
+else:
+    md.append("\n📦 Raw Calibration Meta: _not available in demo_")
 
