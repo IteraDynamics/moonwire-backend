@@ -1121,28 +1121,28 @@ except Exception as e:
 meta = model_metadata()
 calib = meta.get("calibration", {})
 
-print("\n### 📏 Calibration")
+md.append("\n### 📏 Calibration")
 if "brier_pre" in calib and "brier_post" in calib:
-    print(f"post-calibration Brier={calib['brier_post']:.4f} (vs pre={calib['brier_pre']:.4f})")
+    md.append(f"post-calibration Brier={calib['brier_post']:.4f} (vs pre={calib['brier_pre']:.4f})")
 elif calib:
-    print(f"Available metrics: {list(calib.keys())}")
+    md.append(f"Available metrics: {list(calib.keys())}")
 else:
-    print("[demo] calibration not available")
+    md.append("[demo] calibration not available")
 
 # --- Per-Origin Thresholds Summary ---
 thresholds = load_per_origin_thresholds()
-print("\n### 🎯 Per-Origin Thresholds")
+md.append("\n### 🎯 Per-Origin Thresholds")
 
 example_count = 0
 for origin, vals in thresholds.items():
     if "p70" in vals and "p80" in vals:
-        print(f"- {origin}: p70={vals['p70']:.2f}, p80={vals['p80']:.2f}")
+        md.append(f"- {origin}: p70={vals['p70']:.2f}, p80={vals['p80']:.2f}")
         example_count += 1
     if example_count >= 2:
         break
 
 if example_count == 0:
-    print("- [demo] fallback thresholds in use")
+    md.append("- [demo] fallback thresholds in use")
 
 
 
