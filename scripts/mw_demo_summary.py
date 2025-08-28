@@ -17,7 +17,7 @@ from src.analytics.origin_utils import compute_origin_breakdown
 from src.analytics.source_yield import compute_source_yield
 from src.analytics.source_metrics import compute_source_metrics
 from src.analytics.origin_trends import compute_origin_trends
-from src.paths import LOGS_DIR
+from src.paths import LOGS_DIR, MODELS_DIR
 from src.analytics.origin_correlations import compute_origin_correlations
 from src.analytics.lead_lag import compute_lead_lag
 from src.analytics.burst_detection import compute_bursts
