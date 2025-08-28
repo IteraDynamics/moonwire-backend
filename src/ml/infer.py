@@ -107,7 +107,18 @@ def model_metadata(models_dir: Optional[Path] = None) -> Dict[str, Any]:
 # Vectorization / utils
 # --------------------------
 def _vectorize(features: Dict[str, Any], feat_order: List[str]) -> np.ndarray:
-    return np.array([[float(features.get(k, 0.0) or 0.0) for k in feat_order]], dtype=float)
+    row = []
+    for k in feat_order:
+        v = features.get(k, 0.0)
+        try:
+            v = float(v)
+        except Exception:
+            v = 0.0
+        # sanitize: NaN / +/-Inf → 0
+        if not np.isfinite(v):
+            v = 0.0
+        row.append(v)
+    return np.array([row], dtype=float)
 
 def _sigmoid(x: float | np.ndarray) -> float | np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
@@ -180,6 +191,28 @@ def infer_score_ensemble(
     feats = payload.get("features") or {}
     votes: Dict[str, float] = {}
     used: List[str] = []
+
+    debug = os.getenv("MW_DEBUG_ENS", "0") in ("1","true","yes")
+    errors = {}
+    ...
+    try:
+        votes["rf"] = float(rf_model.predict_proba(x)[0,1]); used.append("rf")
+    except Exception as e:
+        if debug: errors["rf"] = f"{type(e).__name__}: {e}"
+    ...
+    try:
+        votes["gb"] = float(gb_model.predict_proba(x)[0,1]); used.append("gb")
+    except Exception as e:
+        if debug: errors["gb"] = f"{type(e).__name__}: {e}"
+    ...
+    out = { ... }
+    if debug and errors:
+        out["debug_errors"] = errors
+    return out
+
+
+
+    
 
     def _nz_count(order: List[str]) -> int:
         # how many features are actually present / non-zero for this model?
