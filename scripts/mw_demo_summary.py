@@ -1336,9 +1336,6 @@ except Exception as e:
 print(f"Wrote: {ART/'demo_summary.md'}")
 
 if __name__ == "__main__":
-    # Existing summary code...
-    print_ci_summary()  # or whatever your main function is
-
-    # Add this line to include calibration + threshold output:
+    main()
     print_trigger_likelihood_calibration_and_thresholds()
 
