@@ -792,7 +792,8 @@ except Exception as e:
 
 # ---------- trigger likelihood v0 ----------
 md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
-rich_feats_by_origin: dict[str, dict] = {}
+rich_feats_by_origin: dict[str, dict] = {}   # cache exact features per origin
+ordered_origins: list[str] = []
 
 # Last-chance lazy import (in case top-level ran before PYTHONPATH was set)
 if not _ML_OK:
@@ -964,6 +965,8 @@ else:
                     metrics_map=metrics_map,
                     bursts_by_origin=bursts_map,
                 )
+                 rich_feats_by_origin[o] = feats
+                 ordered_origins.append(o)
                 # inject leadership strength if available
                 feats["leadership_max_r"] = float(leadership_by_origin.get(o, 0.0))
                 feats_cache[o] = feats
