@@ -858,14 +858,24 @@ except Exception as e:
 # === BEGIN: Trigger Likelihood Ensemble v0.4 (log+rf+gb) ===
 try:
     from src.ml.infer import infer_score_ensemble, model_metadata
+    # we import the module to access _paths_for for real artifact checks
+    from src.ml import infer as _infer
 
     md.append("\n## 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)\n")
 
-    present = ", ".join(k for k in ("logistic", "rf", "gb") if k in model_metadata())
-    if present:
-        md.append(f"_models present: {present}_")
-        md.append("")
+    # --- Real artifact presence (joblib + meta must exist) ---
+    def _has(kind: str) -> bool:
+        mpath, jpath = _infer._paths_for(kind)
+        return mpath.exists() and jpath.exists()
 
+    available = [k for k in ("logistic", "rf", "gb") if _has(k)]
+    if available:
+        md.append(f"_models present: {', '.join(available)}_")
+    else:
+        md.append("_models present: none_")
+    md.append("")
+
+    # --- Candidate origins ---
     origins_rows = locals().get("origins_rows") or []
     rich_feats_by_origin = locals().get("rich_feats_by_origin") or {}
 
@@ -876,32 +886,63 @@ try:
                 or (r.get("metadata") or {}).get("source")
                 or "").strip()
 
-    # Prefer live origins; fall back to ones we have rich features for.
     candidates = [o for o in dict.fromkeys(_origin_name(r) for r in origins_rows) if o][:3]
     if not candidates:
+        # fallback to any origins we have rich features for, or defaults
         candidates = [o for o in ["twitter", "reddit", "rss_news"] if o in rich_feats_by_origin] \
                     or list(rich_feats_by_origin.keys())[:3]
 
+    # helper to (re)build features if missing
+    def _ensure_feats(o: str) -> dict:
+        feats = rich_feats_by_origin.get(o) or {}
+        if feats:  # good
+            return feats
+        builder = locals().get("_build_summary_features_for_origin")
+        if builder:
+            feats = builder(
+                o,
+                trends_by_origin=locals().get("trends_map") or {},
+                regimes_map=locals().get("regimes_map") or {},
+                metrics_map=locals().get("metrics_map") or {},
+                bursts_by_origin=locals().get("bursts_map") or {},
+            ) or {}
+        # last-resort minimal features so models can return something sensible
+        if not feats:
+            feats = {"burst_z": 0.0, "count_6h": 0.0, "count_24h": 0.0}
+        return feats
+
     printed = 0
     for o in candidates:
-        feats = rich_feats_by_origin.get(o) or {}
+        feats = _ensure_feats(o)
         try:
             res = infer_score_ensemble({"features": feats})
         except Exception:
             continue
 
-        p = res.get("prob_trigger_next_6h")
+        p  = res.get("prob_trigger_next_6h")
         lo = res.get("low"); hi = res.get("high")
         votes = res.get("votes") or res.get("per_model") or {}
+        used  = res.get("models_used") or []
 
         if isinstance(p, (int, float)):
             if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
                 md.append(f"- **{o}**: {p*100:.1f}% ± {((hi - lo)/2.0)*100:.1f}pp")
             else:
                 md.append(f"- **{o}**: {p*100:.1f}%")
+
             if votes:
                 vline = ", ".join(f"{k}={v*100:.1f}%" for k, v in votes.items())
                 md.append(f"  _(votes: {vline})_")
+
+            # make it explicit when only logistic actually ran
+            if available:
+                missing = [m for m in available if m not in used]
+                if missing:
+                    if used:
+                        md.append(f"  _(only {', '.join(used)} used at runtime; missing/failed: {', '.join(missing)})_")
+                    else:
+                        md.append(f"  _(no models usable at runtime; expected: {', '.join(available)})_")
+
             printed += 1
 
     if printed == 0:
@@ -910,6 +951,7 @@ try:
 except Exception as e:
     md.append(f"_Ensemble summary unavailable ({e.__class__.__name__})._")
 # === END: Trigger Likelihood Ensemble v0.4 (log+rf+gb) ===
+
         
 
 
