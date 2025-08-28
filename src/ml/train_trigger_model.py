@@ -202,3 +202,20 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
         "calibration": cal_metrics,
         "demo": demo_used,
     }
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Train Trigger Likelihood models")
+    parser.add_argument("--days", type=int, default=14)
+    parser.add_argument("--interval", type=str, default="hour")
+    parser.add_argument("--out-dir", type=str, default=str(paths.MODELS_DIR))
+    args = parser.parse_args()
+
+    res = train(days=args.days, interval=args.interval, out_dir=Path(args.out_dir))
+    # Emit a small JSON so CI logs clearly show what was written
+    print(json.dumps({
+        "model_path": res.get("model_path"),
+        "meta_path": res.get("meta_path"),
+        "rf_model_path": res.get("rf_model_path"),
+        "gb_model_path": res.get("gb_model_path"),
+    }, indent=2))
