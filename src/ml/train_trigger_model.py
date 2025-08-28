@@ -1,4 +1,3 @@
-# src/ml/train_trigger_model.py
 from __future__ import annotations
 
 import json, os
@@ -22,9 +21,6 @@ from src.ml.feature_builder import build_examples, synth_demo_dataset
 
 
 def _mk_arrays(rows: List[Any], feat_order: List[str]) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Supports both dict rows ({features,label}) and FeatureRow(ts, origin, x, y).
-    """
     X: List[List[float]] = []
     y: List[int] = []
     for r in rows:
@@ -75,10 +71,6 @@ def _git_sha() -> str | None:
 def _ensure_two_classes_in_train(
     Xtr: np.ndarray, ytr: np.ndarray, X: np.ndarray, y: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    If the train split ended up with a single class, pull a few samples of the
-    other class from the full dataset to guarantee at least two classes.
-    """
     if Xtr.size == 0 or np.unique(ytr).size >= 2:
         return Xtr, ytr
     present = int(ytr[0])
@@ -89,7 +81,6 @@ def _ensure_two_classes_in_train(
         Xtr_fix = np.vstack([Xtr, X[take]])
         ytr_fix = np.concatenate([ytr, y[take]])
         return Xtr_fix, ytr_fix
-    # Last resort: flip the label on one row
     yfix = ytr.copy()
     yfix[0] = 1 - yfix[0]
     return Xtr, yfix
@@ -118,17 +109,9 @@ def _top_coefficients(model: LogisticRegression, feat_order: List[str], top: int
 
 
 def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -> Dict[str, Any]:
-    """
-    Trains logistic + (optionally) random forest.
-    Persists:
-      - models/trigger_likelihood_v0.joblib + .meta.json (+ feature_coverage.json once)
-      - models/trigger_likelihood_rf.joblib + .meta.json (if trained)
-    Returns a dict that ALWAYS includes 'model_path' (logistic) to satisfy tests.
-    """
     out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # IMPORTANT: reference log paths via `paths` (monkeypatch-friendly)
     rows, feat_order = build_examples(
         paths.LOGS_DIR / "retraining_log.jsonl",
         paths.LOGS_DIR / "retraining_triggered.jsonl",
@@ -144,17 +127,14 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
 
-    # Arrays + coverage
     X, y = _mk_arrays(rows, feat_order)
     coverage = _compute_coverage_from_X(X, feat_order)
 
-    # Time-aware split
     n = X.shape[0]
     cut = max(1, int(0.8 * n))
     Xtr, ytr = X[:cut], y[:cut]
     Xva, yva = (X[cut:], y[cut:]) if n > 1 else (X.copy(), y.copy())
 
-    # Ensure 2 classes in train
     Xtr, ytr = _ensure_two_classes_in_train(Xtr, ytr, X, y)
 
     # ---------- Logistic ----------
@@ -232,7 +212,47 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
         rf_trained = False
         metrics_rf = None
 
-    # ---------- Return (tests expect 'model_path') ----------
+    # ---------- Gradient Boosting (optional) ----------
+    gb_trained = False
+    gb_model_path = out_dir / "trigger_likelihood_gb.joblib"
+    gb_meta_path = out_dir / "trigger_likelihood_gb.meta.json"
+    metrics_gb: Dict[str, float] | None = None
+    try:
+        if np.unique(y).size >= 2:
+            from sklearn.ensemble import GradientBoostingClassifier
+
+            gb = GradientBoostingClassifier(
+                n_estimators=300,
+                learning_rate=0.05,
+                max_depth=3,
+                random_state=42,
+            )
+            gb.fit(Xtr, ytr)
+            p_tr_gb = gb.predict_proba(Xtr)[:, 1] if Xtr.size else np.array([])
+            p_va_gb = gb.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
+            metrics_gb = _metrics_dict(ytr, p_tr_gb, yva, p_va_gb)
+            joblib.dump(gb, gb_model_path)
+
+            meta_gb = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "git_sha": _git_sha(),
+                "feature_order": feat_order,
+                "metrics": metrics_gb,
+                "demo": bool(demo_used),
+                "artifacts": {
+                    "model": str(gb_model_path),
+                    "feature_coverage": str(coverage_path),
+                },
+                "top_features": [],  # GB doesn't provide native feature importances here
+            }
+            with gb_meta_path.open("w") as f:
+                json.dump(meta_gb, f, indent=2)
+            gb_trained = True
+    except Exception:
+        gb_trained = False
+        metrics_gb = None
+
+    # ---------- Return ----------
     result: Dict[str, Any] = {
         "model_path": str(model_path),
         "meta_path": str(meta_path),
@@ -243,4 +263,7 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     result["rf_model_path"] = str(rf_model_path) if rf_trained else None
     result["rf_meta_path"] = str(rf_meta_path) if rf_trained else None
     result["rf_metrics"] = metrics_rf
+    result["gb_model_path"] = str(gb_model_path) if gb_trained else None
+    result["gb_meta_path"] = str(gb_meta_path) if gb_trained else None
+    result["gb_metrics"] = metrics_gb
     return result
