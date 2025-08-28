@@ -1337,5 +1337,15 @@ except Exception as e:
 (ART / "demo_summary.md").write_text("\n".join(md))
 print(f"Wrote: {ART/'demo_summary.md'}")
 
+# --- Debug: Dump raw calibration block (optional) ---
+from src.ml.infer import model_metadata
+import json
 
+meta_debug = model_metadata()
+calib_debug = meta_debug.get("calibration", None)
+
+md.append("\n<details><summary>📦 Raw Calibration Meta</summary>\n\n")
+md.append("```json")
+md.append(json.dumps(calib_debug, indent=2))
+md.append("```\n</details>")
 
