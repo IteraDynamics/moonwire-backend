@@ -790,234 +790,127 @@ except Exception as e:
     md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
 
 
-# === Trigger Likelihood v0 (next 6h) =========================================
+# === BEGIN: Trigger Likelihood v0 (next 6h) ===
 try:
-    import os
-    from datetime import datetime, timezone
-    from src.ml.infer import score as _tl_score, model_metadata as _tl_meta
-    # If your script already imports these helpers, great; otherwise they’re defined elsewhere:
-    # - pick_candidate_origins
-    # - _build_summary_features_for_origin
-    # - trends_map, regimes_map, metrics_map, bursts_map
+    from src.ml.infer import model_metadata, infer_score
 
     md.append("\n## 🤖 Trigger Likelihood v0 (next 6h)\n")
 
-    # ---- Model banner (timestamp • AUC • demo) ----
-    meta = _tl_meta()
-    lmeta = meta.get("logistic") or {}
-    # Common keys we’ve used in previous iterations
-    trained_at = (
-        lmeta.get("trained_at_iso")
-        or lmeta.get("created_at")
-        or lmeta.get("timestamp")
-        or ""
-    )
-    auc = None
-    try:
-        auc = float(
-            (lmeta.get("metrics") or {}).get("auc", lmeta.get("auc", None))
-        )
-    except Exception:
-        auc = None
-    demo_flag = bool(lmeta.get("demo", False)) or os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
-
-    if trained_at or auc is not None or demo_flag:
-        banner_bits = []
-        if trained_at:
-            # normalize to ISO if it isn’t already
-            try:
-                # If a datetime-like is present
-                if isinstance(trained_at, datetime):
-                    banner_bits.append(f"model@{trained_at.astimezone(timezone.utc).isoformat()}")
-                else:
-                    s = str(trained_at)
-                    if s.endswith("Z"):
-                        s = s[:-1] + "+00:00"
-                    # crude validation; if parse fails, just show raw
-                    try:
-                        _ = datetime.fromisoformat(s)
-                        banner_bits.append(f"model@{s}")
-                    except Exception:
-                        banner_bits.append(f"model@{trained_at}")
-            except Exception:
-                banner_bits.append(f"model@{trained_at}")
-        if auc is not None:
-            banner_bits.append(f"AUC={auc:.2f}")
-        if demo_flag:
-            banner_bits.append("demo")
-        if banner_bits:
-            md.append("• " + " • ".join(banner_bits))
-            md.append("")
-
-    # ---- “rich features” status line(s) ----
-    md.append("rich features on")
-    if demo_flag:
-        md.append("(demo) rich features synthesized for display")
+    meta = model_metadata()
+    lm = meta.get("logistic", {})
+    trained_at = lm.get("trained_at", "unknown")
+    auc = (lm.get("metrics", {}) or {}).get("auc")
+    demo_flag = " • demo" if lm.get("demo") else ""
+    if auc is not None:
+        md.append(f"- model@{trained_at} • AUC={auc}{demo_flag}")
+    else:
+        md.append(f"- model@{trained_at}{demo_flag}")
+    md.append("")
+    md.append("_rich features on_")
+    md.append("_(demo) rich features synthesized for display_")
     md.append("")
 
-    # ---- Candidate origins (same picking heuristic as elsewhere) ----
-    yield_data_local = locals().get("yield_data")
-    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
+    # Safe access to prebuilt rich feats; rebuild minimally if missing.
+    rich_feats_by_origin = locals().get("rich_feats_by_origin") or {}
+    ordered_origins = locals().get("ordered_origins") or []
 
-    # ---- Meta needed for nz-features & low-coverage ----
-    feat_order = (lmeta.get("feature_order") or [])[:]
-    coverage = meta.get("feature_coverage") or {}
-    cov_by_feat = coverage.get("by_feature") or coverage  # support either shape
+    def _ensure_feats(o: str) -> dict:
+        if o in rich_feats_by_origin:
+            return rich_feats_by_origin[o]
+        builder = locals().get("_build_summary_features_for_origin")
+        if builder:
+            return builder(
+                o,
+                trends_by_origin=locals().get("trends_map") or {},
+                regimes_map=locals().get("regimes_map") or {},
+                metrics_map=locals().get("metrics_map") or {},
+                bursts_by_origin=locals().get("bursts_map") or {},
+            ) or {}
+        return {}
 
-    def _nz_count(feats: dict, order: list[str]) -> tuple[int, int]:
-        order = order or list(feats.keys())
-        nz = 0
-        for k in order:
-            try:
-                v = feats.get(k, 0.0)
-                v = float(v if v is not None else 0.0)
-                if v != 0.0:
-                    nz += 1
-            except Exception:
-                # non-numeric → ignore
-                pass
-        return nz, len(order)
+    candidates = ordered_origins[:3] or \
+        [o for o in ["twitter", "rss_news", "reddit"] if _ensure_feats(o)] or \
+        list(rich_feats_by_origin.keys())[:3]
 
-    # ---- Build & cache the exact rich feature dicts we’ll reuse for ensemble
-    rich_feats_by_origin = {}
-    ordered_origins = []
-
+    printed = 0
     for o in candidates:
-        feats = _build_summary_features_for_origin(
-            o,
-            trends_by_origin=trends_map,
-            regimes_map=regimes_map,
-            metrics_map=metrics_map,
-            bursts_by_origin=bursts_map,
-        )
-        # cache for the ensemble block below
-        rich_feats_by_origin[o] = dict(feats)
-        ordered_origins.append(o)
-
-        # logistic score (back-compat path)
+        feats = _ensure_feats(o)
+        if not feats:
+            continue
         try:
-            p = float(_tl_score({"features": feats}).get("prob_trigger_next_6h", 0.0))
+            p = infer_score({"features": feats}).get("prob_trigger_next_6h")
         except Exception:
-            p = 0.0
+            p = None
+        if isinstance(p, (int, float)):
+            md.append(f"- **{o}**: {p*100:.1f}% chance of trigger in next 6h")
+            nz = sum(1 for v in feats.values() if isinstance(v, (int, float)) and abs(float(v)) > 1e-12)
+            md.append(f"  _(nz-features={nz}/{len(feats)})_")
+            printed += 1
 
-        nz, tot = _nz_count(feats, feat_order)
-        md.append(f"- **{o}**: {p*100:.1f}% chance of trigger in next 6h")
-        md.append(f"  (nz-features={nz}/{tot})")
-        md.append("")
-
-    # ---- Top learned features (logistic) ----
-    # Prefer meta['top_features'] if available; otherwise derive a lightweight view from meta['feature_importance'] or coefficients dumped in meta.
-    try:
-        top_feats_str = None
-        tf = lmeta.get("top_features")
-        if isinstance(tf, dict) and tf:
-            # already {feat: weight}
-            items = sorted(tf.items(), key=lambda kv: abs(float(kv[1] or 0.0)), reverse=True)[:6]
-            pieces = []
-            for k, w in items:
-                try:
-                    w = float(w or 0.0)
-                    sign = "+" if w >= 0 else ""
-                    pieces.append(f"{k}({sign}{w:.2f})")
-                except Exception:
-                    pieces.append(f"{k}")
-            top_feats_str = ", ".join(pieces)
-
-        # fallback: feature_importance dumped as {feat: weight}
-        if top_feats_str is None:
-            fi = lmeta.get("feature_importance")
-            if isinstance(fi, dict) and fi:
-                items = sorted(fi.items(), key=lambda kv: abs(float(kv[1] or 0.0)), reverse=True)[:6]
-                pieces = []
-                for k, w in items:
-                    try:
-                        w = float(w or 0.0)
-                        sign = "+" if w >= 0 else ""
-                        pieces.append(f"{k}({sign}{w:.2f})")
-                    except Exception:
-                        pieces.append(f"{k}")
-                top_feats_str = ", ".join(pieces)
-
-        if top_feats_str:
-            md.append(f"top learned features: {top_feats_str}")
-    except Exception:
-        pass
-
-    # ---- Low coverage line from coverage json ----
-    try:
-        low_feats = [
-            k for k, st in cov_by_feat.items()
-            if isinstance(st, dict) and float(st.get("nonzero_pct", 1.0)) < 0.20
-        ]
-        if low_feats:
-            md.append(f"low coverage: {', '.join(sorted(low_feats)[:6])}")
-    except Exception:
-        pass
+    if printed == 0:
+        md.append("_Unable to score any origins for logistic display._")
 
 except Exception as e:
     md.append(f"_Trigger Likelihood v0 unavailable ({e.__class__.__name__})._")
+# === END: Trigger Likelihood v0 (next 6h) ===
 
 
-
-# --- Trigger Likelihood Ensemble v0.4 (log+rf+gb) ---
-from src.ml.infer import infer_score_ensemble, model_metadata
-
-md.append("\n### 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
-
-# Show which models are actually present
+# === BEGIN: Trigger Likelihood Ensemble v0.4 (log+rf+gb) ===
 try:
-    meta = model_metadata()
-    present = [k for k in ("logistic", "rf", "gb") if meta.get(k)]
-    md.append(f"\nmodels present: {', '.join(present) if present else 'none'}\n")
-except Exception:
-    md.append("\nmodels present: unknown\n")
+    from src.ml.infer import infer_score_ensemble, model_metadata
 
-# Use the SAME origins you just scored in v0, in the SAME order
-candidates = [o for o in (ordered_origins if 'ordered_origins' in locals() else []) 
-              if o in (rich_feats_by_origin if 'rich_feats_by_origin' in locals() else {})][:3]
+    md.append("\n## 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)\n")
 
-# Fallback: if nothing is in the cache, try any keys that exist
-if not candidates and 'rich_feats_by_origin' in locals():
-    candidates = list(rich_feats_by_origin.keys())[:3]
+    present = ", ".join(k for k in ("logistic", "rf", "gb") if k in model_metadata())
+    if present:
+        md.append(f"_models present: {present}_")
+        md.append("")
 
-printed = 0
-for o in candidates:
-    try:
-        feats = rich_feats_by_origin[o]
-    except Exception:
-        continue
+    origins_rows = locals().get("origins_rows") or []
+    rich_feats_by_origin = locals().get("rich_feats_by_origin") or {}
 
-    try:
-        res = infer_score_ensemble({"features": feats})
-    except Exception:
-        continue
+    def _origin_name(r: dict) -> str:
+        return (r.get("origin")
+                or r.get("source")
+                or (r.get("meta") or {}).get("origin")
+                or (r.get("metadata") or {}).get("source")
+                or "").strip()
 
-    p   = res.get("prob_trigger_next_6h")
-    lo  = res.get("low")
-    hi  = res.get("high")
-    vts = res.get("votes") or res.get("per_model") or {}
+    # Prefer live origins; fall back to ones we have rich features for.
+    candidates = [o for o in dict.fromkeys(_origin_name(r) for r in origins_rows) if o][:3]
+    if not candidates:
+        candidates = [o for o in ["twitter", "reddit", "rss_news"] if o in rich_feats_by_origin] \
+                    or list(rich_feats_by_origin.keys())[:3]
 
-    if isinstance(p, (int, float)):
-        # print mean ± half-band (in percentage points)
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-            band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
-            md.append(f"\n- **{o}**: {float(p)*100:.1f}% ± {band_pp:.1f}pp")
-        else:
-            md.append(f"\n- **{o}**: {float(p)*100:.1f}%")
+    printed = 0
+    for o in candidates:
+        feats = rich_feats_by_origin.get(o) or {}
+        try:
+            res = infer_score_ensemble({"features": feats})
+        except Exception:
+            continue
 
-        if vts:
-            order = [k for k in ("logistic","rf","gb") if k in vts] + [k for k in vts if k not in ("logistic","rf","gb")]
-            parts = ", ".join(f"{k}={float(vts[k])*100:.1f}%" for k in order)
-            md.append(f"\n  (votes: {parts})")
+        p = res.get("prob_trigger_next_6h")
+        lo = res.get("low"); hi = res.get("high")
+        votes = res.get("votes") or res.get("per_model") or {}
 
-        # Optional note if only one vote made it through
-        if len(vts) == 1:
-            md.append("\n  _(only one model vote available at runtime)_")
+        if isinstance(p, (int, float)):
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                md.append(f"- **{o}**: {p*100:.1f}% ± {((hi - lo)/2.0)*100:.1f}pp")
+            else:
+                md.append(f"- **{o}**: {p*100:.1f}%")
+            if votes:
+                vline = ", ".join(f"{k}={v*100:.1f}%" for k, v in votes.items())
+                md.append(f"  _(votes: {vline})_")
+            printed += 1
 
-        printed += 1
+    if printed == 0:
+        md.append("_No eligible origins for ensemble._")
 
-if printed == 0:
-    md.append("\n_No eligible origins for ensemble._\n")
+except Exception as e:
+    md.append(f"_Ensemble summary unavailable ({e.__class__.__name__})._")
+# === END: Trigger Likelihood Ensemble v0.4 (log+rf+gb) ===
+        
 
 
 
