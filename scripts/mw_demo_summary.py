@@ -25,6 +25,8 @@ from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
+from src.ml.thresholds import load_per_origin_thresholds
+
 
 # ---- ML (trigger likelihood) import guard ----
 _ML_OK = False
@@ -1112,6 +1114,34 @@ try:
                 md.append(f"- {o}: _no score_")
 except Exception as e:
     md.append(f"⚠️ Ensemble score failed: {e}")
+
+
+# --- Calibration Metrics Summary ---
+meta = model_metadata()
+calib = meta.get("calibration", {})
+
+if "brier_pre" in calib and "brier_post" in calib:
+    print(f"\n**Calibration:** post-calibration Brier={calib['brier_post']:.4f} (vs pre={calib['brier_pre']:.4f})")
+elif calib:
+    print(f"\n**Calibration:** available metrics: {list(calib.keys())}")
+else:
+    print("\n**Calibration:** [demo] calibration not available")
+
+# --- Per-Origin Thresholds Summary ---
+thresholds = load_per_origin_thresholds()
+print("\n**Per-Origin Thresholds:**")
+
+example_count = 0
+for origin, vals in thresholds.items():
+    if "p70" in vals and "p80" in vals:
+        print(f"- {origin}: p70={vals['p70']:.2f}, p80={vals['p80']:.2f}")
+        example_count += 1
+    if example_count >= 2:
+        break
+
+if example_count == 0:
+    print("- [demo] fallback thresholds in use")
+
 
 
 # ---------- drift check (polish) ----------
