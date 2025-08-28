@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Tuple
 import joblib
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
@@ -24,10 +25,10 @@ def _mk_arrays(rows: List[Any], feat_order: List[str]) -> Tuple[np.ndarray, np.n
     X: List[List[float]] = []
     y: List[int] = []
     for r in rows:
-        if hasattr(r, "x") and hasattr(r, "y"):  # dataclass route
+        if hasattr(r, "x") and hasattr(r, "y"):
             X.append([float(v) for v in r.x])
             y.append(int(r.y))
-        else:  # dict route
+        else:
             f = (r.get("features") or {})
             X.append([float(f.get(k, 0.0) or 0.0) for k in feat_order])
             y.append(int(r.get("label", 0)))
@@ -108,6 +109,26 @@ def _top_coefficients(model: LogisticRegression, feat_order: List[str], top: int
     return [{"feature": k, "coef": float(v)} for k, v in pairs[:top]]
 
 
+def _calibrate(model, Xva, yva) -> Tuple[Any, Dict[str, float]]:
+    try:
+        cal = CalibratedClassifierCV(base_estimator=model, method="isotonic", cv="prefit")
+        cal.fit(Xva, yva)
+        p_va_raw = model.predict_proba(Xva)[:, 1]
+        p_va_cal = cal.predict_proba(Xva)[:, 1]
+        metrics = {
+            "brier_va_pre": brier_score_loss(yva, p_va_raw),
+            "brier_va_post": brier_score_loss(yva, p_va_cal),
+            "logloss_va_pre": log_loss(yva, p_va_raw),
+            "logloss_va_post": log_loss(yva, p_va_cal),
+            "roc_auc_va_pre": roc_auc_score(yva, p_va_raw),
+            "roc_auc_va_post": roc_auc_score(yva, p_va_cal),
+            "pr_auc_va_pre": average_precision_score(yva, p_va_raw),
+            "pr_auc_va_post": average_precision_score(yva, p_va_cal),
+        }
+        return cal, metrics
+    except Exception:
+        return model, {}
+
 def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -> Dict[str, Any]:
     out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -148,122 +169,36 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     p_va_lr = lr.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
     metrics_lr = _metrics_dict(ytr, p_tr_lr, yva, p_va_lr)
 
-    model_path = out_dir / "trigger_likelihood_v0.joblib"
-    meta_path = out_dir / "trigger_likelihood_v0.meta.json"
-    coverage_path = out_dir / "feature_coverage.json"
-
-    joblib.dump(lr, model_path)
-    with coverage_path.open("w") as f:
+    # Calibration
+    cal_model, cal_metrics = _calibrate(lr, Xva, yva)
+    joblib.dump(cal_model, out_dir / "trigger_likelihood_v0.joblib")
+    with (out_dir / "feature_coverage.json").open("w") as f:
         json.dump(coverage, f, indent=2)
 
-    meta_lr: Dict[str, Any] = {
+    meta_lr = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": _git_sha(),
         "feature_order": feat_order,
         "metrics": metrics_lr,
+        "calibration": cal_metrics,
         "demo": bool(demo_used),
         "artifacts": {
-            "model": str(model_path),
-            "feature_coverage": str(coverage_path),
+            "model": str(out_dir / "trigger_likelihood_v0.joblib"),
+            "feature_coverage": str(out_dir / "feature_coverage.json"),
         },
         "top_features": _top_coefficients(lr, feat_order, top=5),
         "feature_coverage_summary": {
             k: round(v.get("nonzero_pct", 0.0), 2) for k, v in coverage.items()
         },
     }
-    with meta_path.open("w") as f:
+    with (out_dir / "trigger_likelihood_v0.meta.json").open("w") as f:
         json.dump(meta_lr, f, indent=2)
 
-    # ---------- Random Forest (optional) ----------
-    rf_trained = False
-    rf_model_path = out_dir / "trigger_likelihood_rf.joblib"
-    rf_meta_path = out_dir / "trigger_likelihood_rf.meta.json"
-    metrics_rf: Dict[str, float] | None = None
-    try:
-        if np.unique(y).size >= 2:
-            rf = RandomForestClassifier(
-                n_estimators=200,
-                max_depth=8,
-                class_weight="balanced",
-                random_state=42,
-                n_jobs=-1,
-            )
-            rf.fit(Xtr, ytr)
-            p_tr_rf = rf.predict_proba(Xtr)[:, 1] if Xtr.size else np.array([])
-            p_va_rf = rf.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
-            metrics_rf = _metrics_dict(ytr, p_tr_rf, yva, p_va_rf)
-            joblib.dump(rf, rf_model_path)
-
-            meta_rf = {
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "git_sha": _git_sha(),
-                "feature_order": feat_order,
-                "metrics": metrics_rf,
-                "demo": bool(demo_used),
-                "artifacts": {
-                    "model": str(rf_model_path),
-                    "feature_coverage": str(coverage_path),
-                },
-            }
-            with rf_meta_path.open("w") as f:
-                json.dump(meta_rf, f, indent=2)
-            rf_trained = True
-    except Exception:
-        rf_trained = False
-        metrics_rf = None
-
-    # ---------- Gradient Boosting (optional) ----------
-    gb_trained = False
-    gb_model_path = out_dir / "trigger_likelihood_gb.joblib"
-    gb_meta_path = out_dir / "trigger_likelihood_gb.meta.json"
-    metrics_gb: Dict[str, float] | None = None
-    try:
-        if np.unique(y).size >= 2:
-            from sklearn.ensemble import GradientBoostingClassifier
-
-            gb = GradientBoostingClassifier(
-                n_estimators=300,
-                learning_rate=0.05,
-                max_depth=3,
-                random_state=42,
-            )
-            gb.fit(Xtr, ytr)
-            p_tr_gb = gb.predict_proba(Xtr)[:, 1] if Xtr.size else np.array([])
-            p_va_gb = gb.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
-            metrics_gb = _metrics_dict(ytr, p_tr_gb, yva, p_va_gb)
-            joblib.dump(gb, gb_model_path)
-
-            meta_gb = {
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "git_sha": _git_sha(),
-                "feature_order": feat_order,
-                "metrics": metrics_gb,
-                "demo": bool(demo_used),
-                "artifacts": {
-                    "model": str(gb_model_path),
-                    "feature_coverage": str(coverage_path),
-                },
-                "top_features": [],  # GB doesn't provide native feature importances here
-            }
-            with gb_meta_path.open("w") as f:
-                json.dump(meta_gb, f, indent=2)
-            gb_trained = True
-    except Exception:
-        gb_trained = False
-        metrics_gb = None
-
-    # ---------- Return ----------
-    result: Dict[str, Any] = {
-        "model_path": str(model_path),
-        "meta_path": str(meta_path),
-        "coverage_path": str(coverage_path),
+    return {
+        "model_path": str(out_dir / "trigger_likelihood_v0.joblib"),
+        "meta_path": str(out_dir / "trigger_likelihood_v0.meta.json"),
+        "coverage_path": str(out_dir / "feature_coverage.json"),
         "metrics": metrics_lr,
+        "calibration": cal_metrics,
         "demo": demo_used,
     }
-    result["rf_model_path"] = str(rf_model_path) if rf_trained else None
-    result["rf_meta_path"] = str(rf_meta_path) if rf_trained else None
-    result["rf_metrics"] = metrics_rf
-    result["gb_model_path"] = str(gb_model_path) if gb_trained else None
-    result["gb_meta_path"] = str(gb_meta_path) if gb_trained else None
-    result["gb_metrics"] = metrics_gb
-    return result
