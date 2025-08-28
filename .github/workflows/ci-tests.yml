@@ -49,14 +49,9 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"
         run: |
-          python - <<'PY'
-from src.ml.thresholds import fit_and_write_thresholds
-res = fit_and_write_thresholds(days=7, interval="hour")
-print("Wrote models/per_origin_thresholds.json")
-print(res)
-PY
+          python -c "from src.ml.thresholds import fit_and_write_thresholds; fit_and_write_thresholds(days=7, interval='hour'); print('Wrote models/per_origin_thresholds.json')"
           ls -lah models || true
-          test -f models/per_origin_thresholds.json || echo "per_origin_thresholds.json not found (demo)"
+          test -f models/per_origin_thresholds.json || echo 'per_origin_thresholds.json not found (demo)'
 
       # Upload logistic artifacts
       - name: Upload logistic model artifacts
@@ -82,12 +77,12 @@ PY
           if-no-files-found: warn
           retention-days: 14
 
-      # Upload thresholds artifact (optional)
-      - name: Upload thresholds artifact
+      # Upload per-origin thresholds artifact
+      - name: Upload per-origin thresholds artifact
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: trigger-likelihood-thresholds
+          name: per-origin-thresholds
           path: models/per_origin_thresholds.json
           if-no-files-found: warn
           retention-days: 14
