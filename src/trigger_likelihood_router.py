@@ -15,6 +15,9 @@ from src.ml.infer import (
     model_metadata_all,
 )
 
+from src.ml.thresholds import load_per_origin_thresholds
+from src.ml.infer import model_metadata_all
+
 # This router is expected to be mounted in main.py under prefix="/internal"
 router = APIRouter(tags=["trigger_likelihood"])
 
