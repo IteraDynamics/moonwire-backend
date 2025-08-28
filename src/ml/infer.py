@@ -1,4 +1,3 @@
-# src/ml/infer.py
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -17,6 +16,9 @@ _COV_NAME   = "feature_coverage.json"
 
 _RF_MODEL   = "trigger_likelihood_rf.joblib"
 _RF_META    = "trigger_likelihood_rf.meta.json"
+
+_GB_MODEL   = "trigger_likelihood_gb.joblib"
+_GB_META    = "trigger_likelihood_gb.meta.json"
 
 
 # ---------- loaders ----------
@@ -67,6 +69,12 @@ def model_metadata_all(models_dir: Path | None = None) -> Dict[str, Any]:
         out["rf"] = m
     except Exception:
         pass
+    # gb
+    try:
+        _, m = _load_model_and_meta(_GB_MODEL, _GB_META, models_dir)
+        out["gb"] = m
+    except Exception:
+        pass
     return out
 
 
@@ -85,11 +93,9 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
         return {}
 
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
-    """Logistic-only scoring (back-compat)."""
     try:
         model, meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
     except Exception:
-        # demo fallback
         if payload.get("features"):
             bz = float(payload["features"].get("burst_z", 0.0))
             p = 1 / (1 + np.exp(-0.1 * bz))
@@ -114,54 +120,54 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
 
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
-    Ensemble scoring over available models (logistic + random forest).
+    Ensemble scoring over available models (logistic + random forest + gb).
     Returns:
       {
         "prob_trigger_next_6h": float,
-        "low": float, "high": float,   # mean ± std band (clipped 0..1)
-        "votes": {"logistic": p1, "rf": p2}, "models": ["logistic", "rf"]
+        "low": float, "high": float,   # mean ± band (min/max),
+        "votes": {"logistic": p1, "rf": p2, "gb": p3}, "models": [...]
       }
-    Falls back to logistic-only or demo when needed.
+    Falls back to demo when needed.
     """
     votes: Dict[str, float] = {}
     demo = False
 
+    feats = payload.get("features") or {}
+
     # try logistic
     try:
         L_model, L_meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
-        feats = payload.get("features")
-        if feats is not None:
-            order = L_meta.get("feature_order") or []
-            p = float(L_model.predict_proba(_vectorize(feats, order))[0, 1])
-            votes["logistic"] = p
+        order = L_meta.get("feature_order") or []
+        votes["logistic"] = float(L_model.predict_proba(_vectorize(feats, order))[0, 1])
     except Exception:
         pass
 
     # try RF
     try:
         RF_model, RF_meta = _load_model_and_meta(_RF_MODEL, _RF_META, models_dir)
-        feats = payload.get("features")
-        if feats is not None:
-            order = RF_meta.get("feature_order") or []
-            p = float(RF_model.predict_proba(_vectorize(feats, order))[0, 1])
-            votes["rf"] = p
+        order = RF_meta.get("feature_order") or []
+        votes["rf"] = float(RF_model.predict_proba(_vectorize(feats, order))[0, 1])
     except Exception:
         pass
 
-    # If no real votes, demo fallback
+    # try GB
+    try:
+        GB_model, GB_meta = _load_model_and_meta(_GB_MODEL, _GB_META, models_dir)
+        order = GB_meta.get("feature_order") or []
+        votes["gb"] = float(GB_model.predict_proba(_vectorize(feats, order))[0, 1])
+    except Exception:
+        pass
+
     if not votes:
-        feats = payload.get("features") or {}
         bz = float(feats.get("burst_z", 0.0))
         p_demo = 1 / (1 + np.exp(-0.08 * bz))
         votes["logistic"] = p_demo
-        votes["rf"] = p_demo
         demo = True
 
     probs = list(votes.values())
     mean = float(np.mean(probs))
-    std = float(np.std(probs)) if len(probs) > 1 else 0.0
-    low = max(0.0, mean - std)
-    high = min(1.0, mean + std)
+    low = float(min(probs))
+    high = float(max(probs))
 
     return {
         "prob_trigger_next_6h": mean,
