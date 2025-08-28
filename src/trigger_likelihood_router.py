@@ -100,5 +100,17 @@ def trigger_likelihood_metadata(view: str = Query(default="base", regex="^(base|
     return payload
     
 @router.get("/internal/trigger-likelihood/thresholds")
-def get_thresholds():
+def get_trigger_thresholds():
+    """
+    Returns per-origin thresholds for trigger likelihood (or demo fallback).
+    """
     return load_per_origin_thresholds()
+
+@router.get("/internal/trigger-likelihood/metadata")
+def get_trigger_model_metadata():
+    """
+    Returns full model metadata (logistic + rf), including calibration + thresholds.
+    """
+    meta = model_metadata()
+    meta["thresholds"] = load_per_origin_thresholds()
+    return meta
