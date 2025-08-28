@@ -77,3 +77,18 @@ def compute_thresholds(min_total=30, min_positive=5, targets=[0.7, 0.8]) -> Dict
         json.dump(out, f, indent=2)
 
     return out
+    
+def load_per_origin_thresholds(path: Path | None = None) -> dict:
+    p = path or (MODELS_DIR / "per_origin_thresholds.json")
+    if not p.exists():
+        return {
+            "twitter": {"p70": 2.5, "p80": 3.0},
+            "reddit": {"p70": 2.6, "p80": 3.2},
+            "rss_news": {"p70": 2.4, "p80": 2.9},
+        }  # demo fallback
+    try:
+        with p.open("r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
