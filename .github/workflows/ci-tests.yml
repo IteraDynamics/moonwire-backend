@@ -42,18 +42,7 @@ jobs:
           echo "Models in ./models:"
           ls -lah models || true
 
-      # --- Train trigger likelihood models (smoke) ---
-      - name: Train trigger likelihood models (logistic + RF)
-        if: ${{ success() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"        # allow seeding if logs are empty in CI
-        run: |
-          python -m src.ml.train_trigger_model --days 14 --interval hour
-          echo "Models in ./models:"
-          ls -lah models || true
-
-      # >>> insert this block directly below the training step <<<
+      # --- Compute per-origin thresholds (writes models/per_origin_thresholds.json) ---
       - name: Compute per-origin thresholds
         if: ${{ success() }}
         env:
@@ -66,19 +55,8 @@ res = fit_and_write_thresholds(days=7, interval="hour")
 print("Wrote models/per_origin_thresholds.json")
 print(res)
 PY
-      # <<< end insert >>>
-
-      # Upload logistic artifacts
-      - name: Upload logistic model artifacts
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trigger-likelihood-v0
-          path: |
-            models/trigger_likelihood_v0.joblib
-            models/trigger_likelihood_v0.meta.json
-          if-no-files-found: warn
-          retention-days: 14
+          ls -lah models || true
+          test -f models/per_origin_thresholds.json || echo "per_origin_thresholds.json not found (demo)"
 
       # Upload logistic artifacts
       - name: Upload logistic model artifacts
@@ -101,6 +79,16 @@ PY
           path: |
             models/trigger_likelihood_rf.joblib
             models/trigger_likelihood_rf.meta.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Upload thresholds artifact (optional)
+      - name: Upload thresholds artifact
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigger-likelihood-thresholds
+          path: models/per_origin_thresholds.json
           if-no-files-found: warn
           retention-days: 14
 
