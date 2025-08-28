@@ -1117,19 +1117,21 @@ except Exception as e:
 
 
 # --- Calibration Metrics Summary ---
+
 meta = model_metadata()
 calib = meta.get("calibration", {})
 
+print("\n### 📏 Calibration")
 if "brier_pre" in calib and "brier_post" in calib:
-    print(f"\n**Calibration:** post-calibration Brier={calib['brier_post']:.4f} (vs pre={calib['brier_pre']:.4f})")
+    print(f"post-calibration Brier={calib['brier_post']:.4f} (vs pre={calib['brier_pre']:.4f})")
 elif calib:
-    print(f"\n**Calibration:** available metrics: {list(calib.keys())}")
+    print(f"Available metrics: {list(calib.keys())}")
 else:
-    print("\n**Calibration:** [demo] calibration not available")
+    print("[demo] calibration not available")
 
 # --- Per-Origin Thresholds Summary ---
 thresholds = load_per_origin_thresholds()
-print("\n**Per-Origin Thresholds:**")
+print("\n### 🎯 Per-Origin Thresholds")
 
 example_count = 0
 for origin, vals in thresholds.items():
@@ -1335,9 +1337,5 @@ except Exception as e:
 (ART / "demo_summary.md").write_text("\n".join(md))
 print(f"Wrote: {ART/'demo_summary.md'}")
 
-if __name__ == "__main__":
-    # Existing summary output (already prints core CI summary)
 
-    # Add this call at the end for calibration + thresholds
-    print_trigger_likelihood_calibration_and_thresholds()
 
