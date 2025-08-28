@@ -98,3 +98,7 @@ def trigger_likelihood_metadata(view: str = Query(default="base", regex="^(base|
     if rf_meta:
         payload["random_forest"] = rf_meta
     return payload
+    
+@router.get("/internal/trigger-likelihood/thresholds")
+def get_thresholds():
+    return load_per_origin_thresholds()
