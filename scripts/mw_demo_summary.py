@@ -1085,41 +1085,60 @@ from src.ml.infer import infer_score_ensemble, model_metadata
 
 md.append("\n### 🧮 Trigger Likelihood Ensemble v0.4 (log+rf+gb)")
 
-# Show which model artifacts exist (based on meta files)
+# Show which models are actually present
 try:
-    meta_all = model_metadata()
-    present = [k for k in ("logistic", "rf", "gb") if k in meta_all]
-    if present:
-        md.append(f"\nmodels present: {', '.join(present)}\n")
+    meta = model_metadata()
+    present = [k for k in ("logistic", "rf", "gb") if meta.get(k)]
+    md.append(f"\nmodels present: {', '.join(present) if present else 'none'}\n")
 except Exception:
-    pass
+    md.append("\nmodels present: unknown\n")
 
-# Use the SAME features we used for the v0 bullets
-candidates = list(rich_feats_by_origin.keys())[:3]  # keep your own selection if you prefer
-if not candidates:
-    md.append("_No eligible origins for ensemble._\n")
-else:
-    for o in candidates:
-        feats = rich_feats_by_origin.get(o, {})  # <- critical: pass features, not origin-only
-        rich_feats_by_origin[o] = feats
-        try:
-            res = infer_score_ensemble({"features": feats})
-        except Exception as e:
-            md.append(f"- {o}: _ensemble error ({e.__class__.__name__})_\n")
-            continue
+# Use the SAME origins you just scored in v0, in the SAME order
+candidates = [o for o in (ordered_origins if 'ordered_origins' in locals() else []) 
+              if o in (rich_feats_by_origin if 'rich_feats_by_origin' in locals() else {})][:3]
 
-        p   = float(res.get("prob_trigger_next_6h", 0.0))
-        lo  = float(res.get("low", p))
-        hi  = float(res.get("high", p))
-        band_pp = (hi - lo) * 50.0  # min/max → half-range in percentage points
+# Fallback: if nothing is in the cache, try any keys that exist
+if not candidates and 'rich_feats_by_origin' in locals():
+    candidates = list(rich_feats_by_origin.keys())[:3]
 
-        md.append(f"- **{o}**: {p*100:.1f}% ± {band_pp:.1f}pp")
-        votes = res.get("votes") or res.get("per_model") or {}
-        if votes:
-            vparts = ", ".join(f"{k}={float(v)*100:.1f}%" for k, v in votes.items())
-            md.append(f"  (votes: {vparts})")
-        md.append("")  # newline after each item
+printed = 0
+for o in candidates:
+    try:
+        feats = rich_feats_by_origin[o]
+    except Exception:
+        continue
 
+    try:
+        res = infer_score_ensemble({"features": feats})
+    except Exception:
+        continue
+
+    p   = res.get("prob_trigger_next_6h")
+    lo  = res.get("low")
+    hi  = res.get("high")
+    vts = res.get("votes") or res.get("per_model") or {}
+
+    if isinstance(p, (int, float)):
+        # print mean ± half-band (in percentage points)
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            band_pp = ((float(hi) - float(lo)) / 2.0) * 100.0
+            md.append(f"\n- **{o}**: {float(p)*100:.1f}% ± {band_pp:.1f}pp")
+        else:
+            md.append(f"\n- **{o}**: {float(p)*100:.1f}%")
+
+        if vts:
+            order = [k for k in ("logistic","rf","gb") if k in vts] + [k for k in vts if k not in ("logistic","rf","gb")]
+            parts = ", ".join(f"{k}={float(vts[k])*100:.1f}%" for k in order)
+            md.append(f"\n  (votes: {parts})")
+
+        # Optional note if only one vote made it through
+        if len(vts) == 1:
+            md.append("\n  _(only one model vote available at runtime)_")
+
+        printed += 1
+
+if printed == 0:
+    md.append("\n_No eligible origins for ensemble._\n")
 
 
 
