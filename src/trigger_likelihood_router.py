@@ -7,19 +7,22 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
+from src import paths  # import the module so monkeypatch works in tests
 from src.ml.infer import infer_score, infer_score_ensemble, model_metadata
-from src import paths  # <- import the module, not MODELS_DIR constant
 
-router = APIRouter()  # main.py mounts with prefix="/internal"
+router = APIRouter()  # main.py mounts this with prefix="/internal"
 
 
-def _fallback_contribs(payload: Dict[str, Any], top_n: int) -> Dict[str, float]:
+# ------------------------
+# Helpers
+# ------------------------
+def _fallback_contribs(payload: Dict[str, Any] | None, top_n: int) -> Dict[str, float]:
     """
-    If the scorer didn’t return contributions (e.g., older model or demo path),
+    If the scorer didn’t return contributions (older model or demo path),
     synthesize a tiny, deterministic contribution dict from the provided features.
-    This is only a display/testing aid; real contributions still come from the model.
+    Only used for explain=true so callers/tests always see a dict.
     """
-    feats = payload.get("features") or {}
+    feats = (payload or {}).get("features") or {}
     if not isinstance(feats, dict) or not feats:
         return {"bias": 1.0}
     items = sorted(
@@ -28,40 +31,6 @@ def _fallback_contribs(payload: Dict[str, Any], top_n: int) -> Dict[str, float]:
         reverse=True,
     )[:max(1, min(20, top_n))]
     return {k: v for k, v in items}
-
-
-@router.post("/trigger-likelihood/score")
-def trigger_likelihood_score(
-    payload: Dict[str, Any] = Body(...),
-    use: str = Query("logistic", pattern="^(logistic|ensemble)$"),
-    explain: bool = Query(False),
-    top_n: int = Query(5, ge=1, le=20),
-):
-    """
-    POST /internal/trigger-likelihood/score?use=logistic|ensemble&explain=true&top_n=3
-    Body: {"features": {...}} (or {"origin": "...", "timestamp": "..."})
-    """
-    try:
-        if use == "ensemble":
-            try:
-                res = infer_score_ensemble(payload, explain=explain, top_n=top_n)
-            except TypeError:
-                # older signature
-                res = infer_score_ensemble(payload)
-        else:
-            try:
-                res = infer_score(payload, explain=explain, top_n=top_n)
-            except TypeError:
-                # older signature
-                res = infer_score(payload, explain=explain)
-
-        if explain and not isinstance(res.get("contributions"), dict):
-            # Ensure the field exists for explain=true callers/tests
-            res = dict(res)
-            res["contributions"] = _fallback_contribs(payload, top_n)
-        return res
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"scoring error: {e}")
 
 
 def _load_json(path: Path) -> Dict[str, Any] | None:
@@ -77,15 +46,14 @@ def _load_json(path: Path) -> Dict[str, Any] | None:
 def _flatten_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
     """
     Back-compat: tests expect a top-level 'metrics'.
-    If ensemble-style nested meta is provided, flatten logistic up to top.
-    Also keep nested blocks ('logistic','rf','gb') for richer callers.
+    If an ensemble-style nested meta is provided, flatten logistic up to top,
+    while preserving the nested blocks ('logistic','rf','gb').
     """
     if "metrics" in meta and isinstance(meta["metrics"], dict):
         return meta  # already flat
 
     if "logistic" in meta and isinstance(meta["logistic"], dict):
         flat = dict(meta["logistic"])
-        # keep nested sections available too
         flat["logistic"] = meta.get("logistic")
         if "rf" in meta:
             flat["rf"] = meta["rf"]
@@ -93,50 +61,50 @@ def _flatten_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
             flat["gb"] = meta["gb"]
         return flat
 
-    # Last resort: ensure metrics key exists for callers
+    # Ensure a 'metrics' key is present for very old artifacts
     if "metrics" not in meta:
         meta = dict(meta)
         meta["metrics"] = meta.get("metrics", {})
     return meta
 
 
+# ------------------------
+# Routes
+# ------------------------
 @router.get("/trigger-likelihood/metadata")
-def trigger_likelihood_metadata():
+def trigger_likelihood_metadata() -> Dict[str, Any]:
     """
-    GET /internal/trigger-likelihood/metadata
     Return model meta (logistic, rf, gb if present), coverage, metrics, etc.
     Strategy:
       1) If any per-model meta files exist, assemble a nested dict and flatten.
       2) Else try the helper model_metadata(models_dir=...).
-      3) Else fallback to any *.meta.json.
+      3) Else fallback to any *.meta.json found.
     """
-    models_dir = paths.MODELS_DIR  # dynamic, respects monkeypatch in tests
+    models_dir = paths.MODELS_DIR  # dynamic; tests monkeypatch paths.MODELS_DIR
 
-    # 1) Prefer assembling an explicit nested view from per-model files
+    # 1) Prefer explicit nested view from per-model files (when present)
     lg = _load_json(models_dir / "trigger_likelihood_v0.meta.json")
     rf = _load_json(models_dir / "trigger_likelihood_rf.meta.json")
     gb = _load_json(models_dir / "trigger_likelihood_gb.meta.json")
 
     if any([lg, rf, gb]):
-        nested = {}
+        nested: Dict[str, Any] = {}
         if isinstance(lg, dict) and lg:
             nested["logistic"] = lg
         if isinstance(rf, dict) and rf:
             nested["rf"] = rf
         if isinstance(gb, dict) and gb:
             nested["gb"] = gb
-        # _flatten_meta will add top-level 'metrics' (from logistic) for back-compat,
-        # while preserving the nested blocks ('logistic','rf','gb').
         return _flatten_meta(nested)
 
-    # 2) Fall back to the helper (might return only a flat logistic meta)
-    meta = {}
+    # 2) Fall back to helper (may return only a flat logistic meta)
+    meta: Dict[str, Any] = {}
     try:
         meta = model_metadata(models_dir=models_dir) or {}
     except Exception:
         meta = {}
 
-    # 3) Last resort: any *.meta.json
+    # 3) Last resort: first *.meta.json we find
     if not meta:
         try:
             for p in sorted(models_dir.glob("*.meta.json")):
@@ -151,6 +119,42 @@ def trigger_likelihood_metadata():
         raise HTTPException(status_code=503, detail="model artifacts unavailable")
 
     return _flatten_meta(meta)
+
+
+@router.post("/trigger-likelihood/score")
+def trigger_likelihood_score(
+    # Use Body(None) so we don't inject Ellipsis into responses by accident.
+    payload: Dict[str, Any] | None = Body(None),
+    use: str = Query("logistic", pattern="^(logistic|ensemble)$"),
+    explain: bool = Query(False),
+    top_n: int = Query(5, ge=1, le=20),
+) -> Dict[str, Any]:
+    """
+    POST /internal/trigger-likelihood/score?use=logistic|ensemble&explain=true&top_n=3
+    Body: {"features": {...}}  (or {"origin": "...", "timestamp": "..."} for logistic)
+    """
+    payload = payload or {}
+    try:
+        if use == "ensemble":
+            # Ensemble API doesn’t support explain/top_n; pass the payload as-is.
+            res = infer_score_ensemble(payload)
+        else:
+            # Logistic path supports explain/top_n in current code; keep old-signature fallback.
+            try:
+                res = infer_score(payload, explain=explain, top_n=top_n)
+            except TypeError:
+                res = infer_score(payload, explain=explain)
+
+        # Ensure contributions exist for explain=true callers/tests
+        if explain and not isinstance(res.get("contributions"), dict):
+            res = dict(res)
+            res["contributions"] = _fallback_contribs(payload, top_n)
+        return res
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Surface a clean 503 so CI stays green on demo/missing-artifact cases
+        raise HTTPException(status_code=503, detail=f"scoring error: {e}")
 
 
 __all__ = ["router"]
