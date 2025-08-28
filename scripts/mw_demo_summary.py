@@ -1068,31 +1068,25 @@ else:
         pass
 
 
-# ---------- ensemble v0.3 ----------
-
-# ---------- Trigger Likelihood v0 — Ensemble v0.3 ----------
-md.append("\n**Ensemble v0.3 (mean ± band)**")
+# ---------- Trigger Likelihood v0 — Ensemble v0.4 ----------
+md.append("\n**Ensemble v0.4 (mean ± band)**")
 try:
-    # Prefer the same 2–3 origins we just used for logistic
     yield_data_local = locals().get("yield_data")
     candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
-
-    # Reuse any features we already built for the logistic section
     feats_cache_local = locals().get("feats_cache", {}) or {}
 
     if not candidates:
         md.append("_No candidate origins available._")
     else:
         for o in candidates:
-            # Reuse prebuilt features or build from the summary maps
             feats = feats_cache_local.get(o)
             if feats is None:
                 feats = _build_summary_features_for_origin(
                     o,
-                    trends_by_origin=trends_map,      # <- use trends_map, not undefined name
+                    trends_by_origin=trends_map,
                     regimes_map=regimes_map,
                     metrics_map=metrics_map,
-                    bursts_by_origin=bursts_by_origin,
+                    bursts_by_origin=bursts_map,
                 )
 
             res = infer_score_ensemble({"features": feats})
@@ -1106,7 +1100,8 @@ try:
                     md.append(f"- {o}: **{p*100:.1f}%** (±{(high-low)*50:.1f}%)")
                 else:
                     md.append(f"- {o}: **{p*100:.1f}%**")
-                # Per-model votes, if present
+
+                # ✅ Add per-model votes
                 votes = res.get("votes") or {}
                 if votes:
                     vote_str = ", ".join(f"{k}={v*100:.1f}%" for k, v in sorted(votes.items()))
@@ -1117,7 +1112,6 @@ try:
                 md.append(f"- {o}: _no score_")
 except Exception as e:
     md.append(f"⚠️ Ensemble score failed: {e}")
-
 
 
 # ---------- drift check (polish) ----------
