@@ -790,6 +790,70 @@ except Exception as e:
     md.append(f"\n_⚠️ Nowcast attention failed: {e}_")
 
 
+# === BEGIN: Trigger Likelihood v0 (next 6h) ===
+try:
+    from src.ml.infer import model_metadata, infer_score
+
+    md.append("\n## 🤖 Trigger Likelihood v0 (next 6h)\n")
+
+    meta = model_metadata()
+    lm = meta.get("logistic", {})
+    trained_at = lm.get("trained_at", "unknown")
+    auc = (lm.get("metrics", {}) or {}).get("auc")
+    demo_flag = " • demo" if lm.get("demo") else ""
+    if auc is not None:
+        md.append(f"- model@{trained_at} • AUC={auc}{demo_flag}")
+    else:
+        md.append(f"- model@{trained_at}{demo_flag}")
+    md.append("")
+    md.append("_rich features on_")
+    md.append("_(demo) rich features synthesized for display_")
+    md.append("")
+
+    # Safe access to prebuilt rich feats; rebuild minimally if missing.
+    rich_feats_by_origin = locals().get("rich_feats_by_origin") or {}
+    ordered_origins = locals().get("ordered_origins") or []
+
+    def _ensure_feats(o: str) -> dict:
+        if o in rich_feats_by_origin:
+            return rich_feats_by_origin[o]
+        builder = locals().get("_build_summary_features_for_origin")
+        if builder:
+            return builder(
+                o,
+                trends_by_origin=locals().get("trends_map") or {},
+                regimes_map=locals().get("regimes_map") or {},
+                metrics_map=locals().get("metrics_map") or {},
+                bursts_by_origin=locals().get("bursts_map") or {},
+            ) or {}
+        return {}
+
+    candidates = ordered_origins[:3] or \
+        [o for o in ["twitter", "rss_news", "reddit"] if _ensure_feats(o)] or \
+        list(rich_feats_by_origin.keys())[:3]
+
+    printed = 0
+    for o in candidates:
+        feats = _ensure_feats(o)
+        if not feats:
+            continue
+        try:
+            p = infer_score({"features": feats}).get("prob_trigger_next_6h")
+        except Exception:
+            p = None
+        if isinstance(p, (int, float)):
+            md.append(f"- **{o}**: {p*100:.1f}% chance of trigger in next 6h")
+            nz = sum(1 for v in feats.values() if isinstance(v, (int, float)) and abs(float(v)) > 1e-12)
+            md.append(f"  _(nz-features={nz}/{len(feats)})_")
+            printed += 1
+
+    if printed == 0:
+        md.append("_Unable to score any origins for logistic display._")
+
+except Exception as e:
+    md.append(f"_Trigger Likelihood v0 unavailable ({e.__class__.__name__})._")
+# === END: Trigger Likelihood v0 (next 6h) ===
+
 
 
 # === BEGIN: Trigger Likelihood Ensemble v0.4 (log+rf+gb) ===
