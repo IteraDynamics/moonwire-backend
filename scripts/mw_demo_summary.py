@@ -1339,7 +1339,11 @@ print(f"Wrote: {ART/'demo_summary.md'}")
 
 # --- Debug: Dump raw calibration block (optional) ---
 
-meta_debug = model_metadata()
+# Directly load real metadata file to avoid demo fallback
+meta_path = MODELS_DIR / "trigger_likelihood_v0.meta.json"
+with open(meta_path, "r") as f:
+    meta_debug = json.load(f)
+
 calib_debug = meta_debug.get("calibration", None)
 
 md.append("\n<details><summary>📦 Raw Calibration Meta</summary>\n\n")
