@@ -343,3 +343,25 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     result["calibration"] = calib_info
     result["calibrated_model_path"] = calibrated_model_path
     return result
+    
+# -------------------- CLI --------------------
+if __name__ == "__main__":
+    import argparse, json
+    from pathlib import Path
+
+    ap = argparse.ArgumentParser(description="Train Trigger Likelihood models")
+    ap.add_argument("--days", type=int, default=14)
+    ap.add_argument("--interval", type=str, default="hour")
+    ap.add_argument("--out-dir", type=str, default=None, help="Optional output dir (defaults to paths.MODELS_DIR)")
+    args = ap.parse_args()
+
+    out_dir = Path(args.out_dir) if args.out_dir else None
+    result = train(days=args.days, interval=args.interval, out_dir=out_dir)
+
+    # Print a compact summary for CI logs
+    print(json.dumps({
+        "model_path": result.get("model_path"),
+        "rf_model_path": result.get("rf_model_path"),
+        "gb_model_path": result.get("gb_model_path"),
+        "demo": result.get("demo"),
+    }, indent=2))
