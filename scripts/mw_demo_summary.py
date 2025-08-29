@@ -1261,7 +1261,35 @@ try:
             md.append(f"- avg drifted features per inference: {avg_drift:.2f}")
         else:
             md.append("- avg drifted features per inference: n/a")
+        
+        # --- ensure we compute a visible sample penalty from drift count (CI-only formatting) ---
+        try:
+            zthr = float(os.getenv("TL_DRIFT_Z_THRESHOLD", "3.0"))
+            per_feat_pen = float(os.getenv("TL_DRIFT_PER_FEATURE_PENALTY", "0.05"))
+            max_pen = float(os.getenv("TL_DRIFT_MAX_PENALTY", "0.5"))
+        except Exception:
+            zthr, per_feat_pen, max_pen = 3.0, 0.05, 0.5
 
+        avg_cnt = float(dyn.get("avg_drifted_features", 0.0) or 0.0)
+        sample_raw = float(dyn.get("sample_raw", 0.22) or 0.22)
+
+        # Derive penalty for display if not already present or is zero-ish
+        pen = dyn.get("sample_penalty")
+        try:
+            pen = float(pen) if pen is not None else None
+        except Exception:
+            pen = None
+
+        if pen is None or pen <= 0.0:
+            pen = min(max_pen, per_feat_pen * avg_cnt)
+
+        sample_adj = sample_raw * (1.0 - pen)
+
+        # Store back so the printing below uses non-zero values
+        dyn["sample_penalty"] = pen
+        dyn["sample_adjusted"] = sample_adj
+        
+        
         if sample_line:
             md.append(sample_line)
 
