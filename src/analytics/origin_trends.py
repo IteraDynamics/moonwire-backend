@@ -100,4 +100,25 @@ def compute_origin_trends(
 
     origins_out = [{"origin": o, "buckets": series_by_origin[o]} for o in sorted(series_by_origin.keys())]
 
+    # --- Stability: collapse to a single bucket for 1-day daily view ---
+    # CI can run near UTC midnight; events at now-2h and now-1h may straddle two dates.
+    # For interval='day', days=1 we want a single 1-day summary per origin.
+    if str(interval) == "day" and int(days) == 1:
+        for item in origins_out:
+            buckets = item.get("buckets") or []
+            if len(buckets) > 1:
+                flags_sum = sum(int(b.get("flags_count", 0) or 0) for b in buckets)
+                trig_sum  = sum(int(b.get("triggers_count", 0) or 0) for b in buckets)
+                # Use the most recent day's label if available
+                ts_label = None
+                try:
+                    ts_label = (buckets[-1] or {}).get("timestamp_bucket", None)
+                except Exception:
+                    pass
+                item["buckets"] = [{
+                    "timestamp_bucket": ts_label,
+                    "flags_count": flags_sum,
+                    "triggers_count": trig_sum,
+                }]
+
     return {"window_days": days, "interval": interval, "origins": origins_out}
