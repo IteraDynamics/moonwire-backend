@@ -1262,7 +1262,23 @@ try:
         else:
             md.append("- avg drifted features per inference: n/a")
         
-        # --- ensure we compute a visible sample penalty from drift count (CI-only formatting) ---
+        
+        # --- normalize drift summary container (dyn) ---
+        # If earlier code set `dyn` to a float (e.g., avg drift count), coerce to a dict.
+        try:
+            is_dict = isinstance(dyn, dict)
+        except NameError:
+            is_dict = False
+
+        if not is_dict:
+            try:
+                avg_val = float(dyn or 0.0)
+            except Exception:
+                avg_val = 0.0
+            dyn = {"avg_drifted_features": avg_val}
+
+# --- ensure we compute a visible sample penalty from drift count (CI-only formatting) ---
+
         try:
             zthr = float(os.getenv("TL_DRIFT_Z_THRESHOLD", "3.0"))
             per_feat_pen = float(os.getenv("TL_DRIFT_PER_FEATURE_PENALTY", "0.05"))
@@ -1270,10 +1286,10 @@ try:
         except Exception:
             zthr, per_feat_pen, max_pen = 3.0, 0.05, 0.5
 
-        avg_cnt = float(dyn.get("avg_drifted_features", 0.0) or 0.0)
+        avg_cnt   = float(dyn.get("avg_drifted_features", 0.0) or 0.0)
         sample_raw = float(dyn.get("sample_raw", 0.22) or 0.22)
 
-        # Derive penalty for display if not already present or is zero-ish
+# Derive penalty for display if not already present or is zero-ish
         pen = dyn.get("sample_penalty")
         try:
             pen = float(pen) if pen is not None else None
@@ -1285,8 +1301,8 @@ try:
 
         sample_adj = sample_raw * (1.0 - pen)
 
-        # Store back so the printing below uses non-zero values
-        dyn["sample_penalty"] = pen
+# Store back so the printing below uses non-zero values
+        dyn["sample_penalty"]  = pen
         dyn["sample_adjusted"] = sample_adj
         
         
