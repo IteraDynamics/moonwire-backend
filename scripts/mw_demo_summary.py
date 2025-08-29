@@ -1091,7 +1091,7 @@ try:
                     bursts_by_origin=bursts_map,
                 )
 
-            res = infer_score_ensemble({"features": feats})
+            res = infer_score_ensemble({"origin": o, "features": feats})
             p   = res.get("prob_trigger_next_6h")
             low = res.get("low")
             high= res.get("high")
@@ -1139,7 +1139,7 @@ try:
 
         for _o in _cands:
             # compute dynamic
-            dyn, n_recent, static_prob_default = dynamic_threshold_for_origin(_o, recent=_recent)
+            dyn, n_recent, static_prob_default = dynamic_threshold_for_origin(_o, recent=_recent, min_samples=3)
             # best-effort static prob from thresholds file (if they store probability-scale numbers)
             _st = static_prob_default
             try:
