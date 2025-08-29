@@ -41,7 +41,7 @@ def _compute_coverage_from_X(X: np.ndarray, feat_order: List[str]) -> Dict[str, 
     out: Dict[str, Dict[str, float]] = {}
     if X.size == 0:
         for k in feat_order:
-            out[k] = {"nonzero_pct": 0.0, "mean": 0.0, "min": 0.0, "max": 0.0}
+            out[k] = {"nonzero_pct": 0.0, "mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
         return out
     for i, k in enumerate(feat_order):
         col = X[:, i]
@@ -49,6 +49,7 @@ def _compute_coverage_from_X(X: np.ndarray, feat_order: List[str]) -> Dict[str, 
         out[k] = {
             "nonzero_pct": nonzero,
             "mean": float(np.mean(col)),
+            "std": float(np.std(col)),
             "min": float(np.min(col)),
             "max": float(np.max(col)),
         }
