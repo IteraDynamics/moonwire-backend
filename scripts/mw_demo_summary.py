@@ -1116,6 +1116,69 @@ except Exception as e:
     md.append(f"⚠️ Ensemble score failed: {e}")
 
 
+# ---------- Dynamic vs Static Thresholds (last 48h) ----------
+try:
+    from src.ml.recent_scores import load_recent_scores, dynamic_threshold_for_origin
+    from src.ml.thresholds import load_per_origin_thresholds as _load_thr  # optional: may not exist
+    import matplotlib.pyplot as plt  # optional tiny plot
+    from pathlib import Path as _Path
+    import os as _os
+
+    md.append("\n### 🎚️ Dynamic vs Static Thresholds (48h)")
+    # choose up to 2 origins we already scored
+    _cands = [o for o in (locals().get("candidates") or []) if o != "unknown"][:2]
+    if not _cands:
+        md.append("_No candidate origins available._")
+    else:
+        _recent = load_recent_scores()
+        _per_origin_static = {}
+        try:
+            _per_origin_static = _load_thr()  # may be demo-seeded (not probability-scale; we fall back to 0.5)
+        except Exception:
+            _per_origin_static = {}
+
+        for _o in _cands:
+            # compute dynamic
+            dyn, n_recent, static_prob_default = dynamic_threshold_for_origin(_o, recent=_recent)
+            # best-effort static prob from thresholds file (if they store probability-scale numbers)
+            _st = static_prob_default
+            try:
+                vals = _per_origin_static.get(_o) or {}
+                # prefer keys that look probability-scale
+                for k in ("p80_proba","p70_proba","proba"):
+                    if k in vals and 0.0 <= float(vals[k]) <= 1.0:
+                        _st = float(vals[k]); break
+            except Exception:
+                pass
+            used = dyn if dyn is not None else _st
+            md.append(f"- `{_o}`: dyn={dyn:.3f} ({n_recent} pts) | static={_st:.3f} → used={used:.3f}")
+
+            # Optional mini-plot (safe in CI via MPLBACKEND=Agg)
+            try:
+                pts = [(r.ts, r.proba) for r in _recent if r.origin == _o]
+                pts = sorted([p for p in pts if p[0] >= datetime.now(timezone.utc) - timedelta(hours=48)], key=lambda t: t[0])
+                if len(pts) >= 8:
+                    xs = [p[0] for p in pts]
+                    ys = [p[1] for p in pts]
+                    plt.figure(figsize=(5.0, 2.1))
+                    plt.plot(xs, ys, linewidth=1.5)
+                    if dyn is not None:
+                        plt.axhline(dyn, linestyle="--", linewidth=1)
+                    plt.axhline(_st, linestyle=":", linewidth=1)
+                    plt.title(f"{_o}: recent scores (48h)")
+                    plt.tight_layout()
+                    _p = _Path("artifacts") / f"dyn_thr_{_o}.png"
+                    plt.savefig(_p)
+                    plt.close()
+                    md.append(f"  \n![]({_p.as_posix()})")
+            except Exception:
+                pass
+except Exception as e:
+    md.append(f"\n_⚠️ Dynamic threshold section failed: {e}_")
+
+
+
+
 # --- Calibration Metrics Summary ---
 
 meta = model_metadata()
