@@ -1151,7 +1151,14 @@ try:
             except Exception:
                 pass
             used = dyn if dyn is not None else _st
-            md.append(f"- `{_o}`: dyn={dyn:.3f} ({n_recent} pts) | static={_st:.3f} → used={used:.3f}")
+            def _fmt(v):
+                try:
+                   return f"{float(v):.3f}"
+                except Exception:
+                   return "n/a"
+
+            md.append(f"- `{_o}`: dyn={_fmt(dyn)} ({n_recent} pts) | static={_fmt(_st)} → used={_fmt(used)}")
+
 
             # Optional mini-plot (safe in CI via MPLBACKEND=Agg)
             try:
