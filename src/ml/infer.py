@@ -9,6 +9,9 @@ from datetime import datetime, timedelta, timezone
 from src.paths import MODELS_DIR, RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
 from src.analytics.origin_utils import normalize_origin as _norm
 
+# NEW: dynamic threshold helpers
+from src.ml.recent_scores import append_recent_score, dynamic_threshold_for_origin
+
 # Filenames
 _LOGI_MODEL = "trigger_likelihood_v0.joblib"
 _LOGI_META  = "trigger_likelihood_v0.meta.json"
@@ -103,7 +106,7 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
             if explain:
                 res["contributions"] = {"burst_z": 0.1 * bz}
             return res
-    return {"prob_trigger_next_6h": 0.062, "demo": True}
+        return {"prob_trigger_next_6h": 0.062, "demo": True}
 
     feats = payload.get("features")
     if feats is None:
@@ -125,7 +128,12 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
       {
         "prob_trigger_next_6h": float,
         "low": float, "high": float,   # mean ± band (min/max),
-        "votes": {"logistic": p1, "rf": p2, "gb": p3}, "models": [...]
+        "votes": {"logistic": p1, "rf": p2, "gb": p3}, "models": [...],
+        # NEW (non-breaking additions):
+        "threshold_dynamic": float|None,
+        "threshold_static": float,
+        "threshold_used": "dynamic"|"static",
+        "recent_count": int
       }
     Falls back to demo when needed.
     """
@@ -133,6 +141,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     demo = False
 
     feats = payload.get("features") or {}
+    origin = str(payload.get("origin") or payload.get("source") or "unknown")
 
     # try logistic
     try:
@@ -169,6 +178,16 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
+    # --- NEW: log this score and compute dynamic/static thresholds
+    try:
+        append_recent_score(origin, mean)
+    except Exception:
+        pass
+
+    dyn_thr, n_recent, static_thr = dynamic_threshold_for_origin(origin)
+    used = "dynamic" if dyn_thr is not None else "static"
+    thr_used = float(dyn_thr if dyn_thr is not None else static_thr)
+
     return {
         "prob_trigger_next_6h": mean,
         "low": low,
@@ -176,6 +195,12 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         "votes": votes,
         "models": list(votes.keys()),
         "demo": demo,
+        # new fields (harmless to downstream callers):
+        "threshold_dynamic": dyn_thr,
+        "threshold_static": static_thr,
+        "threshold_used": used,
+        "recent_count": n_recent,
+        "decision": bool(mean >= thr_used),
     }
 
 
