@@ -26,7 +26,7 @@ from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
 from src.ml.thresholds import load_per_origin_thresholds
-
+from typing import Dict, List
 
 # ---- ML (trigger likelihood) import guard ----
 _ML_OK = False
