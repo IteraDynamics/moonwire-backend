@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json
+import json, os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import joblib
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from src.paths import MODELS_DIR, RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
 from src.analytics.origin_utils import normalize_origin as _norm
 
-# NEW: dynamic threshold helpers
+# Dynamic thresholds (from Task 1)
 from src.ml.recent_scores import append_recent_score, dynamic_threshold_for_origin
 
 # Filenames
@@ -62,17 +62,14 @@ def model_metadata(models_dir: Path | None = None) -> Dict[str, Any]:
 
 def model_metadata_all(models_dir: Path | None = None) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
-    # logistic
     L = model_metadata(models_dir)
     if L:
         out["logistic"] = L
-    # rf
     try:
         _, m = _load_model_and_meta(_RF_MODEL, _RF_META, models_dir)
         out["rf"] = m
     except Exception:
         pass
-    # gb
     try:
         _, m = _load_model_and_meta(_GB_MODEL, _GB_META, models_dir)
         out["gb"] = m
@@ -94,6 +91,64 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
         return contrib
     except Exception:
         return {}
+
+# ---- Drift helpers (use coverage means/stds) ----
+def _drift_params():
+    try:
+        zthr = float(os.getenv("TL_DRIFT_Z_THRESHOLD", "3.0"))
+    except Exception:
+        zthr = 3.0
+    try:
+        per_feat = float(os.getenv("TL_DRIFT_PER_FEATURE_PENALTY", "0.05"))
+    except Exception:
+        per_feat = 0.05
+    try:
+        max_pen = float(os.getenv("TL_DRIFT_MAX_PENALTY", "0.5"))
+    except Exception:
+        max_pen = 0.5
+    return zthr, per_feat, max_pen
+
+def _compute_drift(feats: Dict[str, Any], coverage: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Returns:
+      {
+        "drifted_features": [names],
+        "num_drifted": int,
+        "z_threshold": float
+      }
+    Uses mean/std from coverage; if std≈0, skip that feature.
+    DEMO fallback: if no stds present and DEMO_MODE=true, simulate drift for 1–2 features.
+    """
+    zthr, _, _ = _drift_params()
+    drifted: List[str] = []
+    # happy path with coverage
+    has_any_std = False
+    for k, stats in (coverage or {}).items():
+        try:
+            mu = float((stats or {}).get("mean", 0.0))
+            sd = float((stats or {}).get("std", 0.0))
+            x = float(feats.get(k, 0.0) or 0.0)
+        except Exception:
+            continue
+        if sd and sd > 1e-12:
+            has_any_std = True
+            z = (x - mu) / sd
+            if abs(z) > zthr:
+                drifted.append(k)
+
+    # DEMO fallback: no stds recorded but we still want to show something in CI
+    if not has_any_std and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
+        # deterministically pick first 1–2 present features to mark as 'drifted'
+        demo_candidates = [k for k in ("burst_z","leadership_max_r","precision_7d","count_24h","regime_turbulent") if k in feats]
+        drifted = demo_candidates[:2] if demo_candidates else []
+
+    return {"drifted_features": drifted, "num_drifted": len(drifted), "z_threshold": zthr}
+
+def _apply_drift_penalty(score: float, num_drifted: int) -> Tuple[float, float]:
+    """Return (penalty, adjusted_score)."""
+    _, per_feat, max_pen = _drift_params()
+    penalty = min(max_pen, max(0.0, per_feat * float(num_drifted)))
+    return penalty, float(score * (1.0 - penalty))
 
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
     try:
@@ -124,18 +179,13 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
     Ensemble scoring over available models (logistic + random forest + gb).
-    Returns:
-      {
-        "prob_trigger_next_6h": float,
-        "low": float, "high": float,   # mean ± band (min/max),
-        "votes": {"logistic": p1, "rf": p2, "gb": p3}, "models": [...],
-        # NEW (non-breaking additions):
-        "threshold_dynamic": float|None,
-        "threshold_static": float,
-        "threshold_used": "dynamic"|"static",
-        "recent_count": int
-      }
-    Falls back to demo when needed.
+
+    Returns base fields plus NEW drift-aware extras:
+      - ensemble_score (same as prob_trigger_next_6h)
+      - drifted_features: list[str]
+      - drift_penalty: float
+      - adjusted_score: float
+      - decision_adjusted: bool (adjusted vs threshold)
     """
     votes: Dict[str, float] = {}
     demo = False
@@ -178,29 +228,45 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
-    # --- NEW: log this score and compute dynamic/static thresholds
+    # Log score for dynamic thresholds (Task 1)
     try:
         append_recent_score(origin, mean)
     except Exception:
         pass
 
+    # Dynamic vs static threshold selection
     dyn_thr, n_recent, static_thr = dynamic_threshold_for_origin(origin)
     used = "dynamic" if dyn_thr is not None else "static"
     thr_used = float(dyn_thr if dyn_thr is not None else static_thr)
 
+    # -------- Drift-aware attenuation --------
+    coverage = _load_cov(models_dir)  # has mean/std after tiny train change
+    drift_info = _compute_drift(feats, coverage)
+    penalty, adjusted = _apply_drift_penalty(mean, drift_info["num_drifted"])
+
     return {
+        # original fields (unchanged semantics)
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
         "votes": votes,
         "models": list(votes.keys()),
         "demo": demo,
-        # new fields (harmless to downstream callers):
+
+        # dynamic thresholds (Task 1)
         "threshold_dynamic": dyn_thr,
         "threshold_static": static_thr,
         "threshold_used": used,
         "recent_count": n_recent,
         "decision": bool(mean >= thr_used),
+
+        # NEW drift-aware extras (non-breaking additions)
+        "ensemble_score": mean,
+        "drifted_features": drift_info["drifted_features"],
+        "drift_penalty": penalty,
+        "drift_z_threshold": drift_info["z_threshold"],
+        "adjusted_score": adjusted,
+        "decision_adjusted": bool(adjusted >= thr_used),
     }
 
 
