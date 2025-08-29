@@ -16,6 +16,8 @@ from sklearn.metrics import (
     brier_score_loss,
 )
 
+from sklearn.calibration import CalibratedClassifierCV  # NEW
+
 from src import paths
 from src.ml.feature_builder import build_examples, synth_demo_dataset
 
@@ -108,6 +110,58 @@ def _top_coefficients(model: LogisticRegression, feat_order: List[str], top: int
     return [{"feature": k, "coef": float(v)} for k, v in pairs[:top]]
 
 
+def _calibrate_on_validation(
+    base_model,
+    Xva: np.ndarray,
+    yva: np.ndarray,
+    method: str = "isotonic",
+) -> Tuple[Dict[str, float], object | None]:
+    """
+    Calibrate a prefit classifier on the validation set using CalibratedClassifierCV.
+    Returns (calibration_metrics_dict, calibrated_model_or_None).
+    The metrics are computed on the same validation set for a simple CI-friendly report.
+    """
+    calib_report: Dict[str, float | str] = {
+        "method": method,
+        "on": "validation",
+    }
+
+    try:
+        if Xva.size == 0 or np.unique(yva).size < 2:
+            calib_report["note"] = "skipped: validation lacks two classes or is empty"
+            return calib_report, None
+
+        # Pre-calibration predictions (validation)
+        p_pre = base_model.predict_proba(Xva)[:, 1]
+
+        # Fit calibration model using the prefit base model
+        method = method.lower().strip()
+        if method not in ("isotonic", "sigmoid"):
+            method = "isotonic"
+        calibrator = CalibratedClassifierCV(base_model, method=method, cv="prefit")
+        calibrator.fit(Xva, yva)
+
+        p_post = calibrator.predict_proba(Xva)[:, 1]
+
+        # Pre metrics
+        calib_report["roc_auc_pre"] = _safe_metric(roc_auc_score, yva, p_pre, 0.5)
+        calib_report["pr_auc_pre"] = _safe_metric(average_precision_score, yva, p_pre, 0.0)
+        calib_report["logloss_pre"] = _safe_metric(log_loss, yva, p_pre, 0.0)
+        calib_report["brier_pre"] = _safe_metric(brier_score_loss, yva, p_pre, 0.0)
+
+        # Post metrics
+        calib_report["roc_auc_post"] = _safe_metric(roc_auc_score, yva, p_post, 0.5)
+        calib_report["pr_auc_post"] = _safe_metric(average_precision_score, yva, p_post, 0.0)
+        calib_report["logloss_post"] = _safe_metric(log_loss, yva, p_post, 0.0)
+        calib_report["brier_post"] = _safe_metric(brier_score_loss, yva, p_post, 0.0)
+
+        return calib_report, calibrator
+
+    except Exception as e:
+        calib_report["note"] = f"skipped: {type(e).__name__}: {e}"
+        return calib_report, None
+
+
 def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -> Dict[str, Any]:
     out_dir = out_dir or paths.MODELS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -127,14 +181,17 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     if not rows:
         raise RuntimeError("No training rows and DEMO_MODE is false; cannot train.")
 
+    # Arrays + coverage
     X, y = _mk_arrays(rows, feat_order)
     coverage = _compute_coverage_from_X(X, feat_order)
 
+    # Time-aware split
     n = X.shape[0]
     cut = max(1, int(0.8 * n))
     Xtr, ytr = X[:cut], y[:cut]
     Xva, yva = (X[cut:], y[cut:]) if n > 1 else (X.copy(), y.copy())
 
+    # Ensure 2 classes in train
     Xtr, ytr = _ensure_two_classes_in_train(Xtr, ytr, X, y)
 
     # ---------- Logistic ----------
@@ -148,11 +205,25 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     p_va_lr = lr.predict_proba(Xva)[:, 1] if Xva.size else np.array([])
     metrics_lr = _metrics_dict(ytr, p_tr_lr, yva, p_va_lr)
 
+    # --- Calibration pass (validation-based) ---
+    calib_method = os.getenv("CALIBRATION_METHOD", "isotonic")
+    calib_info, lr_calibrated = _calibrate_on_validation(lr, Xva, yva, method=calib_method)
+
+    # Persist models & meta
     model_path = out_dir / "trigger_likelihood_v0.joblib"
     meta_path = out_dir / "trigger_likelihood_v0.meta.json"
     coverage_path = out_dir / "feature_coverage.json"
-
     joblib.dump(lr, model_path)
+
+    # Save calibrated model if available (optional, for future inference)
+    calibrated_model_path: str | None = None
+    if lr_calibrated is not None:
+        calibrated_model_path = str(out_dir / "trigger_likelihood_v0.calibrated.joblib")
+        try:
+            joblib.dump(lr_calibrated, calibrated_model_path)
+        except Exception:
+            calibrated_model_path = None
+
     with coverage_path.open("w") as f:
         json.dump(coverage, f, indent=2)
 
@@ -161,9 +232,11 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
         "git_sha": _git_sha(),
         "feature_order": feat_order,
         "metrics": metrics_lr,
+        "calibration": calib_info or {},                     # <-- filled now
         "demo": bool(demo_used),
         "artifacts": {
             "model": str(model_path),
+            "calibrated_model": calibrated_model_path,       # may be None
             "feature_coverage": str(coverage_path),
         },
         "top_features": _top_coefficients(lr, feat_order, top=5),
@@ -243,7 +316,7 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
                     "model": str(gb_model_path),
                     "feature_coverage": str(coverage_path),
                 },
-                "top_features": [],  # GB doesn't provide native feature importances here
+                "top_features": [],  # GB doesn't provide native coefficients
             }
             with gb_meta_path.open("w") as f:
                 json.dump(meta_gb, f, indent=2)
@@ -266,4 +339,29 @@ def train(days: int = 14, interval: str = "hour", out_dir: Path | None = None) -
     result["gb_model_path"] = str(gb_model_path) if gb_trained else None
     result["gb_meta_path"] = str(gb_meta_path) if gb_trained else None
     result["gb_metrics"] = metrics_gb
+    # for convenience in debugging
+    result["calibration"] = calib_info
+    result["calibrated_model_path"] = calibrated_model_path
     return result
+    
+# -------------------- CLI --------------------
+if __name__ == "__main__":
+    import argparse, json
+    from pathlib import Path
+
+    ap = argparse.ArgumentParser(description="Train Trigger Likelihood models")
+    ap.add_argument("--days", type=int, default=14)
+    ap.add_argument("--interval", type=str, default="hour")
+    ap.add_argument("--out-dir", type=str, default=None, help="Optional output dir (defaults to paths.MODELS_DIR)")
+    args = ap.parse_args()
+
+    out_dir = Path(args.out_dir) if args.out_dir else None
+    result = train(days=args.days, interval=args.interval, out_dir=out_dir)
+
+    # Print a compact summary for CI logs
+    print(json.dumps({
+        "model_path": result.get("model_path"),
+        "rf_model_path": result.get("rf_model_path"),
+        "gb_model_path": result.get("gb_model_path"),
+        "demo": result.get("demo"),
+    }, indent=2))

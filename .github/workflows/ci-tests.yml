@@ -31,8 +31,8 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
 
-      # --- Train trigger likelihood models (smoke) ---
-      - name: Train trigger likelihood models (logistic + RF)
+      # --- Train trigger likelihood model(s) ---
+      - name: Train trigger likelihood models (logistic)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -42,7 +42,25 @@ jobs:
           echo "Models in ./models:"
           ls -lah models || true
 
-      # Upload logistic artifacts
+      # --- Assert logistic artifacts exist (fail early if missing) ---
+      - name: Assert logistic artifacts exist
+        if: ${{ success() }}
+        run: |
+          test -f models/trigger_likelihood_v0.joblib    || (echo "missing logistic model" && exit 1)
+          test -f models/trigger_likelihood_v0.meta.json || (echo "missing logistic meta"  && exit 1)
+
+      # OPTIONAL: compute per-origin thresholds (commented out for simplicity)
+      # - name: Compute per-origin thresholds
+      #   if: ${{ success() }}
+      #   env:
+      #     PYTHONPATH: ${{ github.workspace }}
+      #     DEMO_MODE: "true"
+      #   run: |
+      #     python -c "from src.ml.thresholds import fit_and_write_thresholds; fit_and_write_thresholds(days=7, interval='hour'); print('Wrote models/per_origin_thresholds.json')"
+      #     ls -lah models || true
+      #     test -f models/per_origin_thresholds.json || true
+
+      # Upload logistic artifacts (only)
       - name: Upload logistic model artifacts
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -51,19 +69,7 @@ jobs:
           path: |
             models/trigger_likelihood_v0.joblib
             models/trigger_likelihood_v0.meta.json
-          if-no-files-found: warn
-          retention-days: 14
-
-      # Upload Random Forest artifacts (may be missing locally; warn only)
-      - name: Upload RF model artifacts
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trigger-likelihood-rf
-          path: |
-            models/trigger_likelihood_rf.joblib
-            models/trigger_likelihood_rf.meta.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
       # --- Demo summary & artifacts (read-only, post-tests) ---

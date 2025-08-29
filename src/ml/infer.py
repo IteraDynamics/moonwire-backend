@@ -103,7 +103,7 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
             if explain:
                 res["contributions"] = {"burst_z": 0.1 * bz}
             return res
-        return {"prob_trigger_next_6h": 0.062, "demo": True}
+    return {"prob_trigger_next_6h": 0.062, "demo": True}
 
     feats = payload.get("features")
     if feats is None:

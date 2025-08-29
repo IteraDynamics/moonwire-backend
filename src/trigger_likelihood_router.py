@@ -15,6 +15,9 @@ from src.ml.infer import (
     model_metadata_all,
 )
 
+from src.ml.thresholds import load_per_origin_thresholds
+from src.ml.infer import model_metadata_all
+
 # This router is expected to be mounted in main.py under prefix="/internal"
 router = APIRouter(tags=["trigger_likelihood"])
 
@@ -95,3 +98,19 @@ def trigger_likelihood_metadata(view: str = Query(default="base", regex="^(base|
     if rf_meta:
         payload["random_forest"] = rf_meta
     return payload
+    
+@router.get("/internal/trigger-likelihood/thresholds")
+def get_trigger_thresholds():
+    """
+    Returns per-origin thresholds for trigger likelihood (or demo fallback).
+    """
+    return load_per_origin_thresholds()
+
+@router.get("/internal/trigger-likelihood/metadata")
+def get_trigger_model_metadata():
+    """
+    Returns full model metadata (logistic + rf), including calibration + thresholds.
+    """
+    meta = model_metadata()
+    meta["thresholds"] = load_per_origin_thresholds()
+    return meta

@@ -17,7 +17,7 @@ from src.analytics.origin_utils import compute_origin_breakdown
 from src.analytics.source_yield import compute_source_yield
 from src.analytics.source_metrics import compute_source_metrics
 from src.analytics.origin_trends import compute_origin_trends
-from src.paths import LOGS_DIR
+from src.paths import LOGS_DIR, MODELS_DIR
 from src.analytics.origin_correlations import compute_origin_correlations
 from src.analytics.lead_lag import compute_lead_lag
 from src.analytics.burst_detection import compute_bursts
@@ -25,6 +25,8 @@ from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
+from src.ml.thresholds import load_per_origin_thresholds
+
 
 # ---- ML (trigger likelihood) import guard ----
 _ML_OK = False
@@ -1114,6 +1116,36 @@ except Exception as e:
     md.append(f"⚠️ Ensemble score failed: {e}")
 
 
+# --- Calibration Metrics Summary ---
+
+meta = model_metadata()
+calib = meta.get("calibration", {})
+
+md.append("\n### 📏 Calibration")
+if "brier_pre" in calib and "brier_post" in calib:
+    md.append(f"post-calibration Brier={calib['brier_post']:.4f} (vs pre={calib['brier_pre']:.4f})")
+elif calib:
+    md.append(f"Available metrics: {list(calib.keys())}")
+else:
+    md.append("[demo] calibration not available")
+
+# --- Per-Origin Thresholds Summary ---
+thresholds = load_per_origin_thresholds()
+md.append("\n### 🎯 Per-Origin Thresholds")
+
+example_count = 0
+for origin, vals in thresholds.items():
+    if "p70" in vals and "p80" in vals:
+        md.append(f"- {origin}: p70={vals['p70']:.2f}, p80={vals['p80']:.2f}")
+        example_count += 1
+    if example_count >= 2:
+        break
+
+if example_count == 0:
+    md.append("- [demo] fallback thresholds in use")
+
+
+
 # ---------- drift check (polish) ----------
 md.append("\n### 🔎 Drift Check (features)")
 try:
@@ -1304,3 +1336,22 @@ except Exception as e:
 # ---------- write file ----------
 (ART / "demo_summary.md").write_text("\n".join(md))
 print(f"Wrote: {ART/'demo_summary.md'}")
+
+# --- Debug: Dump raw calibration block (optional) ---
+
+meta_path = MODELS_DIR / "trigger_likelihood_v0.meta.json"
+if meta_path.exists():
+    with open(meta_path, "r") as f:
+        meta_debug = json.load(f)
+    calib_debug = meta_debug.get("calibration", None)
+
+    if calib_debug:
+        md.append("\n<details><summary>📦 Raw Calibration Meta</summary>\n\n")
+        md.append("```json")
+        md.append(json.dumps(calib_debug, indent=2))
+        md.append("```\n</details>")
+    else:
+        md.append("\n📦 Raw Calibration Meta: _empty_")
+else:
+    md.append("\n📦 Raw Calibration Meta: _not available in demo_")
+
