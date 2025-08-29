@@ -1215,6 +1215,67 @@ if example_count == 0:
     md.append("- [demo] fallback thresholds in use")
 
 
+# ---------- Drift-Aware Inference ----------
+try:
+    from src.ml.infer import infer_score_ensemble
+
+    md.append("\n### ⚠️ Drift-Aware Inference")
+    _cands = [o for o in (locals().get("candidates") or []) if o != "unknown"][:3]
+    feats_cache_local = locals().get("feats_cache", {}) or {}
+    if not _cands:
+        md.append("_No candidate origins available._")
+    else:
+        drift_counts = []
+        drift_freq: Dict[str, int] = {}
+        sample_line = None
+
+        for o in _cands:
+            feats = feats_cache_local.get(o)
+            if feats is None:
+                # best-effort reuse of maps if present
+                feats = _build_summary_features_for_origin(
+                    o,
+                    trends_by_origin=locals().get("trends_map", {}),
+                    regimes_map=locals().get("regimes_map", {}),
+                    metrics_map=locals().get("metrics_map", {}),
+                    bursts_by_origin=locals().get("bursts_map", {}),
+                )
+            res = infer_score_ensemble({"origin": o, "features": feats})
+            drifted = list(res.get("drifted_features", []) or [])
+            drift_counts.append(len(drifted))
+            for k in drifted:
+                drift_freq[k] = drift_freq.get(k, 0) + 1
+            # capture a sample adjustment line
+            if sample_line is None and "adjusted_score" in res:
+                try:
+                    s = float(res.get("ensemble_score", res.get("prob_trigger_next_6h")))
+                    a = float(res.get("adjusted_score"))
+                    pen = float(res.get("drift_penalty", 0.0))
+                    sample_line = f"- sample adjustment: score {s:.2f} → {a:.2f} (penalty={pen:.2f})"
+                except Exception:
+                    pass
+
+        # avg drifted features per inference
+        if drift_counts:
+            avg_drift = sum(drift_counts) / float(len(drift_counts))
+            md.append(f"- avg drifted features per inference: {avg_drift:.2f}")
+        else:
+            md.append("- avg drifted features per inference: n/a")
+
+        if sample_line:
+            md.append(sample_line)
+
+        # top drifted feature names
+        if drift_freq:
+            top_feats = sorted(drift_freq.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+            md.append("- top drifted features: " + ", ".join(k for k, _ in top_feats))
+        else:
+            md.append("- top drifted features: _none_")
+except Exception as e:
+    md.append(f"\n_⚠️ Drift-aware section failed: {e}_")
+
+
+
 
 # ---------- drift check (polish) ----------
 md.append("\n### 🔎 Drift Check (features)")
