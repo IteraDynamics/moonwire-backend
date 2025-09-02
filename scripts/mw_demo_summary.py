@@ -1249,6 +1249,111 @@ except Exception as e:
 
 
 
+# ---------- Trigger Explainability ----------
+md.append("\n### 🧠 Trigger Explainability")
+try:
+    from src.ml.infer import infer_score_ensemble
+
+    # Prefer whatever candidate origins you already computed for Ensemble;
+    # fall back to a small default list so CI stays populated.
+    origins_list = []
+    try:
+        if 'candidates' in locals() and candidates:
+            origins_list = list(candidates)
+    except Exception:
+        pass
+    if not origins_list:
+        origins_list = ["reddit", "twitter", "rss_news"]
+
+    shown = 0
+    for o in origins_list:
+        if shown >= 2:
+            break
+
+        # Reuse any feature cache you already built; otherwise build on the fly if helper exists.
+        feats = None
+        try:
+            if 'feats_cache_local' in locals():
+                feats = feats_cache_local.get(o)
+        except Exception:
+            pass
+        if feats is None and '_build_summary_features_for_origin' in globals():
+            try:
+                feats = _build_summary_features_for_origin(
+                    o,
+                    trends_by_origin=trends_map if 'trends_map' in locals() else {},
+                    regimes_map=regimes_map if 'regimes_map' in locals() else {},
+                    metrics_map=metrics_map if 'metrics_map' in locals() else {},
+                    bursts_by_origin=bursts_map if 'bursts_map' in locals() else {},
+                )
+            except Exception:
+                feats = {}
+
+        # If you computed dynamic thresholds earlier in the summary, pass it along.
+        base_thr = None
+        try:
+            if 'dynamic_thresholds' in locals():
+                base_thr = dynamic_thresholds.get(o)
+        except Exception:
+            pass
+
+        payload = {"features": dict(feats or {})}
+        if base_thr is not None:
+            payload["base_threshold"] = base_thr
+
+        res = infer_score_ensemble(payload)
+        expl = res.get("explanation", {}) or {}
+
+        # Pull numbers with safe defaults for formatting
+        regime     = (expl.get("volatility_regime")
+                      or res.get("volatility_regime")
+                      or "normal")
+        drift_pen  = float(res.get("drift_penalty", 0.0) or 0.0)
+        adj_score  = float(res.get("adjusted_score", res.get("prob_trigger_next_6h", 0.0)) or 0.0)
+
+        base_thr_v = res.get("base_threshold")
+        try:
+            base_thr_v = float(base_thr_v) if base_thr_v is not None else 0.5
+        except Exception:
+            base_thr_v = 0.5
+
+        adj_thr_v  = res.get("threshold_after_volatility")
+        try:
+            adj_thr_v = float(adj_thr_v) if adj_thr_v is not None else None
+        except Exception:
+            adj_thr_v = None
+
+        thr_show = adj_thr_v if isinstance(adj_thr_v, (int, float)) else base_thr_v
+        decision = expl.get("decision")
+        if not decision:
+            decision = "triggered" if adj_score >= thr_show else "not_triggered"
+
+        top_feats = expl.get("top_contributors") or []
+        if not top_feats and isinstance(payload.get("features"), dict):
+            # Fallback heuristic: top absolute-valued features
+            try:
+                numeric = [(k, float(v)) for k, v in payload["features"].items()
+                           if isinstance(v, (int, float))]
+                numeric.sort(key=lambda kv: abs(kv[1]), reverse=True)
+                top_feats = [k for k, _ in numeric[:3]]
+            except Exception:
+                top_feats = []
+
+        md.append(f"- **{o}**: {decision}")
+        md.append(
+            f"  - adjusted_score={adj_score:.3f}  "
+            f"threshold: base={base_thr_v:.3f} → adjusted={thr_show:.3f} "
+            f"(regime={regime}, drift_penalty={drift_pen:.2f})"
+        )
+        if top_feats:
+            md.append(f"  - top contributors: {', '.join(map(str, top_feats))}")
+
+        shown += 1
+
+except Exception as e:
+    md.append(f"⚠️ Explainability section failed: {e}")
+
+
 
 
 # --- Calibration Metrics Summary ---
