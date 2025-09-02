@@ -81,9 +81,11 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"          # enable demo seeding when no reviewers present
-          MPLBACKEND: "Agg"          # safe, headless matplotlib backend
-          DEMO_RICH_SCORES: "true"   # richer ML scoring in summary
+          DEMO_MODE: "true"
+          MPLBACKEND: "Agg"
+          DEMO_RICH_SCORES: "true"
+          TL_DRIFT_Z_THRESHOLD: "0.5"         # ⚡ lower threshold for demo sensitivity
+          TL_DRIFT_PER_FEATURE_PENALTY: "0.1" # ⚡ bigger penalty so effect is visible
         run: python scripts/mw_demo_summary.py
 
       - name: Show artifacts (debug)

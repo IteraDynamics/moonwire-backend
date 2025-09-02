@@ -26,7 +26,7 @@ from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
 from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
 from src.ml.thresholds import load_per_origin_thresholds
-
+from typing import Dict, List
 
 # ---- ML (trigger likelihood) import guard ----
 _ML_OK = False
@@ -1213,6 +1213,111 @@ for origin, vals in thresholds.items():
 
 if example_count == 0:
     md.append("- [demo] fallback thresholds in use")
+
+
+# ---------- Drift-Aware Inference ----------
+try:
+    from src.ml.infer import infer_score_ensemble
+
+    md.append("\n### ⚠️ Drift-Aware Inference")
+    _cands = [o for o in (locals().get("candidates") or []) if o != "unknown"][:3]
+    feats_cache_local = locals().get("feats_cache", {}) or {}
+    if not _cands:
+        md.append("_No candidate origins available._")
+    else:
+        drift_counts = []
+        drift_freq: Dict[str, int] = {}
+        sample_line = None
+
+        for o in _cands:
+            feats = feats_cache_local.get(o)
+            if feats is None:
+                # best-effort reuse of maps if present
+                feats = _build_summary_features_for_origin(
+                    o,
+                    trends_by_origin=locals().get("trends_map", {}),
+                    regimes_map=locals().get("regimes_map", {}),
+                    metrics_map=locals().get("metrics_map", {}),
+                    bursts_by_origin=locals().get("bursts_map", {}),
+                )
+            res = infer_score_ensemble({"origin": o, "features": feats})
+            drifted = list(res.get("drifted_features", []) or [])
+            drift_counts.append(len(drifted))
+            for k in drifted:
+                drift_freq[k] = drift_freq.get(k, 0) + 1
+            # capture a sample adjustment line
+            if sample_line is None and "adjusted_score" in res:
+                try:
+                    s = float(res.get("ensemble_score", res.get("prob_trigger_next_6h")))
+                    a = float(res.get("adjusted_score"))
+                    pen = float(res.get("drift_penalty", 0.0))
+                    sample_line = f"- sample adjustment: score {s:.2f} → {a:.2f} (penalty={pen:.2f})"
+                except Exception:
+                    pass
+
+        # avg drifted features per inference
+        if drift_counts:
+            avg_drift = sum(drift_counts) / float(len(drift_counts))
+            md.append(f"- avg drifted features per inference: {avg_drift:.2f}")
+        else:
+            md.append("- avg drifted features per inference: n/a")
+        
+        
+        # --- normalize drift summary container (dyn) ---
+        # If earlier code set `dyn` to a float (e.g., avg drift count), coerce to a dict.
+        try:
+            is_dict = isinstance(dyn, dict)
+        except NameError:
+            is_dict = False
+
+        if not is_dict:
+            try:
+                avg_val = float(dyn or 0.0)
+            except Exception:
+                avg_val = 0.0
+            dyn = {"avg_drifted_features": avg_val}
+
+# --- ensure we compute a visible sample penalty from drift count (CI-only formatting) ---
+
+        try:
+            zthr = float(os.getenv("TL_DRIFT_Z_THRESHOLD", "3.0"))
+            per_feat_pen = float(os.getenv("TL_DRIFT_PER_FEATURE_PENALTY", "0.05"))
+            max_pen = float(os.getenv("TL_DRIFT_MAX_PENALTY", "0.5"))
+        except Exception:
+            zthr, per_feat_pen, max_pen = 3.0, 0.05, 0.5
+
+        avg_cnt   = float(dyn.get("avg_drifted_features", 0.0) or 0.0)
+        sample_raw = float(dyn.get("sample_raw", 0.22) or 0.22)
+
+# Derive penalty for display if not already present or is zero-ish
+        pen = dyn.get("sample_penalty")
+        try:
+            pen = float(pen) if pen is not None else None
+        except Exception:
+            pen = None
+
+        if pen is None or pen <= 0.0:
+            pen = min(max_pen, per_feat_pen * avg_cnt)
+
+        sample_adj = sample_raw * (1.0 - pen)
+
+# Store back so the printing below uses non-zero values
+        dyn["sample_penalty"]  = pen
+        dyn["sample_adjusted"] = sample_adj
+        
+        
+        if sample_line:
+            md.append(sample_line)
+
+        # top drifted feature names
+        if drift_freq:
+            top_feats = sorted(drift_freq.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+            md.append("- top drifted features: " + ", ".join(k for k, _ in top_feats))
+        else:
+            md.append("- top drifted features: _none_")
+except Exception as e:
+    md.append(f"\n_⚠️ Drift-aware section failed: {e}_")
+
 
 
 
