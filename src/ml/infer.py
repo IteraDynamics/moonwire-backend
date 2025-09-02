@@ -1,11 +1,11 @@
 from __future__ import annotations
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import joblib
 import numpy as np
 from datetime import datetime, timedelta, timezone
+import os  # NEW: for regime multiplier env overrides
 
 from src.paths import MODELS_DIR, RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
 from src.analytics.origin_utils import normalize_origin as _norm
@@ -20,6 +20,50 @@ _RF_META    = "trigger_likelihood_rf.meta.json"
 
 _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
+
+
+# ---------- regime-aware threshold helper (exported) ----------
+DEFAULT_BASE_THRESHOLD = 0.5  # safe default if none provided
+
+def _regime_multipliers_from_env() -> Dict[str, float]:
+    try:
+        calm = float(os.getenv("TL_REGIME_THRESH_MULT_CALM", "0.9"))
+    except Exception:
+        calm = 0.9
+    try:
+        normal = float(os.getenv("TL_REGIME_THRESH_MULT_NORMAL", "1.0"))
+    except Exception:
+        normal = 1.0
+    try:
+        turbulent = float(os.getenv("TL_REGIME_THRESH_MULT_TURBULENT", "1.1"))
+    except Exception:
+        turbulent = 1.1
+    return {"calm": calm, "normal": normal, "turbulent": turbulent}
+
+def compute_volatility_adjusted_threshold(
+    base_threshold: float | None,
+    regime: str | None,
+) -> Dict[str, float | str]:
+    """
+    Utility used by CI summary: returns a dict with base, multiplier, adjusted.
+    Safe defaults if inputs are None/unknown.
+    """
+    mults = _regime_multipliers_from_env()
+    reg = (regime or "normal").strip().lower()
+    if reg not in mults:
+        reg = "normal"
+    try:
+        base = float(base_threshold) if base_threshold is not None else DEFAULT_BASE_THRESHOLD
+    except Exception:
+        base = DEFAULT_BASE_THRESHOLD
+    mult = mults[reg]
+    adjusted = base * mult
+    return {
+        "base_threshold": base,
+        "regime": reg,
+        "multiplier": mult,
+        "threshold_after_volatility": adjusted,
+    }
 
 
 # ---------- loaders ----------
@@ -79,7 +123,7 @@ def model_metadata_all(models_dir: Path | None = None) -> Dict[str, Any]:
     return out
 
 
-# ---------- utilities used in scoring/explainability ----------
+# ---------- scoring ----------
 def _vectorize(features: Dict[str, Any], feat_order: List[str]) -> np.ndarray:
     return np.array([[float(features.get(k, 0.0) or 0.0) for k in feat_order]], dtype=float)
 
@@ -93,48 +137,10 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
     except Exception:
         return {}
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-def _detect_drifted_features(features: Dict[str, Any], z_thresh: float) -> List[str]:
-    """
-    Heuristic drift detector that works in demo/CI without training stats:
-    - If a feature provides an explicit z-score (e.g., 'burst_z'), use |z| > z_thresh.
-    - Otherwise, ignore (non-breaking).
-    """
-    drifted: List[str] = []
-    for k, v in features.items():
-        if not isinstance(v, (int, float)):
-            continue
-        # honor explicit z-type features
-        if k.endswith("_z") or k in ("burst_z",):
-            try:
-                if abs(float(v)) > z_thresh:
-                    drifted.append(k)
-            except Exception:
-                pass
-    return drifted
-
-def _top_contributing_features(features: Dict[str, Any], n: int = 3) -> List[str]:
-    numeric = [(k, float(v)) for k, v in features.items() if isinstance(v, (int, float))]
-    if not numeric:
-        return []
-    numeric.sort(key=lambda kv: abs(kv[1]), reverse=True)
-    return [k for k, _ in numeric[:n]]
-
-
-# ---------- core scorers ----------
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
-    """
-    Simple logistic-only scoring (kept for back-compat). For richer output use infer_score_ensemble().
-    """
     try:
         model, meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
     except Exception:
-        # demo fallback
         if payload.get("features"):
             bz = float(payload["features"].get("burst_z", 0.0))
             p = 1 / (1 + np.exp(-0.1 * bz))
@@ -160,31 +166,13 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
     Ensemble scoring over available models (logistic + random forest + gb).
-    Adds *optional* explainability metadata without breaking existing consumers.
     Returns:
       {
         "prob_trigger_next_6h": float,
-        "low": float, "high": float,           # mean ± band (min/max),
-        "votes": {"logistic": p1, "rf": p2, "gb": p3},
-        "models": [...],
-        "demo": bool,
-
-        # --- new, non-breaking metadata ---
-        "base_threshold": float,
-        "volatility_regime": "calm"|"normal"|"turbulent",
-        "regime_multiplier": float,
-        "threshold_after_volatility": float,
-        "drifted_features": [..],
-        "drift_penalty": float,
-        "adjusted_score": float,
-        "explanation": {
-            "decision": "triggered"|"not_triggered",
-            "reason": str,
-            "volatility_regime": str,
-            "drifted_features": [..],
-            "top_contributors": [..]
-        }
+        "low": float, "high": float,   # mean ± band (min/max),
+        "votes": {"logistic": p1, "rf": p2, "gb": p3}, "models": [...]
       }
+    Falls back to demo when needed.
     """
     votes: Dict[str, float] = {}
     demo = False
@@ -216,7 +204,6 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         pass
 
     if not votes:
-        # demo fallback using burst_z
         bz = float(feats.get("burst_z", 0.0))
         p_demo = 1 / (1 + np.exp(-0.08 * bz))
         votes["logistic"] = p_demo
@@ -227,75 +214,28 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
-    # ---------- (A) base threshold ----------
-    # Prefer explicit base_threshold in payload (e.g., per-origin dynamic threshold)
-    base_threshold = payload.get("base_threshold")
-    try:
-        base_threshold = float(base_threshold) if base_threshold is not None else None
-    except Exception:
-        base_threshold = None
-    if base_threshold is None:
-        base_threshold = 0.5  # safe default / static
-
-    # ---------- (B) volatility regime & multiplier ----------
-    regime = str(feats.get("current_regime") or feats.get("regime") or "normal").lower()
-    mults = {
-        "calm": _env_float("TL_REGIME_THRESH_MULT_CALM", 0.9),
-        "normal": _env_float("TL_REGIME_THRESH_MULT_NORMAL", 1.0),
-        "turbulent": _env_float("TL_REGIME_THRESH_MULT_TURBULENT", 1.1),
-    }
-    regime_multiplier = float(mults.get(regime, mults["normal"]))
-    thr_after_vol = float(base_threshold * regime_multiplier)
-
-    # ---------- (C) drift penalty & adjusted score ----------
-    z_thr = _env_float("TL_DRIFT_Z_THRESHOLD", 3.0)
-    per_feat_pen = _env_float("TL_DRIFT_PER_FEATURE_PENALTY", 0.05)
-    max_pen = _env_float("TL_DRIFT_MAX_PENALTY", 0.5)
-
-    drifted = _detect_drifted_features(feats, z_thr)
-    drift_pen = min(max_pen, per_feat_pen * float(len(drifted))) if drifted else 0.0
-    adjusted_score = mean * (1.0 - drift_pen)
-
-    # ---------- (D) top contributing features (heuristic) ----------
-    top_feats = _top_contributing_features(feats, n=3)
-
-    # ---------- (E) decision & explanation ----------
-    triggered = adjusted_score >= thr_after_vol
-    decision = "triggered" if triggered else "not_triggered"
-    reason = f"adjusted_score {adjusted_score:.3f} {'>=' if triggered else '<'} threshold {thr_after_vol:.3f}"
-
-    result: Dict[str, Any] = {
+    return {
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
         "votes": votes,
         "models": list(votes.keys()),
         "demo": demo,
-
-        # new metadata (all optional-use)
-        "base_threshold": base_threshold,
-        "volatility_regime": regime,
-        "regime_multiplier": regime_multiplier,
-        "threshold_after_volatility": thr_after_vol,
-        "drifted_features": drifted,
-        "drift_penalty": drift_pen,
-        "adjusted_score": adjusted_score,
-        "explanation": {
-            "decision": decision,
-            "reason": reason,
-            "volatility_regime": regime,
-            "drifted_features": drifted,
-            "top_contributors": top_feats,
-        },
     }
-    return result
 
 
 # Back-compat alias
 def score(payload: dict, explain: bool = False):
     return infer_score(payload, explain=explain)
 
-__all__ = ["infer_score", "infer_score_ensemble", "score", "model_metadata", "model_metadata_all"]
+__all__ = [
+    "infer_score",
+    "infer_score_ensemble",
+    "score",
+    "model_metadata",
+    "model_metadata_all",
+    "compute_volatility_adjusted_threshold",  # NEW
+]
 
 
 # ---------- Online backtest (kept from v0.2) ----------
