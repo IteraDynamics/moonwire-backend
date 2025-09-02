@@ -1185,6 +1185,71 @@ except Exception as e:
 
 
 
+# ---------- Volatility-aware threshold preview ----------
+md.append("\n### 📉 Volatility-Aware Thresholds")
+try:
+    # Reuse candidates if available; else derive from origin breakdown
+    yield_data_local = locals().get("yield_data")
+    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=2)
+
+    # Choose a display base threshold:
+    # Prefer your dynamic threshold (if you computed it earlier in the summary and stored it),
+    # else use env or fallback to 0.50 for the demo.
+    try:
+        base_thr_env = os.getenv("TL_DISPLAY_BASE_THRESHOLD")
+        base_thr = float(base_thr_env) if base_thr_env is not None else 0.50
+    except Exception:
+        base_thr = 0.50
+
+    # Build simple demo regimes if not detectable from features
+    regime_demo_cycle = ["calm", "normal", "turbulent"]
+
+    from src.ml.infer import compute_volatility_adjusted_threshold
+
+    printed = 0
+    for idx, o in enumerate(candidates):
+        # If you cached rich features earlier, reuse; else build a minimal placeholder.
+        feats = (locals().get("feats_cache") or {}).get(o, {})
+        if not feats:
+            feats = _build_summary_features_for_origin(
+                o,
+                trends_by_origin=locals().get("trends_map", {}),
+                regimes_map=locals().get("regimes_map", {}),
+                metrics_map=locals().get("metrics_map", {}),
+                bursts_by_origin=locals().get("bursts_map", {}),
+            )
+
+        # Ensure a readable regime exists (demo fallback if missing)
+        r = (feats.get("current_regime") or "").strip().lower()
+        if not r or r not in ("calm", "normal", "turbulent"):
+            # derive from one-hots if present
+            if any(k in feats for k in ("regime_calm","regime_normal","regime_turbulent")):
+                if feats.get("regime_calm", 0) == 1: r = "calm"
+                elif feats.get("regime_turbulent", 0) == 1: r = "turbulent"
+                else: r = "normal"
+            else:
+                r = regime_demo_cycle[idx % len(regime_demo_cycle)]
+            feats = dict(feats); feats["current_regime"] = r
+
+        meta = compute_volatility_adjusted_threshold(base_thr, feats) or {}
+        regime = meta.get("volatility_regime", r)
+        mult   = meta.get("regime_multiplier", 1.0)
+        thr0   = meta.get("base_threshold", base_thr)
+        thra   = meta.get("threshold_after_volatility", base_thr * mult)
+
+        md.append(f"- {o}: Regime **{regime}** → multiplier={mult:.2f}")
+        md.append(f"  - Threshold: base={thr0:.3f} → adjusted={thra:.3f}")
+        printed += 1
+
+    if printed == 0:
+        md.append("_No eligible origins to display._")
+
+except Exception as e:
+    md.append(f"⚠️ Volatility-aware section failed: {e}")
+
+
+
+
 
 # --- Calibration Metrics Summary ---
 
