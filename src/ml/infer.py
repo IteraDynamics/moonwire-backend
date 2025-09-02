@@ -9,9 +9,6 @@ from datetime import datetime, timedelta, timezone
 from src.paths import MODELS_DIR, RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
 from src.analytics.origin_utils import normalize_origin as _norm
 
-# Dynamic thresholds (from Task 1)
-from src.ml.recent_scores import append_recent_score, dynamic_threshold_for_origin
-
 # Filenames
 _LOGI_MODEL = "trigger_likelihood_v0.joblib"
 _LOGI_META  = "trigger_likelihood_v0.meta.json"
@@ -62,14 +59,17 @@ def model_metadata(models_dir: Path | None = None) -> Dict[str, Any]:
 
 def model_metadata_all(models_dir: Path | None = None) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
+    # logistic
     L = model_metadata(models_dir)
     if L:
         out["logistic"] = L
+    # rf
     try:
         _, m = _load_model_and_meta(_RF_MODEL, _RF_META, models_dir)
         out["rf"] = m
     except Exception:
         pass
+    # gb
     try:
         _, m = _load_model_and_meta(_GB_MODEL, _GB_META, models_dir)
         out["gb"] = m
@@ -92,63 +92,63 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
     except Exception:
         return {}
 
-# ---- Drift helpers (use coverage means/stds) ----
-def _drift_params():
-    try:
-        zthr = float(os.getenv("TL_DRIFT_Z_THRESHOLD", "3.0"))
-    except Exception:
-        zthr = 3.0
-    try:
-        per_feat = float(os.getenv("TL_DRIFT_PER_FEATURE_PENALTY", "0.05"))
-    except Exception:
-        per_feat = 0.05
-    try:
-        max_pen = float(os.getenv("TL_DRIFT_MAX_PENALTY", "0.5"))
-    except Exception:
-        max_pen = 0.5
-    return zthr, per_feat, max_pen
+# --- Volatility helpers (non-breaking) ----------------------------------------
+_REGIME_KEYS = ("regime_calm", "regime_normal", "regime_turbulent")
 
-def _compute_drift(feats: Dict[str, Any], coverage: Dict[str, Any]) -> Dict[str, Any]:
+def _infer_current_regime(features: Dict[str, Any]) -> str:
     """
-    Returns:
-      {
-        "drifted_features": [names],
-        "num_drifted": int,
-        "z_threshold": float
-      }
-    Uses mean/std from coverage; if std≈0, skip that feature.
-    DEMO fallback: if no stds present and DEMO_MODE=true, simulate drift for 1–2 features.
+    Pick regime from either an explicit 'current_regime' or from one-hot features.
+    Defaults to 'normal' if unknown.
     """
-    zthr, _, _ = _drift_params()
-    drifted: List[str] = []
-    # happy path with coverage
-    has_any_std = False
-    for k, stats in (coverage or {}).items():
+    if not isinstance(features, dict):
+        return "normal"
+    r = (features.get("current_regime") or "").strip().lower()
+    if r in ("calm", "normal", "turbulent"):
+        return r
+    try:
+        vals = {k: float(features.get(k, 0.0) or 0.0) for k in _REGIME_KEYS}
+        if all(v <= 0.0 for v in vals.values()):
+            return "normal"
+        kmax = max(vals, key=lambda k: vals[k])
+        return kmax.replace("regime_", "")
+    except Exception:
+        return "normal"
+
+def _regime_multipliers_from_env() -> Dict[str, float]:
+    """
+    Read multipliers from env with safe defaults:
+      TL_REGIME_THRESH_MULT_CALM / NORMAL / TURBULENT
+    """
+    def _f(env_key: str, default: float) -> float:
         try:
-            mu = float((stats or {}).get("mean", 0.0))
-            sd = float((stats or {}).get("std", 0.0))
-            x = float(feats.get(k, 0.0) or 0.0)
+            return float(os.getenv(env_key, str(default)))
         except Exception:
-            continue
-        if sd and sd > 1e-12:
-            has_any_std = True
-            z = (x - mu) / sd
-            if abs(z) > zthr:
-                drifted.append(k)
+            return default
+    return {
+        "calm": _f("TL_REGIME_THRESH_MULT_CALM", 0.9),
+        "normal": _f("TL_REGIME_THRESH_MULT_NORMAL", 1.0),
+        "turbulent": _f("TL_REGIME_THRESH_MULT_TURBULENT", 1.1),
+    }
 
-    # DEMO fallback: no stds recorded but we still want to show something in CI
-    if not has_any_std and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
-        # deterministically pick first 1–2 present features to mark as 'drifted'
-        demo_candidates = [k for k in ("burst_z","leadership_max_r","precision_7d","count_24h","regime_turbulent") if k in feats]
-        drifted = demo_candidates[:2] if demo_candidates else []
+def compute_volatility_adjusted_threshold(base_threshold: float | None,
+                                          features: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compute regime-aware threshold, returning metadata dict.
+    If base_threshold is None, return {} (non-breaking).
+    """
+    if base_threshold is None:
+        return {}
+    regime = _infer_current_regime(features or {})
+    mults = _regime_multipliers_from_env()
+    mult = float(mults.get(regime, 1.0))
+    thr_adj = float(base_threshold) * mult
+    return {
+        "base_threshold": float(base_threshold),
+        "volatility_regime": regime,
+        "regime_multiplier": mult,
+        "threshold_after_volatility": thr_adj,
+    }
 
-    return {"drifted_features": drifted, "num_drifted": len(drifted), "z_threshold": zthr}
-
-def _apply_drift_penalty(score: float, num_drifted: int) -> Tuple[float, float]:
-    """Return (penalty, adjusted_score)."""
-    _, per_feat, max_pen = _drift_params()
-    penalty = min(max_pen, max(0.0, per_feat * float(num_drifted)))
-    return penalty, float(score * (1.0 - penalty))
 
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
     try:
@@ -179,19 +179,23 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
     Ensemble scoring over available models (logistic + random forest + gb).
-
-    Returns base fields plus NEW drift-aware extras:
-      - ensemble_score (same as prob_trigger_next_6h)
-      - drifted_features: list[str]
-      - drift_penalty: float
-      - adjusted_score: float
-      - decision_adjusted: bool (adjusted vs threshold)
+    Returns:
+      {
+        "prob_trigger_next_6h": float,
+        "low": float, "high": float,   # mean ± band (min/max),
+        "votes": {"logistic": p1, "rf": p2, "gb": p3}, "models": [...]
+        # Optional (only if 'base_threshold' provided in payload):
+        "base_threshold": float,
+        "volatility_regime": "calm|normal|turbulent",
+        "regime_multiplier": float,
+        "threshold_after_volatility": float
+      }
+    Falls back to demo when needed.
     """
     votes: Dict[str, float] = {}
     demo = False
 
     feats = payload.get("features") or {}
-    origin = str(payload.get("origin") or payload.get("source") or "unknown")
 
     # try logistic
     try:
@@ -228,53 +232,40 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
-    # Log score for dynamic thresholds (Task 1)
+    # --- Volatility-aware threshold metadata (opt-in) ---
+    base_thr = None
     try:
-        append_recent_score(origin, mean)
+        base_thr = float(payload.get("base_threshold")) if payload and "base_threshold" in payload else None
     except Exception:
-        pass
+        base_thr = None
+    regime_meta = compute_volatility_adjusted_threshold(base_thr, feats)
 
-    # Dynamic vs static threshold selection
-    dyn_thr, n_recent, static_thr = dynamic_threshold_for_origin(origin)
-    used = "dynamic" if dyn_thr is not None else "static"
-    thr_used = float(dyn_thr if dyn_thr is not None else static_thr)
-
-    # -------- Drift-aware attenuation --------
-    coverage = _load_cov(models_dir)  # has mean/std after tiny train change
-    drift_info = _compute_drift(feats, coverage)
-    penalty, adjusted = _apply_drift_penalty(mean, drift_info["num_drifted"])
-
-    return {
-        # original fields (unchanged semantics)
+    result = {
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
         "votes": votes,
         "models": list(votes.keys()),
         "demo": demo,
-
-        # dynamic thresholds (Task 1)
-        "threshold_dynamic": dyn_thr,
-        "threshold_static": static_thr,
-        "threshold_used": used,
-        "recent_count": n_recent,
-        "decision": bool(mean >= thr_used),
-
-        # NEW drift-aware extras (non-breaking additions)
-        "ensemble_score": mean,
-        "drifted_features": drift_info["drifted_features"],
-        "drift_penalty": penalty,
-        "drift_z_threshold": drift_info["z_threshold"],
-        "adjusted_score": adjusted,
-        "decision_adjusted": bool(adjusted >= thr_used),
     }
+    if regime_meta:
+        result.update(regime_meta)
+    return result
 
 
 # Back-compat alias
 def score(payload: dict, explain: bool = False):
     return infer_score(payload, explain=explain)
 
-__all__ = ["infer_score", "infer_score_ensemble", "score", "model_metadata", "model_metadata_all"]
+__all__ = [
+    "infer_score",
+    "infer_score_ensemble",
+    "score",
+    "model_metadata",
+    "model_metadata_all",
+    # expose helper for CI summary usage
+    "compute_volatility_adjusted_threshold",
+]
 
 
 # ---------- Online backtest (kept from v0.2) ----------
