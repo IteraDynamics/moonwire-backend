@@ -7,6 +7,9 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from src import paths
 import json
 import os
+from datetime import datetime, timezone
+from pathlib import Path
+from src.paths import MODELS_DIR
 
 from src.ml.infer import (
     infer_score,
@@ -114,3 +117,99 @@ def get_trigger_model_metadata():
     meta = model_metadata()
     meta["thresholds"] = load_per_origin_thresholds()
     return meta
+    
+# --- Label Feedback Logging (v0.4.7) ------------------------------------------
+
+# Location: models/label_feedback.jsonl
+_LABEL_FEEDBACK_PATH: Path = MODELS_DIR / "label_feedback.jsonl"
+
+
+def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _validate_feedback_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Required:
+      - timestamp (ISO-8601 or epoch seconds)
+      - origin (str)
+      - adjusted_score (float)
+      - label (bool)
+    Optional:
+      - notes (str)
+      - reviewer (str)
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be a JSON object")
+
+    # origin
+    origin = payload.get("origin")
+    if not isinstance(origin, str) or not origin.strip():
+        raise ValueError("origin is required (non-empty string)")
+
+    # adjusted_score
+    try:
+        adjusted_score = float(payload.get("adjusted_score"))
+    except Exception:
+        raise ValueError("adjusted_score is required (number)")
+
+    # label
+    label = payload.get("label")
+    if not isinstance(label, bool):
+        raise ValueError("label is required (true/false)")
+
+    # timestamp
+    ts = payload.get("timestamp")
+    ts_iso: str
+    if ts is None:
+        # If omitted, default to 'now' (UTC)
+        ts_iso = datetime.now(timezone.utc).isoformat()
+    else:
+        # Accept epoch seconds or ISO string; normalize to ISO (UTC)
+        try:
+            if isinstance(ts, (int, float)):
+                ts_iso = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+            else:
+                s = str(ts)
+                s = s[:-1] + "+00:00" if s.endswith("Z") else s
+                ts_iso = datetime.fromisoformat(s).astimezone(timezone.utc).isoformat()
+        except Exception:
+            raise ValueError("timestamp must be ISO-8601 or epoch seconds")
+
+    out = {
+        "timestamp": ts_iso,
+        "origin": origin.strip(),
+        "adjusted_score": adjusted_score,
+        "label": label,
+    }
+
+    # Optionals (safe copy)
+    notes = payload.get("notes")
+    if isinstance(notes, str) and notes.strip():
+        out["notes"] = notes.strip()
+
+    reviewer = payload.get("reviewer")
+    if isinstance(reviewer, str) and reviewer.strip():
+        out["reviewer"] = reviewer.strip()
+
+    return out
+
+
+@router.post("/internal/trigger-likelihood/feedback")
+async def post_label_feedback(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Accepts label feedback and appends it to models/label_feedback.jsonl.
+    Schema enforced by _validate_feedback_payload.
+    """
+    try:
+        record = _validate_feedback_payload(payload)
+        _append_jsonl(_LABEL_FEEDBACK_PATH, record)
+        return {"status": "ok", "written": True}
+    except ValueError as ve:
+        # 400-like error (FastAPI will still wrap as 200 unless you raise HTTPException;
+        # keeping minimal to avoid changing imports)
+        return {"status": "error", "written": False, "error": str(ve)}
+    except Exception as e:
+        return {"status": "error", "written": False, "error": f"internal: {type(e).__name__}: {e}"}
