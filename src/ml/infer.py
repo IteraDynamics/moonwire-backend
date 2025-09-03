@@ -1,5 +1,7 @@
+# src/ml/infer.py
 from __future__ import annotations
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import joblib
@@ -19,9 +21,6 @@ _RF_META    = "trigger_likelihood_rf.meta.json"
 
 _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
-
-# Default base threshold used by helpers (kept conservative and non-breaking)
-DEFAULT_BASE_THRESHOLD = 0.50
 
 
 # ---------- loaders ----------
@@ -96,11 +95,9 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
         return {}
 
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
-    """Logistic-only scoring (back-compat)."""
     try:
         model, meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
     except Exception:
-        # demo fallback
         if payload.get("features"):
             bz = float(payload["features"].get("burst_z", 0.0))
             p = 1 / (1 + np.exp(-0.1 * bz))
@@ -126,20 +123,13 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
     Ensemble scoring over available models (logistic + random forest + gb).
-    Returns:
-      {
-        "prob_trigger_next_6h": float,
-        "low": float, "high": float,   # mean ± band (min/max),
-        "votes": {"logistic": p1, "rf": p2, "gb": p3}, "models": [...]
-      }
-    Falls back to demo when needed.
+    Returns dict with mean prob, band, votes, etc.
     """
     votes: Dict[str, float] = {}
     demo = False
-
     feats = payload.get("features") or {}
 
-    # try logistic
+    # logistic
     try:
         L_model, L_meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
         order = L_meta.get("feature_order") or []
@@ -147,7 +137,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     except Exception:
         pass
 
-    # try RF
+    # RF
     try:
         RF_model, RF_meta = _load_model_and_meta(_RF_MODEL, _RF_META, models_dir)
         order = RF_meta.get("feature_order") or []
@@ -155,7 +145,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     except Exception:
         pass
 
-    # try GB
+    # GB
     try:
         GB_model, GB_meta = _load_model_and_meta(_GB_MODEL, _GB_META, models_dir)
         order = GB_meta.get("feature_order") or []
@@ -184,61 +174,26 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     }
 
 
-# ---------------- Volatility-aware threshold helper (for CI & callers) ----------------
-def _regime_multipliers_from_env() -> Dict[str, float]:
+# ---------- Volatility-aware thresholds ----------
+def compute_volatility_adjusted_threshold(base_threshold: float, regime: str) -> Dict[str, Any]:
     """
-    Read multipliers from env when present; otherwise use defaults:
-      calm=0.9, normal=1.0, turbulent=1.1
-    """
-    import os
-    def _f(name: str, default: float) -> float:
-        try:
-            return float(os.getenv(name, str(default)))
-        except Exception:
-            return default
-    return {
-        "calm": _f("TL_REGIME_THRESH_MULT_CALM", 0.9),
-        "normal": _f("TL_REGIME_THRESH_MULT_NORMAL", 1.0),
-        "turbulent": _f("TL_REGIME_THRESH_MULT_TURBULENT", 1.1),
-    }
-
-def _normalize_regime_input(regime_in: Any) -> str:
-    """
-    Accepts a string like 'normal' OR a dict like {'regime': 'normal', ...}
-    Returns one of {'calm','normal','turbulent'} or 'normal' as fallback.
+    Adjust threshold based on volatility regime.
     """
     try:
-        if isinstance(regime_in, dict):
-            val = regime_in.get("regime") or regime_in.get("name") or regime_in.get("state")
-        else:
-            val = regime_in
-        reg = (str(val) if val is not None else "normal").strip().lower()
+        mults = {
+            "calm": float(os.getenv("TL_REGIME_THRESH_MULT_CALM", "0.9")),
+            "normal": float(os.getenv("TL_REGIME_THRESH_MULT_NORMAL", "1.0")),
+            "turbulent": float(os.getenv("TL_REGIME_THRESH_MULT_TURBULENT", "1.1")),
+        }
+        multiplier = mults.get(str(regime).strip().lower(), 1.0)
     except Exception:
-        reg = "normal"
-    if reg not in ("calm", "normal", "turbulent"):
-        reg = "normal"
-    return reg
+        multiplier = 1.0
 
-def compute_volatility_adjusted_threshold(
-    base_threshold: float | None,
-    regime: str | dict | None,
-) -> Dict[str, float | str]:
-    """
-    Utility used by CI summary and any callers that want a safe computation.
-    Accepts regime as string or dict; returns a dict with base, multiplier, adjusted.
-    """
-    mults = _regime_multipliers_from_env()
-    reg = _normalize_regime_input(regime)
-    try:
-        base = float(base_threshold) if base_threshold is not None else DEFAULT_BASE_THRESHOLD
-    except Exception:
-        base = DEFAULT_BASE_THRESHOLD
-    mult = mults.get(reg, mults["normal"])
-    adjusted = base * mult
+    adjusted = base_threshold * multiplier
     return {
-        "base_threshold": base,
-        "regime": reg,
-        "multiplier": mult,
+        "base_threshold": base_threshold,
+        "volatility_regime": regime,
+        "regime_multiplier": multiplier,
         "threshold_after_volatility": adjusted,
     }
 
@@ -248,16 +203,13 @@ def score(payload: dict, explain: bool = False):
     return infer_score(payload, explain=explain)
 
 __all__ = [
-    "infer_score",
-    "infer_score_ensemble",
-    "score",
-    "model_metadata",
-    "model_metadata_all",
+    "infer_score", "infer_score_ensemble", "score",
+    "model_metadata", "model_metadata_all",
     "compute_volatility_adjusted_threshold",
 ]
 
 
-# ---------- Online backtest (kept from v0.2) ----------
+# ---------- Online backtest ----------
 def _load_jsonl(path: Path) -> List[dict]:
     try:
         return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
@@ -294,9 +246,8 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
     for o in origins[:10]:
         tp=fp=fn=tn=0
         for t in buckets:
-            t_iso = t.isoformat()
             try:
-                p = score({"origin": o, "timestamp": t_iso}).get("prob_trigger_next_6h", 0.0)
+                p = score({"origin": o, "timestamp": t.isoformat()}).get("prob_trigger_next_6h", 0.0)
             except Exception:
                 p = 0.0
             y = _label_has_trigger_between(triggers, o, t, t + timedelta(hours=6))
@@ -307,7 +258,8 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
             else: tn+=1
         prec = tp/float(tp+fp) if (tp+fp)>0 else 0.0
         rec  = tp/float(tp+fn) if (tp+fn)>0 else 0.0
-        per_origin.append({"origin": o, "precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn})
+        per_origin.append({"origin": o, "precision": round(prec,3), "recall": round(rec,3),
+                           "tp":tp,"fp":fp,"fn":fn,"tn":tn})
 
     tp=sum(po["tp"] for po in per_origin); fp=sum(po["fp"] for po in per_origin)
     fn=sum(po["fn"] for po in per_origin); tn=sum(po["tn"] for po in per_origin)
@@ -317,6 +269,7 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
     return {
         "window_hours": 24,
         "threshold": threshold,
-        "overall": {"precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn},
+        "overall": {"precision": round(prec,3), "recall": round(rec,3),
+                    "tp":tp,"fp":fp,"fn":fn,"tn":tn},
         "per_origin": per_origin[:3],
     }
