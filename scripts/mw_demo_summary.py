@@ -1185,70 +1185,46 @@ except Exception as e:
 
 
 
-# ---------- Volatility-Aware Thresholds ----------
+# ---------- volatility-aware thresholds ----------
 md.append("\n### 📉 Volatility-Aware Thresholds")
 try:
-    import os
+    # Use the canonical helper from infer.py so multipliers are applied consistently
     from src.ml.infer import compute_volatility_adjusted_threshold
-    from src.paths import LOGS_DIR
 
-    # Pick the same candidate origins used elsewhere in the summary
+    # Reuse candidates and regime map built earlier in the summary
     yield_data_local = locals().get("yield_data")
-    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=3)
+    candidates = pick_candidate_origins(locals().get("origins_rows"), yield_data_local, top=3)
+
+    # Regimes were computed earlier; if not present, default to 'normal'
+    regimes_map = locals().get("regimes_map", {}) or {}
+    # Dynamic threshold map from the Dynamic vs Static block (if present)
+    dyn_map = locals().get("dyn_thresholds", {}) or {}
 
     if not candidates:
         md.append("_No candidate origins available._")
     else:
-        # Build a map of origin -> regime from analytics (hourly window)
-        regimes_for_display = {}
-        try:
-            from src.analytics.volatility_regimes import compute_volatility_regimes
-            _vr = compute_volatility_regimes(
-                flags_path=LOGS_DIR / "retraining_log.jsonl",
-                triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
-                days=30,
-                interval="hour",
-                lookback=72,
-                q_calm=0.33,
-                q_turb=0.80,
-            )
-            for row in (_vr or {}).get("origins", []) or []:
-                o = row.get("origin")
-                reg = (row.get("regime") or "").strip().lower()
-                if o and reg:
-                    regimes_for_display[o] = reg
-        except Exception:
-            regimes_for_display = {}
-
-        # -------- Demo/CI seeding for diversity (display-only) --------
-        # If nothing came back, seed a diverse set across the candidates
-        if not regimes_for_display:
-            seeded = ["calm", "normal", "turbulent"]
-            regimes_for_display = {o: seeded[i % len(seeded)] for i, o in enumerate(candidates)}
-        else:
-            # If everything is 'normal', nudge to a diverse mix for readability
-            uniq = { (regimes_for_display.get(o) or "normal").lower() for o in candidates }
-            if uniq == {"normal"}:
-                seeded = ["calm", "normal", "turbulent"]
-                for i, o in enumerate(candidates):
-                    regimes_for_display[o] = seeded[i % len(seeded)]
-
-        # Base threshold to illustrate adjustment (keep consistent with dynamic/static blocks)
-        base_thr = float(os.getenv("TL_DECISION_THRESHOLD", "0.5"))
-
-        # Print per-origin adjustments
         for o in candidates:
-            reg = (regimes_for_display.get(o) or "normal").lower()
-            adj = compute_volatility_adjusted_threshold(base_thr, reg)
-            mult = float(adj.get("multiplier", 1.0))
-            thr_adj = float(adj.get("threshold", base_thr))
+            # base threshold: prefer dynamic-used; else static; else 0.5
+            base_thr = None
+            try:
+                # dyn_map structure from your earlier block:
+                # dyn_thresholds[origin] = {"used": ..., "dynamic": ..., "static": ..., "n": ...}
+                drec = dyn_map.get(o) or {}
+                base_thr = drec.get("used") or drec.get("dynamic") or drec.get("static")
+            except Exception:
+                base_thr = None
+            if base_thr is None:
+                base_thr = 0.5
 
-            md.append(f"- **{o}**: Regime {reg} → multiplier={mult:.2f}")
-            md.append(f"  - Threshold: base={base_thr:.3f} → adjusted={thr_adj:.3f}")
+            regime = (regimes_map.get(o) or "normal")
+            # The helper returns (adjusted_threshold, multiplier)
+            adj_thr, mult = compute_volatility_adjusted_threshold(float(base_thr), regime)
+
+            md.append(f"- {o}: Regime {str(regime).lower()} → multiplier={float(mult):.2f}")
+            md.append(f"  - Threshold: base={float(base_thr):.3f} → adjusted={float(adj_thr):.3f}")
 
 except Exception as e:
     md.append(f"⚠️ Volatility-aware section failed: {e}")
-
 
 
 # ---------- Trigger Explainability ----------
