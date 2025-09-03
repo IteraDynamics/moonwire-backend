@@ -1368,6 +1368,34 @@ except Exception as e:
 
 
 
+# ---------- Trigger History ----------
+from src.paths import MODELS_DIR
+import json
+
+history_path = MODELS_DIR / "trigger_history.jsonl"
+md.append("\n🗂️ Trigger History (Last 3)")
+
+try:
+    if history_path.exists():
+        lines = history_path.read_text().splitlines()[-3:]
+        for line in lines:
+            e = json.loads(line)
+            ts = e.get("timestamp", "")[-8:-3]  # hh:mm from ISO string
+            origin = e.get("origin", "?")
+            decision = "✅ triggered" if e.get("decision") == "triggered" else "❌ not_triggered"
+            score = e.get("adjusted_score")
+            thr = e.get("threshold")
+            regime = e.get("volatility_regime", "n/a")
+            drift = ", ".join(e.get("drifted_features") or []) or "none"
+            md.append(f"• [{ts}] {origin} → {decision} @ {score:.2f} (thr={thr:.2f}) — {regime}, drift: {drift}")
+    else:
+        md.append("- [demo] no history yet")
+except Exception as e:
+    md.append(f"⚠️ Trigger history failed: {e}")
+
+
+
+
 
 # --- Calibration Metrics Summary ---
 
