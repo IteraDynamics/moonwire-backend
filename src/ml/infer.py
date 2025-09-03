@@ -21,6 +21,8 @@ _RF_META    = "trigger_likelihood_rf.meta.json"
 
 _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
+_TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
+
 
 
 # ---------- loaders ----------
@@ -172,6 +174,24 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         "models": list(votes.keys()),
         "demo": demo,
     }
+
+        # --- Append to trigger history log ---
+    try:
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "origin": payload.get("origin", "unknown"),
+            "adjusted_score": out.get("explanation", {}).get("adjusted_score", out["prob_trigger_next_6h"]),
+            "threshold": out.get("explanation", {}).get("threshold_after_volatility", None),
+            "decision": out.get("explanation", {}).get("decision", "unknown"),
+            "volatility_regime": out.get("explanation", {}).get("volatility_regime", None),
+            "drifted_features": out.get("explanation", {}).get("drifted_features", []),
+            "top_contributors": out.get("explanation", {}).get("top_contributors", []),
+        }
+        with _TRIGGER_LOG_PATH.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
 
 
 # ---------- Volatility-aware thresholds ----------
