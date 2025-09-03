@@ -1390,8 +1390,20 @@ try:
             md.append(f"• [{ts}] {origin} → {decision} @ {score:.2f} (thr={thr:.2f}) — {regime}, drift: {drift}")
     else:
         md.append("- [demo] no history yet")
+
+    if not history_path.exists() and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
+    sample_entries = [
+        {"timestamp": "2025-09-03T14:15:00Z", "origin": "reddit", "adjusted_score": 0.72, "threshold": 0.68, "decision": "triggered", "volatility_regime": "calm", "drifted_features": ["burst_z"], "top_contributors": ["burst_z","leadership"]},
+        {"timestamp": "2025-09-03T13:50:00Z", "origin": "rss_news", "adjusted_score": 0.41, "threshold": 0.50, "decision": "not_triggered", "volatility_regime": "turbulent", "drifted_features": [], "top_contributors": ["count_24h"]},
+    ]
+    with history_path.open("w") as f:
+        for e in sample_entries:
+            f.write(json.dumps(e) + "\n")
+
 except Exception as e:
     md.append(f"⚠️ Trigger history failed: {e}")
+
+
 
 
 
