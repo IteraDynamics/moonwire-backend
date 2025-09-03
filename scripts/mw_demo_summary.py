@@ -1188,43 +1188,78 @@ except Exception as e:
 # ---------- volatility-aware thresholds ----------
 md.append("\n### 📉 Volatility-Aware Thresholds")
 try:
-    # Use the canonical helper from infer.py so multipliers are applied consistently
     from src.ml.infer import compute_volatility_adjusted_threshold
 
-    # Reuse candidates and regime map built earlier in the summary
+    # Reuse prior context if available
     yield_data_local = locals().get("yield_data")
-    candidates = pick_candidate_origins(locals().get("origins_rows"), yield_data_local, top=3)
+    origins_rows_local = locals().get("origins_rows")
+    candidates = pick_candidate_origins(origins_rows_local, yield_data_local, top=3)
 
-    # Regimes were computed earlier; if not present, default to 'normal'
     regimes_map = locals().get("regimes_map", {}) or {}
-    # Dynamic threshold map from the Dynamic vs Static block (if present)
     dyn_map = locals().get("dyn_thresholds", {}) or {}
 
     if not candidates:
         md.append("_No candidate origins available._")
     else:
         for o in candidates:
-            # base threshold: prefer dynamic-used; else static; else 0.5
-            base_thr = None
+            # base threshold: prefer dynamic-used; else dynamic; else static; else 0.5
+            base_thr = 0.5
             try:
-                # dyn_map structure from your earlier block:
-                # dyn_thresholds[origin] = {"used": ..., "dynamic": ..., "static": ..., "n": ...}
                 drec = dyn_map.get(o) or {}
-                base_thr = drec.get("used") or drec.get("dynamic") or drec.get("static")
+                for key in ("used", "dynamic", "static"):
+                    v = drec.get(key)
+                    if v is not None:
+                        base_thr = float(v)
+                        break
             except Exception:
-                base_thr = None
-            if base_thr is None:
                 base_thr = 0.5
 
-            regime = (regimes_map.get(o) or "normal")
-            # The helper returns (adjusted_threshold, multiplier)
-            adj_thr, mult = compute_volatility_adjusted_threshold(float(base_thr), regime)
+            regime_raw = regimes_map.get(o, "normal")
+            # normalize regime to string
+            if isinstance(regime_raw, dict):
+                regime = str(regime_raw.get("regime", "normal")).strip().lower()
+            else:
+                regime = str(regime_raw).strip().lower() or "normal"
 
-            md.append(f"- {o}: Regime {str(regime).lower()} → multiplier={float(mult):.2f}")
-            md.append(f"  - Threshold: base={float(base_thr):.3f} → adjusted={float(adj_thr):.3f}")
+            # Call helper; accept dict or tuple of len 2/3
+            adj_thr = base_thr
+            mult = 1.0
+            try:
+                res = compute_volatility_adjusted_threshold(float(base_thr), regime)
+
+                if isinstance(res, dict):
+                    # common dict keys to try
+                    adj_thr = float(
+                        res.get("adjusted_threshold")
+                        or res.get("threshold_after_volatility")
+                        or res.get("threshold")
+                        or base_thr
+                    )
+                    mult = float(
+                        res.get("multiplier")
+                        or res.get("regime_multiplier")
+                        or 1.0
+                    )
+                elif isinstance(res, tuple) or isinstance(res, list):
+                    if len(res) >= 2:
+                        adj_thr = float(res[0])
+                        mult = float(res[1])
+                    elif len(res) == 1:
+                        adj_thr = float(res[0])
+                        mult = 1.0
+                else:
+                    # unknown shape → keep defaults
+                    pass
+            except Exception:
+                # keep defaults if helper fails
+                adj_thr, mult = base_thr, 1.0
+
+            md.append(f"- {o}: Regime {regime} → multiplier={mult:.2f}")
+            md.append(f"  - Threshold: base={base_thr:.3f} → adjusted={adj_thr:.3f}")
 
 except Exception as e:
     md.append(f"⚠️ Volatility-aware section failed: {e}")
+
 
 
 # ---------- Trigger Explainability ----------
