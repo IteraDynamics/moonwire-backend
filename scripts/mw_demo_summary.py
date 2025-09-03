@@ -1185,68 +1185,186 @@ except Exception as e:
 
 
 
-# ---------- Volatility-aware threshold preview ----------
+# ---------- volatility-aware thresholds ----------
 md.append("\n### 📉 Volatility-Aware Thresholds")
 try:
-    # Reuse candidates if available; else derive from origin breakdown
-    yield_data_local = locals().get("yield_data")
-    candidates = pick_candidate_origins(origins_rows, yield_data_local, top=2)
-
-    # Choose a display base threshold:
-    # Prefer your dynamic threshold (if you computed it earlier in the summary and stored it),
-    # else use env or fallback to 0.50 for the demo.
-    try:
-        base_thr_env = os.getenv("TL_DISPLAY_BASE_THRESHOLD")
-        base_thr = float(base_thr_env) if base_thr_env is not None else 0.50
-    except Exception:
-        base_thr = 0.50
-
-    # Build simple demo regimes if not detectable from features
-    regime_demo_cycle = ["calm", "normal", "turbulent"]
-
     from src.ml.infer import compute_volatility_adjusted_threshold
 
-    printed = 0
-    for idx, o in enumerate(candidates):
-        # If you cached rich features earlier, reuse; else build a minimal placeholder.
-        feats = (locals().get("feats_cache") or {}).get(o, {})
-        if not feats:
-            feats = _build_summary_features_for_origin(
-                o,
-                trends_by_origin=locals().get("trends_map", {}),
-                regimes_map=locals().get("regimes_map", {}),
-                metrics_map=locals().get("metrics_map", {}),
-                bursts_by_origin=locals().get("bursts_map", {}),
-            )
+    # Reuse prior context if available
+    yield_data_local = locals().get("yield_data")
+    origins_rows_local = locals().get("origins_rows")
+    candidates = pick_candidate_origins(origins_rows_local, yield_data_local, top=3)
 
-        # Ensure a readable regime exists (demo fallback if missing)
-        r = (feats.get("current_regime") or "").strip().lower()
-        if not r or r not in ("calm", "normal", "turbulent"):
-            # derive from one-hots if present
-            if any(k in feats for k in ("regime_calm","regime_normal","regime_turbulent")):
-                if feats.get("regime_calm", 0) == 1: r = "calm"
-                elif feats.get("regime_turbulent", 0) == 1: r = "turbulent"
-                else: r = "normal"
+    regimes_map = locals().get("regimes_map", {}) or {}
+    dyn_map = locals().get("dyn_thresholds", {}) or {}
+
+    if not candidates:
+        md.append("_No candidate origins available._")
+    else:
+        for o in candidates:
+            # base threshold: prefer dynamic-used; else dynamic; else static; else 0.5
+            base_thr = 0.5
+            try:
+                drec = dyn_map.get(o) or {}
+                for key in ("used", "dynamic", "static"):
+                    v = drec.get(key)
+                    if v is not None:
+                        base_thr = float(v)
+                        break
+            except Exception:
+                base_thr = 0.5
+
+            regime_raw = regimes_map.get(o, "normal")
+            # normalize regime to string
+            if isinstance(regime_raw, dict):
+                regime = str(regime_raw.get("regime", "normal")).strip().lower()
             else:
-                r = regime_demo_cycle[idx % len(regime_demo_cycle)]
-            feats = dict(feats); feats["current_regime"] = r
+                regime = str(regime_raw).strip().lower() or "normal"
 
-        meta = compute_volatility_adjusted_threshold(base_thr, feats) or {}
-        regime = meta.get("volatility_regime", r)
-        mult   = meta.get("regime_multiplier", 1.0)
-        thr0   = meta.get("base_threshold", base_thr)
-        thra   = meta.get("threshold_after_volatility", base_thr * mult)
+            # Call helper; accept dict or tuple of len 2/3
+            adj_thr = base_thr
+            mult = 1.0
+            try:
+                res = compute_volatility_adjusted_threshold(float(base_thr), regime)
 
-        md.append(f"- {o}: Regime **{regime}** → multiplier={mult:.2f}")
-        md.append(f"  - Threshold: base={thr0:.3f} → adjusted={thra:.3f}")
-        printed += 1
+                if isinstance(res, dict):
+                    # common dict keys to try
+                    adj_thr = float(
+                        res.get("adjusted_threshold")
+                        or res.get("threshold_after_volatility")
+                        or res.get("threshold")
+                        or base_thr
+                    )
+                    mult = float(
+                        res.get("multiplier")
+                        or res.get("regime_multiplier")
+                        or 1.0
+                    )
+                elif isinstance(res, tuple) or isinstance(res, list):
+                    if len(res) >= 2:
+                        adj_thr = float(res[0])
+                        mult = float(res[1])
+                    elif len(res) == 1:
+                        adj_thr = float(res[0])
+                        mult = 1.0
+                else:
+                    # unknown shape → keep defaults
+                    pass
+            except Exception:
+                # keep defaults if helper fails
+                adj_thr, mult = base_thr, 1.0
 
-    if printed == 0:
-        md.append("_No eligible origins to display._")
+            md.append(f"- {o}: Regime {regime} → multiplier={mult:.2f}")
+            md.append(f"  - Threshold: base={base_thr:.3f} → adjusted={adj_thr:.3f}")
 
 except Exception as e:
     md.append(f"⚠️ Volatility-aware section failed: {e}")
 
+
+
+# ---------- Trigger Explainability ----------
+md.append("\n### 🧠 Trigger Explainability")
+try:
+    from src.ml.infer import infer_score_ensemble
+
+    # Prefer whatever candidate origins you already computed for Ensemble;
+    # fall back to a small default list so CI stays populated.
+    origins_list = []
+    try:
+        if 'candidates' in locals() and candidates:
+            origins_list = list(candidates)
+    except Exception:
+        pass
+    if not origins_list:
+        origins_list = ["reddit", "twitter", "rss_news"]
+
+    shown = 0
+    for o in origins_list:
+        if shown >= 2:
+            break
+
+        # Reuse any feature cache you already built; otherwise build on the fly if helper exists.
+        feats = None
+        try:
+            if 'feats_cache_local' in locals():
+                feats = feats_cache_local.get(o)
+        except Exception:
+            pass
+        if feats is None and '_build_summary_features_for_origin' in globals():
+            try:
+                feats = _build_summary_features_for_origin(
+                    o,
+                    trends_by_origin=trends_map if 'trends_map' in locals() else {},
+                    regimes_map=regimes_map if 'regimes_map' in locals() else {},
+                    metrics_map=metrics_map if 'metrics_map' in locals() else {},
+                    bursts_by_origin=bursts_map if 'bursts_map' in locals() else {},
+                )
+            except Exception:
+                feats = {}
+
+        # If you computed dynamic thresholds earlier in the summary, pass it along.
+        base_thr = None
+        try:
+            if 'dynamic_thresholds' in locals():
+                base_thr = dynamic_thresholds.get(o)
+        except Exception:
+            pass
+
+        payload = {"features": dict(feats or {})}
+        if base_thr is not None:
+            payload["base_threshold"] = base_thr
+
+        res = infer_score_ensemble(payload)
+        expl = res.get("explanation", {}) or {}
+
+        # Pull numbers with safe defaults for formatting
+        regime     = (expl.get("volatility_regime")
+                      or res.get("volatility_regime")
+                      or "normal")
+        drift_pen  = float(res.get("drift_penalty", 0.0) or 0.0)
+        adj_score  = float(res.get("adjusted_score", res.get("prob_trigger_next_6h", 0.0)) or 0.0)
+
+        base_thr_v = res.get("base_threshold")
+        try:
+            base_thr_v = float(base_thr_v) if base_thr_v is not None else 0.5
+        except Exception:
+            base_thr_v = 0.5
+
+        adj_thr_v  = res.get("threshold_after_volatility")
+        try:
+            adj_thr_v = float(adj_thr_v) if adj_thr_v is not None else None
+        except Exception:
+            adj_thr_v = None
+
+        thr_show = adj_thr_v if isinstance(adj_thr_v, (int, float)) else base_thr_v
+        decision = expl.get("decision")
+        if not decision:
+            decision = "triggered" if adj_score >= thr_show else "not_triggered"
+
+        top_feats = expl.get("top_contributors") or []
+        if not top_feats and isinstance(payload.get("features"), dict):
+            # Fallback heuristic: top absolute-valued features
+            try:
+                numeric = [(k, float(v)) for k, v in payload["features"].items()
+                           if isinstance(v, (int, float))]
+                numeric.sort(key=lambda kv: abs(kv[1]), reverse=True)
+                top_feats = [k for k, _ in numeric[:3]]
+            except Exception:
+                top_feats = []
+
+        md.append(f"- **{o}**: {decision}")
+        md.append(
+            f"  - adjusted_score={adj_score:.3f}  "
+            f"threshold: base={base_thr_v:.3f} → adjusted={thr_show:.3f} "
+            f"(regime={regime}, drift_penalty={drift_pen:.2f})"
+        )
+        if top_feats:
+            md.append(f"  - top contributors: {', '.join(map(str, top_feats))}")
+
+        shown += 1
+
+except Exception as e:
+    md.append(f"⚠️ Explainability section failed: {e}")
 
 
 

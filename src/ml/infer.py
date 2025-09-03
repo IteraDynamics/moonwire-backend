@@ -1,5 +1,7 @@
+# src/ml/infer.py
 from __future__ import annotations
-import json, os
+import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import joblib
@@ -92,64 +94,6 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
     except Exception:
         return {}
 
-# --- Volatility helpers (non-breaking) ----------------------------------------
-_REGIME_KEYS = ("regime_calm", "regime_normal", "regime_turbulent")
-
-def _infer_current_regime(features: Dict[str, Any]) -> str:
-    """
-    Pick regime from either an explicit 'current_regime' or from one-hot features.
-    Defaults to 'normal' if unknown.
-    """
-    if not isinstance(features, dict):
-        return "normal"
-    r = (features.get("current_regime") or "").strip().lower()
-    if r in ("calm", "normal", "turbulent"):
-        return r
-    try:
-        vals = {k: float(features.get(k, 0.0) or 0.0) for k in _REGIME_KEYS}
-        if all(v <= 0.0 for v in vals.values()):
-            return "normal"
-        kmax = max(vals, key=lambda k: vals[k])
-        return kmax.replace("regime_", "")
-    except Exception:
-        return "normal"
-
-def _regime_multipliers_from_env() -> Dict[str, float]:
-    """
-    Read multipliers from env with safe defaults:
-      TL_REGIME_THRESH_MULT_CALM / NORMAL / TURBULENT
-    """
-    def _f(env_key: str, default: float) -> float:
-        try:
-            return float(os.getenv(env_key, str(default)))
-        except Exception:
-            return default
-    return {
-        "calm": _f("TL_REGIME_THRESH_MULT_CALM", 0.9),
-        "normal": _f("TL_REGIME_THRESH_MULT_NORMAL", 1.0),
-        "turbulent": _f("TL_REGIME_THRESH_MULT_TURBULENT", 1.1),
-    }
-
-def compute_volatility_adjusted_threshold(base_threshold: float | None,
-                                          features: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Compute regime-aware threshold, returning metadata dict.
-    If base_threshold is None, return {} (non-breaking).
-    """
-    if base_threshold is None:
-        return {}
-    regime = _infer_current_regime(features or {})
-    mults = _regime_multipliers_from_env()
-    mult = float(mults.get(regime, 1.0))
-    thr_adj = float(base_threshold) * mult
-    return {
-        "base_threshold": float(base_threshold),
-        "volatility_regime": regime,
-        "regime_multiplier": mult,
-        "threshold_after_volatility": thr_adj,
-    }
-
-
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
     try:
         model, meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
@@ -179,25 +123,13 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
     Ensemble scoring over available models (logistic + random forest + gb).
-    Returns:
-      {
-        "prob_trigger_next_6h": float,
-        "low": float, "high": float,   # mean ± band (min/max),
-        "votes": {"logistic": p1, "rf": p2, "gb": p3}, "models": [...]
-        # Optional (only if 'base_threshold' provided in payload):
-        "base_threshold": float,
-        "volatility_regime": "calm|normal|turbulent",
-        "regime_multiplier": float,
-        "threshold_after_volatility": float
-      }
-    Falls back to demo when needed.
+    Returns dict with mean prob, band, votes, etc.
     """
     votes: Dict[str, float] = {}
     demo = False
-
     feats = payload.get("features") or {}
 
-    # try logistic
+    # logistic
     try:
         L_model, L_meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
         order = L_meta.get("feature_order") or []
@@ -205,7 +137,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     except Exception:
         pass
 
-    # try RF
+    # RF
     try:
         RF_model, RF_meta = _load_model_and_meta(_RF_MODEL, _RF_META, models_dir)
         order = RF_meta.get("feature_order") or []
@@ -213,7 +145,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     except Exception:
         pass
 
-    # try GB
+    # GB
     try:
         GB_model, GB_meta = _load_model_and_meta(_GB_MODEL, _GB_META, models_dir)
         order = GB_meta.get("feature_order") or []
@@ -232,15 +164,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
-    # --- Volatility-aware threshold metadata (opt-in) ---
-    base_thr = None
-    try:
-        base_thr = float(payload.get("base_threshold")) if payload and "base_threshold" in payload else None
-    except Exception:
-        base_thr = None
-    regime_meta = compute_volatility_adjusted_threshold(base_thr, feats)
-
-    result = {
+    return {
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
@@ -248,9 +172,30 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         "models": list(votes.keys()),
         "demo": demo,
     }
-    if regime_meta:
-        result.update(regime_meta)
-    return result
+
+
+# ---------- Volatility-aware thresholds ----------
+def compute_volatility_adjusted_threshold(base_threshold: float, regime: str) -> Dict[str, Any]:
+    """
+    Adjust threshold based on volatility regime.
+    """
+    try:
+        mults = {
+            "calm": float(os.getenv("TL_REGIME_THRESH_MULT_CALM", "0.9")),
+            "normal": float(os.getenv("TL_REGIME_THRESH_MULT_NORMAL", "1.0")),
+            "turbulent": float(os.getenv("TL_REGIME_THRESH_MULT_TURBULENT", "1.1")),
+        }
+        multiplier = mults.get(str(regime).strip().lower(), 1.0)
+    except Exception:
+        multiplier = 1.0
+
+    adjusted = base_threshold * multiplier
+    return {
+        "base_threshold": base_threshold,
+        "volatility_regime": regime,
+        "regime_multiplier": multiplier,
+        "threshold_after_volatility": adjusted,
+    }
 
 
 # Back-compat alias
@@ -258,17 +203,13 @@ def score(payload: dict, explain: bool = False):
     return infer_score(payload, explain=explain)
 
 __all__ = [
-    "infer_score",
-    "infer_score_ensemble",
-    "score",
-    "model_metadata",
-    "model_metadata_all",
-    # expose helper for CI summary usage
+    "infer_score", "infer_score_ensemble", "score",
+    "model_metadata", "model_metadata_all",
     "compute_volatility_adjusted_threshold",
 ]
 
 
-# ---------- Online backtest (kept from v0.2) ----------
+# ---------- Online backtest ----------
 def _load_jsonl(path: Path) -> List[dict]:
     try:
         return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
@@ -305,9 +246,8 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
     for o in origins[:10]:
         tp=fp=fn=tn=0
         for t in buckets:
-            t_iso = t.isoformat()
             try:
-                p = score({"origin": o, "timestamp": t_iso}).get("prob_trigger_next_6h", 0.0)
+                p = score({"origin": o, "timestamp": t.isoformat()}).get("prob_trigger_next_6h", 0.0)
             except Exception:
                 p = 0.0
             y = _label_has_trigger_between(triggers, o, t, t + timedelta(hours=6))
@@ -318,7 +258,8 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
             else: tn+=1
         prec = tp/float(tp+fp) if (tp+fp)>0 else 0.0
         rec  = tp/float(tp+fn) if (tp+fn)>0 else 0.0
-        per_origin.append({"origin": o, "precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn})
+        per_origin.append({"origin": o, "precision": round(prec,3), "recall": round(rec,3),
+                           "tp":tp,"fp":fp,"fn":fn,"tn":tn})
 
     tp=sum(po["tp"] for po in per_origin); fp=sum(po["fp"] for po in per_origin)
     fn=sum(po["fn"] for po in per_origin); tn=sum(po["tn"] for po in per_origin)
@@ -328,6 +269,7 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
     return {
         "window_hours": 24,
         "threshold": threshold,
-        "overall": {"precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn},
+        "overall": {"precision": round(prec,3), "recall": round(rec,3),
+                    "tp":tp,"fp":fp,"fn":fn,"tn":tn},
         "per_origin": per_origin[:3],
     }
