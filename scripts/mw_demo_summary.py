@@ -1568,39 +1568,210 @@ except Exception as e:
 
 
 
-# ---------- rolling precision/recall snapshot ----------
+# ---------- Rolling Accuracy Snapshot (from trigger_history + label_feedback) ----------
 try:
-    pr = rolling_precision_recall_snapshot()  # uses defaults + DEMO seeding
-    N = int(pr.get("matched", 0) or 0)
-    min_req = int(pr.get("min_required", 10) or 10)
-    win = int(pr.get("window_hours", 72) or 72)
+    from src.paths import MODELS_DIR
+except Exception:
+    # Fallback: assume repo-local if paths import fails
+    MODELS_DIR = Path("models")
 
-    md.append(f"\n### 📈 Rolling Accuracy Snapshot (N={N} labels, window={win}h)")
-    if N < min_req:
-        md.append(f"_Waiting for more labeled matches (need ≥{min_req})._")
-    else:
-        # show per-origin (up to 3) and overall
-        rows = pr.get("per_origin", []) or []
-        if not rows:
-            md.append("_No per-origin matches._")
-        else:
-            for row in rows[:3]:
-                md.append(
-                    f"- {row['origin']} → precision={row['precision']:.2f}, "
-                    f"recall={row['recall']:.2f}, F1={row['f1']:.2f} "
-                    f"(tp={row['tp']}, fp={row['fp']}, fn={row['fn']})"
-                )
-        ov = pr.get("overall", {}) or {}
-        if ov:
+# Configs (with sensible defaults)
+try:
+    _MIN_LABELS = int(os.getenv("METRICS_MIN_LABELS", "10"))
+except Exception:
+    _MIN_LABELS = 10
+
+try:
+    _LOOKBACK_HOURS = int(os.getenv("METRICS_LOOKBACK_HOURS", "72"))
+except Exception:
+    _LOOKBACK_HOURS = 72
+
+history_path = MODELS_DIR / "trigger_history.jsonl"
+feedback_path = MODELS_DIR / "label_feedback.jsonl"
+
+now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+cutoff_ts = now_utc - timedelta(hours=_LOOKBACK_HOURS)
+
+def _safe_parse_ts(x):
+    # Reuse the script's parse_ts if available
+    try:
+        return parse_ts(x)
+    except Exception:
+        pass
+    # Local fallback
+    try:
+        if isinstance(x, (int, float)):
+            return datetime.fromtimestamp(float(x), tz=timezone.utc)
+        s = str(x)
+        s = s[:-1] + "+00:00" if s.endswith("Z") else s
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _hour_bucket(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+def _clamp_bool(v, default=False):
+    try:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        s = str(v).strip().lower()
+        if s in ("1", "true", "yes", "y", "t"):
+            return True
+        if s in ("0", "false", "no", "n", "f"):
+            return False
+    except Exception:
+        pass
+    return default
+
+# Load JSONL (re-use script helper if present)
+def _load_jsonl_local(path: Path):
+    try:
+        return load_jsonl(path)
+    except Exception:
+        if not path.exists():
+            return []
+        out = []
+        for ln in path.read_text().splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except Exception:
+                pass
+        return out
+
+# Read windows
+hist_rows = [r for r in _load_jsonl_local(history_path)]
+fb_rows   = [r for r in _load_jsonl_local(feedback_path)]
+
+# Filter by lookback
+hist_rows = [r for r in hist_rows if _safe_parse_ts(r.get("timestamp")) and _safe_parse_ts(r.get("timestamp")) >= cutoff_ts]
+fb_rows   = [r for r in fb_rows   if _safe_parse_ts(r.get("timestamp")) and _safe_parse_ts(r.get("timestamp")) >= cutoff_ts]
+
+# Build bucketed maps
+# For predictions, we only need to know if anything triggered in the bucket per origin
+pred_bucket: Dict[tuple, bool] = {}
+# For labels, track positive (label==True) presence and any label presence (for sampling n)
+label_pos_bucket: Dict[tuple, int] = {}
+label_any_bucket: Dict[tuple, int] = {}
+
+for r in hist_rows:
+    ts = _safe_parse_ts(r.get("timestamp"))
+    if not ts:
+        continue
+    origin = (r.get("origin") or r.get("source") or "unknown")
+    bkey = (origin, _hour_bucket(ts))
+    # Decision recorded as "triggered" or "not_triggered" OR a boolean flag in some implementations
+    decision = (r.get("decision") or "").strip().lower()
+    triggered_flag = (decision == "triggered") or _clamp_bool(r.get("triggered"), False)
+    pred_bucket[bkey] = pred_bucket.get(bkey, False) or bool(triggered_flag)
+
+for r in fb_rows:
+    ts = _safe_parse_ts(r.get("timestamp"))
+    if not ts:
+        continue
+    origin = (r.get("origin") or r.get("source") or "unknown")
+    bkey = (origin, _hour_bucket(ts))
+    label_flag = _clamp_bool(r.get("label"), False)
+    label_any_bucket[bkey] = label_any_bucket.get(bkey, 0) + 1
+    if label_flag:
+        label_pos_bucket[bkey] = label_pos_bucket.get(bkey, 0) + 1
+
+# Compute per-origin TP/FP/FN using hour buckets
+by_origin: Dict[str, Dict[str, int]] = {}
+all_keys = set(list(pred_bucket.keys()) + list(label_any_bucket.keys()))
+
+for (origin, bts) in all_keys:
+    trig = pred_bucket.get((origin, bts), False)
+    pos  = label_pos_bucket.get((origin, bts), 0)
+    anyl = label_any_bucket.get((origin, bts), 0)
+    # Prepare accumulator
+    acc = by_origin.setdefault(origin, {"tp": 0, "fp": 0, "fn": 0, "n": 0})
+    # "n" counts any labeled buckets seen (pos or neg) for sampling size
+    if anyl > 0:
+        acc["n"] += 1
+    # Confusion contributions:
+    # TP: triggered AND there was at least one positive label in bucket
+    if trig and pos > 0:
+        acc["tp"] += 1
+    # FP: triggered AND no positive label in that bucket (even if negatives exist)
+    elif trig and pos == 0:
+        acc["fp"] += 1
+    # FN: not triggered AND there was at least one positive label that hour
+    elif (not trig) and pos > 0:
+        acc["fn"] += 1
+    # Else: TN or unlabeled bucket (ignored for PR metrics)
+
+# Aggregate totals and count matched labels across all origins
+tp_total = fp_total = fn_total = n_total = 0
+for o, m in by_origin.items():
+    tp_total += m["tp"]
+    fp_total += m["fp"]
+    fn_total += m["fn"]
+    n_total  += m["n"]
+
+# Render
+md.append(f"\n### 📈 Rolling Accuracy Snapshot (N={n_total} labels, window={_LOOKBACK_HOURS}h)")
+
+if n_total < _MIN_LABELS:
+    # DEMO fallback to keep CI populated
+    if os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
+        demo_entries = [
+            {"origin": "reddit",   "tp": 2, "fp": 1, "fn": 1},
+            {"origin": "twitter",  "tp": 1, "fp": 0, "fn": 2},
+            {"origin": "rss_news", "tp": 0, "fp": 1, "fn": 1},
+        ]
+        tp_t = fp_t = fn_t = 0
+        for e in demo_entries:
+            tp, fp, fn = e["tp"], e["fp"], e["fn"]
+            n = tp + fp + fn
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1   = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
             md.append(
-                f"- **overall** → precision={float(ov.get('precision', 0.0)):.2f}, "
-                f"recall={float(ov.get('recall', 0.0)):.2f}, "
-                f"F1={float(ov.get('f1', 0.0)):.2f} "
-                f"(tp={int(ov.get('tp', 0))}, fp={int(ov.get('fp', 0))}, fn={int(ov.get('fn', 0))})"
+                f"{e['origin']} → precision={prec:.2f}, recall={rec:.2f}, F1={f1:.2f} "
+                f"(tp={tp}, fp={fp}, fn={fn}, n={n})"
             )
-except Exception as e:
-    md.append(f"\n### 📈 Rolling Accuracy Snapshot\n_⚠️ metrics failed: {e}_")
+            tp_t += tp; fp_t += fp; fn_t += fn
+        n_t = tp_t + fp_t + fn_t
+        prec_t = tp_t / (tp_t + fp_t) if (tp_t + fp_t) > 0 else 0.0
+        rec_t  = tp_t / (tp_t + fn_t) if (tp_t + fn_t) > 0 else 0.0
+        f1_t   = (2 * prec_t * rec_t / (prec_t + rec_t)) if (prec_t + rec_t) > 0 else 0.0
+        md.append(
+            f"overall → precision={prec_t:.2f}, recall={rec_t:.2f}, F1={f1_t:.2f} "
+            f"(tp={tp_t}, fp={fp_t}, fn={fn_t}, n={n_t})"
+        )
+    else:
+        md.append("Waiting for more labeled matches (need ≥10).")
+else:
+    # Real metrics
+    # Sort origins for stable output
+    for origin in sorted(by_origin.keys()):
+        m = by_origin[origin]
+        tp, fp, fn, n = m["tp"], m["fp"], m["fn"], m["n"]
+        # Only show origins that had any labels in window
+        if n <= 0:
+            continue
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1   = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+        md.append(
+            f"{origin} → precision={prec:.2f}, recall={rec:.2f}, F1={f1:.2f} "
+            f"(tp={tp}, fp={fp}, fn={fn}, n={n})"
+        )
 
+    # Overall line
+    prec_t = tp_total / (tp_total + fp_total) if (tp_total + fp_total) > 0 else 0.0
+    rec_t  = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0.0
+    f1_t   = (2 * prec_t * rec_t / (prec_t + rec_t)) if (prec_t + rec_t) > 0 else 0.0
+    md.append(
+        f"overall → precision={prec_t:.2f}, recall={rec_t:.2f}, F1={f1_t:.2f} "
+        f"(tp={tp_total}, fp={fp_total}, fn={fn_total}, n={n_total})"
+    )
 
 
 
