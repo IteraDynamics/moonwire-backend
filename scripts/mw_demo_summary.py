@@ -1568,210 +1568,161 @@ except Exception as e:
 
 
 
-# ---------- Rolling Accuracy Snapshot (from trigger_history + label_feedback) ----------
+# ---------- rolling accuracy snapshot (precision/recall/F1) ----------
 try:
+    import os
+    from datetime import timedelta
     from src.paths import MODELS_DIR
-except Exception:
-    # Fallback: assume repo-local if paths import fails
-    MODELS_DIR = Path("models")
 
-# Configs (with sensible defaults)
-try:
-    _MIN_LABELS = int(os.getenv("METRICS_MIN_LABELS", "10"))
-except Exception:
-    _MIN_LABELS = 10
-
-try:
     _LOOKBACK_HOURS = int(os.getenv("METRICS_LOOKBACK_HOURS", "72"))
-except Exception:
-    _LOOKBACK_HOURS = 72
+    _MIN_LABELS     = int(os.getenv("METRICS_MIN_LABELS", "10"))
+    _TOL_MIN        = int(os.getenv("METRICS_JOIN_TOL_MINUTES", "5"))
 
-history_path = MODELS_DIR / "trigger_history.jsonl"
-feedback_path = MODELS_DIR / "label_feedback.jsonl"
+    # Header placeholder; we’ll fill it once we know N being reported (real vs demo)
+    header_idx = len(md)
+    md.append("")  # placeholder line
 
-now_utc = datetime.now(timezone.utc).replace(microsecond=0)
-cutoff_ts = now_utc - timedelta(hours=_LOOKBACK_HOURS)
-
-def _safe_parse_ts(x):
-    # Reuse the script's parse_ts if available
-    try:
-        return parse_ts(x)
-    except Exception:
-        pass
-    # Local fallback
-    try:
-        if isinstance(x, (int, float)):
-            return datetime.fromtimestamp(float(x), tz=timezone.utc)
-        s = str(x)
-        s = s[:-1] + "+00:00" if s.endswith("Z") else s
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception:
-        return None
-
-def _hour_bucket(dt: datetime) -> datetime:
-    return dt.replace(minute=0, second=0, microsecond=0)
-
-def _clamp_bool(v, default=False):
-    try:
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, (int, float)):
-            return bool(v)
-        s = str(v).strip().lower()
-        if s in ("1", "true", "yes", "y", "t"):
-            return True
-        if s in ("0", "false", "no", "n", "f"):
+    # Utilities (we already have load_jsonl and parse_ts earlier in this file)
+    def _within(dt_a, dt_b, tol_minutes: int) -> bool:
+        try:
+            return abs((dt_a - dt_b).total_seconds()) <= tol_minutes * 60
+        except Exception:
             return False
-    except Exception:
-        pass
-    return default
 
-# Load JSONL (re-use script helper if present)
-def _load_jsonl_local(path: Path):
-    try:
-        return load_jsonl(path)
-    except Exception:
-        if not path.exists():
-            return []
-        out = []
-        for ln in path.read_text().splitlines():
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                out.append(json.loads(ln))
-            except Exception:
-                pass
-        return out
+    def _bool(x) -> bool:
+        if isinstance(x, bool):
+            return x
+        s = str(x).strip().lower()
+        return s in ("1", "true", "yes", "y")
 
-# Read windows
-hist_rows = [r for r in _load_jsonl_local(history_path)]
-fb_rows   = [r for r in _load_jsonl_local(feedback_path)]
+    # Load logs (tolerate absence)
+    trig_path = MODELS_DIR / "trigger_history.jsonl"
+    feed_path = MODELS_DIR / "label_feedback.jsonl"
+    trig_rows = load_jsonl(trig_path)
+    feed_rows = load_jsonl(feed_path)
 
-# Filter by lookback
-hist_rows = [r for r in hist_rows if _safe_parse_ts(r.get("timestamp")) and _safe_parse_ts(r.get("timestamp")) >= cutoff_ts]
-fb_rows   = [r for r in fb_rows   if _safe_parse_ts(r.get("timestamp")) and _safe_parse_ts(r.get("timestamp")) >= cutoff_ts]
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=_LOOKBACK_HOURS)
 
-# Build bucketed maps
-# For predictions, we only need to know if anything triggered in the bucket per origin
-pred_bucket: Dict[tuple, bool] = {}
-# For labels, track positive (label==True) presence and any label presence (for sampling n)
-label_pos_bucket: Dict[tuple, int] = {}
-label_any_bucket: Dict[tuple, int] = {}
-
-for r in hist_rows:
-    ts = _safe_parse_ts(r.get("timestamp"))
-    if not ts:
-        continue
-    origin = (r.get("origin") or r.get("source") or "unknown")
-    bkey = (origin, _hour_bucket(ts))
-    # Decision recorded as "triggered" or "not_triggered" OR a boolean flag in some implementations
-    decision = (r.get("decision") or "").strip().lower()
-    triggered_flag = (decision == "triggered") or _clamp_bool(r.get("triggered"), False)
-    pred_bucket[bkey] = pred_bucket.get(bkey, False) or bool(triggered_flag)
-
-for r in fb_rows:
-    ts = _safe_parse_ts(r.get("timestamp"))
-    if not ts:
-        continue
-    origin = (r.get("origin") or r.get("source") or "unknown")
-    bkey = (origin, _hour_bucket(ts))
-    label_flag = _clamp_bool(r.get("label"), False)
-    label_any_bucket[bkey] = label_any_bucket.get(bkey, 0) + 1
-    if label_flag:
-        label_pos_bucket[bkey] = label_pos_bucket.get(bkey, 0) + 1
-
-# Compute per-origin TP/FP/FN using hour buckets
-by_origin: Dict[str, Dict[str, int]] = {}
-all_keys = set(list(pred_bucket.keys()) + list(label_any_bucket.keys()))
-
-for (origin, bts) in all_keys:
-    trig = pred_bucket.get((origin, bts), False)
-    pos  = label_pos_bucket.get((origin, bts), 0)
-    anyl = label_any_bucket.get((origin, bts), 0)
-    # Prepare accumulator
-    acc = by_origin.setdefault(origin, {"tp": 0, "fp": 0, "fn": 0, "n": 0})
-    # "n" counts any labeled buckets seen (pos or neg) for sampling size
-    if anyl > 0:
-        acc["n"] += 1
-    # Confusion contributions:
-    # TP: triggered AND there was at least one positive label in bucket
-    if trig and pos > 0:
-        acc["tp"] += 1
-    # FP: triggered AND no positive label in that bucket (even if negatives exist)
-    elif trig and pos == 0:
-        acc["fp"] += 1
-    # FN: not triggered AND there was at least one positive label that hour
-    elif (not trig) and pos > 0:
-        acc["fn"] += 1
-    # Else: TN or unlabeled bucket (ignored for PR metrics)
-
-# Aggregate totals and count matched labels across all origins
-tp_total = fp_total = fn_total = n_total = 0
-for o, m in by_origin.items():
-    tp_total += m["tp"]
-    fp_total += m["fp"]
-    fn_total += m["fn"]
-    n_total  += m["n"]
-
-# Render
-md.append(f"\n### 📈 Rolling Accuracy Snapshot (N={n_total} labels, window={_LOOKBACK_HOURS}h)")
-
-if n_total < _MIN_LABELS:
-    # DEMO fallback to keep CI populated
-    if os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
-        demo_entries = [
-            {"origin": "reddit",   "tp": 2, "fp": 1, "fn": 1},
-            {"origin": "twitter",  "tp": 1, "fp": 0, "fn": 2},
-            {"origin": "rss_news", "tp": 0, "fp": 1, "fn": 1},
-        ]
-        tp_t = fp_t = fn_t = 0
-        for e in demo_entries:
-            tp, fp, fn = e["tp"], e["fp"], e["fn"]
-            n = tp + fp + fn
-            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1   = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
-            md.append(
-                f"{e['origin']} → precision={prec:.2f}, recall={rec:.2f}, F1={f1:.2f} "
-                f"(tp={tp}, fp={fp}, fn={fn}, n={n})"
-            )
-            tp_t += tp; fp_t += fp; fn_t += fn
-        n_t = tp_t + fp_t + fn_t
-        prec_t = tp_t / (tp_t + fp_t) if (tp_t + fp_t) > 0 else 0.0
-        rec_t  = tp_t / (tp_t + fn_t) if (tp_t + fn_t) > 0 else 0.0
-        f1_t   = (2 * prec_t * rec_t / (prec_t + rec_t)) if (prec_t + rec_t) > 0 else 0.0
-        md.append(
-            f"overall → precision={prec_t:.2f}, recall={rec_t:.2f}, F1={f1_t:.2f} "
-            f"(tp={tp_t}, fp={fp_t}, fn={fn_t}, n={n_t})"
-        )
-    else:
-        md.append("Waiting for more labeled matches (need ≥10).")
-else:
-    # Real metrics
-    # Sort origins for stable output
-    for origin in sorted(by_origin.keys()):
-        m = by_origin[origin]
-        tp, fp, fn, n = m["tp"], m["fp"], m["fn"], m["n"]
-        # Only show origins that had any labels in window
-        if n <= 0:
+    # Filter to lookback window and normalize needed fields
+    trig_norm = []
+    for r in trig_rows:
+        ts = parse_ts(r.get("timestamp"))
+        if not ts or ts < cutoff:
             continue
-        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1   = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
-        md.append(
-            f"{origin} → precision={prec:.2f}, recall={rec:.2f}, F1={f1:.2f} "
-            f"(tp={tp}, fp={fp}, fn={fn}, n={n})"
-        )
+        origin = (r.get("origin") or "unknown").strip().lower()
+        # Prefer explicit decision; else derive from score vs threshold
+        decision = (r.get("decision") or "").strip().lower()
+        if decision in ("triggered", "not_triggered"):
+            triggered = (decision == "triggered")
+        else:
+            try:
+                s  = float(r.get("adjusted_score", r.get("score", 0.0)) or 0.0)
+                th = float(r.get("threshold", r.get("threshold_after_volatility", 0.5)) or 0.5)
+                triggered = s >= th
+            except Exception:
+                triggered = False
+        trig_norm.append({"ts": ts, "origin": origin, "triggered": bool(triggered)})
 
-    # Overall line
-    prec_t = tp_total / (tp_total + fp_total) if (tp_total + fp_total) > 0 else 0.0
-    rec_t  = tp_total / (tp_total + fn_total) if (tp_total + fn_total) > 0 else 0.0
-    f1_t   = (2 * prec_t * rec_t / (prec_t + rec_t)) if (prec_t + rec_t) > 0 else 0.0
-    md.append(
-        f"overall → precision={prec_t:.2f}, recall={rec_t:.2f}, F1={f1_t:.2f} "
-        f"(tp={tp_total}, fp={fp_total}, fn={fn_total}, n={n_total})"
-    )
+    feed_norm = []
+    for r in feed_rows:
+        ts = parse_ts(r.get("timestamp"))
+        if not ts or ts < cutoff:
+            continue
+        origin = (r.get("origin") or "unknown").strip().lower()
+        label  = _bool(r.get("label", False))
+        feed_norm.append({"ts": ts, "origin": origin, "label": label})
+
+    # Join with ±_TOL_MIN tolerance (greedy nearest match per origin)
+    # Build per-origin buckets for quick scan
+    feeds_by_origin = {}
+    for row in feed_norm:
+        feeds_by_origin.setdefault(row["origin"], []).append(row)
+    # Sort by time for deterministic nearest matching
+    for rows in feeds_by_origin.values():
+        rows.sort(key=lambda x: x["ts"])
+
+    matches = []  # list of (origin, triggered_bool, label_bool)
+    for t in sorted(trig_norm, key=lambda x: x["ts"]):
+        cand = feeds_by_origin.get(t["origin"], [])
+        if not cand:
+            continue
+        # find nearest within tolerance
+        best_i = -1
+        best_dt = None
+        for i, fr in enumerate(cand):
+            if _within(t["ts"], fr["ts"], _TOL_MIN):
+                dt = abs((t["ts"] - fr["ts"]).total_seconds())
+                if best_dt is None or dt < best_dt:
+                    best_dt = dt; best_i = i
+        if best_i >= 0:
+            fr = cand.pop(best_i)  # avoid reusing same feedback
+            matches.append((t["origin"], t["triggered"], fr["label"]))
+
+    # Aggregate
+    from collections import defaultdict
+    agg = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
+    for origin, triggered, label in matches:
+        if triggered and label:
+            agg[origin]["tp"] += 1
+        elif triggered and not label:
+            agg[origin]["fp"] += 1
+        elif (not triggered) and label:
+            agg[origin]["fn"] += 1
+        # (not triggered) and (not label) → true negative (not needed for P/R/F1)
+
+    def _metrics(tp: int, fp: int, fn: int):
+        p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * p * r / (p + r)) if (p + r) > 0 else 0.0
+        return p, r, f1
+
+    n_total = sum((v["tp"] + v["fp"] + v["fn"]) for v in agg.values())
+
+    # If too few matches, seed demo so CI stays informative
+    if n_total < _MIN_LABELS and is_demo_mode():
+        md.append(f"\n### 📈 Rolling Accuracy Snapshot (seeded demo; window={_LOOKBACK_HOURS}h)")
+        demo = {
+            "reddit":   {"tp": 2, "fp": 1, "fn": 1},
+            "twitter":  {"tp": 1, "fp": 0, "fn": 2},
+            "rss_news": {"tp": 0, "fp": 1, "fn": 1},
+        }
+        tp_t = fp_t = fn_t = 0
+        for origin in ["reddit", "twitter", "rss_news"]:
+            d = demo[origin]
+            tp, fp, fn = d["tp"], d["fp"], d["fn"]
+            tp_t += tp; fp_t += fp; fn_t += fn
+            p, r, f1 = _metrics(tp, fp, fn)
+            n = tp + fp + fn
+            md.append(f"{origin} → precision={p:.2f}, recall={r:.2f}, F1={f1:.2f} (tp={tp}, fp={fp}, fn={fn}, n={n})")
+        p_o, r_o, f1_o = _metrics(tp_t, fp_t, fn_t)
+        n_o = tp_t + fp_t + fn_t
+        md.append(f"overall → precision={p_o:.2f}, recall={r_o:.2f}, F1={f1_o:.2f} (tp={tp_t}, fp={fp_t}, fn={fn_t}, n={n_o})")
+        # Fix header to demo N
+        md[header_idx] = f"\n### 📈 Rolling Accuracy Snapshot (N={n_o} labels, window={_LOOKBACK_HOURS}h)"
+    else:
+        # Real metrics (may still be zero, but that’s faithful)
+        # Header now uses the real total N
+        md[header_idx] = f"\n### 📈 Rolling Accuracy Snapshot (N={n_total} labels, window={_LOOKBACK_HOURS}h)"
+        if n_total == 0:
+            md.append("Waiting for more labeled matches (need ≥10).")
+        else:
+            # Per-origin (sorted for stable output)
+            tp_t = fp_t = fn_t = 0
+            for origin in sorted(agg.keys()):
+                tp, fp, fn = agg[origin]["tp"], agg[origin]["fp"], agg[origin]["fn"]
+                p, r, f1 = _metrics(tp, fp, fn)
+                n = tp + fp + fn
+                md.append(f"{origin} → precision={p:.2f}, recall={r:.2f}, F1={f1:.2f} (tp={tp}, fp={fp}, fn={fn}, n={n})")
+                tp_t += tp; fp_t += fp; fn_t += fn
+            # Overall
+            p_o, r_o, f1_o = _metrics(tp_t, fp_t, fn_t)
+            n_o = tp_t + fp_t + fn_t
+            md.append(f"overall → precision={p_o:.2f}, recall={r_o:.2f}, F1={f1_o:.2f} (tp={tp_t}, fp={fp_t}, fn={fn_t}, n={n_o})")
+
+except Exception as e:
+    md.append(f"\n### 📈 Rolling Accuracy Snapshot\n_⚠️ metrics failed: {e}_")
+
 
 
 
