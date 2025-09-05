@@ -27,6 +27,8 @@ from src.analytics.nowcast_attention import compute_nowcast_attention
 from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
 from src.ml.thresholds import load_per_origin_thresholds
 from typing import Dict, List
+from src.ml.metrics import rolling_precision_recall_snapshot
+
 
 # ---- ML (trigger likelihood) import guard ----
 _ML_OK = False
@@ -1563,6 +1565,42 @@ try:
             pass
 except Exception as e:
     md.append(f"\n⚠️ Label feedback section failed: {e}")
+
+
+
+# ---------- rolling precision/recall snapshot ----------
+try:
+    pr = rolling_precision_recall_snapshot()  # uses defaults + DEMO seeding
+    N = int(pr.get("matched", 0) or 0)
+    min_req = int(pr.get("min_required", 10) or 10)
+    win = int(pr.get("window_hours", 72) or 72)
+
+    md.append(f"\n### 📈 Rolling Accuracy Snapshot (N={N} labels, window={win}h)")
+    if N < min_req:
+        md.append(f"_Waiting for more labeled matches (need ≥{min_req})._")
+    else:
+        # show per-origin (up to 3) and overall
+        rows = pr.get("per_origin", []) or []
+        if not rows:
+            md.append("_No per-origin matches._")
+        else:
+            for row in rows[:3]:
+                md.append(
+                    f"- {row['origin']} → precision={row['precision']:.2f}, "
+                    f"recall={row['recall']:.2f}, F1={row['f1']:.2f} "
+                    f"(tp={row['tp']}, fp={row['fp']}, fn={row['fn']})"
+                )
+        ov = pr.get("overall", {}) or {}
+        if ov:
+            md.append(
+                f"- **overall** → precision={float(ov.get('precision', 0.0)):.2f}, "
+                f"recall={float(ov.get('recall', 0.0)):.2f}, "
+                f"F1={float(ov.get('f1', 0.0)):.2f} "
+                f"(tp={int(ov.get('tp', 0))}, fp={int(ov.get('fp', 0))}, fn={int(ov.get('fn', 0))})"
+            )
+except Exception as e:
+    md.append(f"\n### 📈 Rolling Accuracy Snapshot\n_⚠️ metrics failed: {e}_")
+
 
 
 
