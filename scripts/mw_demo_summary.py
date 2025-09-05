@@ -1568,160 +1568,167 @@ except Exception as e:
 
 
 
-# ---------- rolling accuracy snapshot (precision/recall/F1) ----------
-try:
-    import os
-    from datetime import timedelta
-    from src.paths import MODELS_DIR
+# --- Rolling Accuracy Snapshot (single-header; demo-safe) ---
+import os, json
+from datetime import datetime, timezone, timedelta
+from src.paths import MODELS_DIR
 
-    _LOOKBACK_HOURS = int(os.getenv("METRICS_LOOKBACK_HOURS", "72"))
-    _MIN_LABELS     = int(os.getenv("METRICS_MIN_LABELS", "10"))
-    _TOL_MIN        = int(os.getenv("METRICS_JOIN_TOL_MINUTES", "5"))
-
-    # Header placeholder; we’ll fill it once we know N being reported (real vs demo)
-    header_idx = len(md)
-    md.append("")  # placeholder line
-
-    # Utilities (we already have load_jsonl and parse_ts earlier in this file)
-    def _within(dt_a, dt_b, tol_minutes: int) -> bool:
-        try:
-            return abs((dt_a - dt_b).total_seconds()) <= tol_minutes * 60
-        except Exception:
-            return False
-
-    def _bool(x) -> bool:
-        if isinstance(x, bool):
-            return x
-        s = str(x).strip().lower()
-        return s in ("1", "true", "yes", "y")
-
-    # Load logs (tolerate absence)
-    trig_path = MODELS_DIR / "trigger_history.jsonl"
-    feed_path = MODELS_DIR / "label_feedback.jsonl"
-    trig_rows = load_jsonl(trig_path)
-    feed_rows = load_jsonl(feed_path)
-
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=_LOOKBACK_HOURS)
-
-    # Filter to lookback window and normalize needed fields
-    trig_norm = []
-    for r in trig_rows:
-        ts = parse_ts(r.get("timestamp"))
-        if not ts or ts < cutoff:
-            continue
-        origin = (r.get("origin") or "unknown").strip().lower()
-        # Prefer explicit decision; else derive from score vs threshold
-        decision = (r.get("decision") or "").strip().lower()
-        if decision in ("triggered", "not_triggered"):
-            triggered = (decision == "triggered")
+def _parse_ts_any(v):
+    """Return aware UTC datetime or None."""
+    if v is None:
+        return None
+    try:
+        # epoch seconds
+        return datetime.fromtimestamp(float(v), tz=timezone.utc)
+    except Exception:
+        pass
+    try:
+        s = str(v)
+        s = s[:-1] + "+00:00" if s.endswith("Z") else s
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         else:
+            dt = dt.astimezone(timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+def _bucket_hour(ts: datetime) -> datetime:
+    return ts.replace(minute=0, second=0, microsecond=0)
+
+def _load_jsonl_safe(p):
+    try:
+        if not p.exists():
+            return []
+        out = []
+        for ln in p.read_text().splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
             try:
-                s  = float(r.get("adjusted_score", r.get("score", 0.0)) or 0.0)
-                th = float(r.get("threshold", r.get("threshold_after_volatility", 0.5)) or 0.5)
-                triggered = s >= th
+                out.append(json.loads(ln))
             except Exception:
-                triggered = False
-        trig_norm.append({"ts": ts, "origin": origin, "triggered": bool(triggered)})
+                continue
+        return out
+    except Exception:
+        return []
 
-    feed_norm = []
-    for r in feed_rows:
-        ts = parse_ts(r.get("timestamp"))
-        if not ts or ts < cutoff:
-            continue
-        origin = (r.get("origin") or "unknown").strip().lower()
-        label  = _bool(r.get("label", False))
-        feed_norm.append({"ts": ts, "origin": origin, "label": label})
+def _norm_origin(o):
+    return str(o or "unknown").strip().lower()
 
-    # Join with ±_TOL_MIN tolerance (greedy nearest match per origin)
-    # Build per-origin buckets for quick scan
-    feeds_by_origin = {}
-    for row in feed_norm:
-        feeds_by_origin.setdefault(row["origin"], []).append(row)
-    # Sort by time for deterministic nearest matching
-    for rows in feeds_by_origin.values():
-        rows.sort(key=lambda x: x["ts"])
+def _prf(counts):
+    tp = int(counts.get("tp", 0))
+    fp = int(counts.get("fp", 0))
+    fn = int(counts.get("fn", 0))
+    prec = tp / float(tp + fp) if (tp + fp) > 0 else 0.0
+    rec  = tp / float(tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = (2 * prec * rec / float(prec + rec)) if (prec + rec) > 0 else 0.0
+    n = tp + fp + fn
+    return prec, rec, f1, n
 
-    matches = []  # list of (origin, triggered_bool, label_bool)
-    for t in sorted(trig_norm, key=lambda x: x["ts"]):
-        cand = feeds_by_origin.get(t["origin"], [])
-        if not cand:
-            continue
-        # find nearest within tolerance
-        best_i = -1
-        best_dt = None
-        for i, fr in enumerate(cand):
-            if _within(t["ts"], fr["ts"], _TOL_MIN):
-                dt = abs((t["ts"] - fr["ts"]).total_seconds())
-                if best_dt is None or dt < best_dt:
-                    best_dt = dt; best_i = i
-        if best_i >= 0:
-            fr = cand.pop(best_i)  # avoid reusing same feedback
-            matches.append((t["origin"], t["triggered"], fr["label"]))
+try:
+    min_labels_required = int(os.getenv("METRICS_MIN_LABELS", "10"))
+except Exception:
+    min_labels_required = 10
 
-    # Aggregate
-    from collections import defaultdict
-    agg = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
-    for origin, triggered, label in matches:
-        if triggered and label:
-            agg[origin]["tp"] += 1
-        elif triggered and not label:
-            agg[origin]["fp"] += 1
-        elif (not triggered) and label:
-            agg[origin]["fn"] += 1
-        # (not triggered) and (not label) → true negative (not needed for P/R/F1)
+try:
+    lookback_hours = int(os.getenv("METRICS_LOOKBACK_HOURS", "72"))
+except Exception:
+    lookback_hours = 72
 
-    def _metrics(tp: int, fp: int, fn: int):
-        p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1 = (2 * p * r / (p + r)) if (p + r) > 0 else 0.0
-        return p, r, f1
+now = datetime.now(timezone.utc)
+cutoff = now - timedelta(hours=lookback_hours)
 
-    n_total = sum((v["tp"] + v["fp"] + v["fn"]) for v in agg.values())
+hpath = MODELS_DIR / "trigger_history.jsonl"
+fpath = MODELS_DIR / "label_feedback.jsonl"
 
-    # If too few matches, seed demo so CI stays informative
-    if n_total < _MIN_LABELS and is_demo_mode():
-        md.append(f"\n### 📈 Rolling Accuracy Snapshot (seeded demo; window={_LOOKBACK_HOURS}h)")
-        demo = {
-            "reddit":   {"tp": 2, "fp": 1, "fn": 1},
-            "twitter":  {"tp": 1, "fp": 0, "fn": 2},
-            "rss_news": {"tp": 0, "fp": 1, "fn": 1},
-        }
-        tp_t = fp_t = fn_t = 0
-        for origin in ["reddit", "twitter", "rss_news"]:
-            d = demo[origin]
-            tp, fp, fn = d["tp"], d["fp"], d["fn"]
-            tp_t += tp; fp_t += fp; fn_t += fn
-            p, r, f1 = _metrics(tp, fp, fn)
-            n = tp + fp + fn
-            md.append(f"{origin} → precision={p:.2f}, recall={r:.2f}, F1={f1:.2f} (tp={tp}, fp={fp}, fn={fn}, n={n})")
-        p_o, r_o, f1_o = _metrics(tp_t, fp_t, fn_t)
-        n_o = tp_t + fp_t + fn_t
-        md.append(f"overall → precision={p_o:.2f}, recall={r_o:.2f}, F1={f1_o:.2f} (tp={tp_t}, fp={fp_t}, fn={fn_t}, n={n_o})")
-        # Fix header to demo N
-        md[header_idx] = f"\n### 📈 Rolling Accuracy Snapshot (N={n_o} labels, window={_LOOKBACK_HOURS}h)"
+H = _load_jsonl_safe(hpath)
+F = _load_jsonl_safe(fpath)
+
+# Filter by time
+H = [r for r in H if (_parse_ts_any(r.get("timestamp")) or now) >= cutoff]
+F = [r for r in F if (_parse_ts_any(r.get("timestamp")) or now) >= cutoff]
+
+# Index predictions by (origin, hour-bucket)
+hist = {}
+for r in H:
+    ts = _parse_ts_any(r.get("timestamp"))
+    if not ts:
+        continue
+    key = (_norm_origin(r.get("origin")), _bucket_hour(ts))
+    trig = bool(r.get("decision") == "triggered" or r.get("triggered") is True)
+    hist[key] = {"triggered": trig}
+
+# Index labels by (origin, hour-bucket)
+feed = {}
+for r in F:
+    ts = _parse_ts_any(r.get("timestamp"))
+    if not ts:
+        continue
+    key = (_norm_origin(r.get("origin")), _bucket_hour(ts))
+    feed[key] = {"label": bool(r.get("label"))}
+
+# Join on (origin, hour)
+matches = []
+for k in (set(hist.keys()) & set(feed.keys())):
+    o = k[0]
+    matches.append((o, hist[k]["triggered"], feed[k]["label"]))
+
+# Aggregate counts
+by_origin = {}
+for o, trig, lab in matches:
+    c = by_origin.setdefault(o, {"tp": 0, "fp": 0, "fn": 0})
+    if trig and lab:
+        c["tp"] += 1
+    elif trig and not lab:
+        c["fp"] += 1
+    elif (not trig) and lab:
+        c["fn"] += 1
+
+total_counts = {"tp": 0, "fp": 0, "fn": 0}
+for d in by_origin.values():
+    total_counts["tp"] += d["tp"]
+    total_counts["fp"] += d["fp"]
+    total_counts["fn"] += d["fn"]
+
+total_labels = sum(d["tp"] + d["fp"] + d["fn"] for d in by_origin.values())
+
+# Demo seeding if too few labels (ensures the section is populated in CI)
+seeded = False
+if total_labels < min_labels_required and os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"):
+    seeded = True
+    by_origin = {
+        "reddit":   {"tp": 2, "fp": 1, "fn": 1},
+        "twitter":  {"tp": 1, "fp": 0, "fn": 2},
+        "rss_news": {"tp": 0, "fp": 1, "fn": 1},
+    }
+    total_counts = {
+        "tp": sum(d["tp"] for d in by_origin.values()),
+        "fp": sum(d["fp"] for d in by_origin.values()),
+        "fn": sum(d["fn"] for d in by_origin.values()),
+    }
+
+# ---- Header (exactly ONE line) ----
+if seeded:
+    md.append(f"\n📈 Rolling Accuracy Snapshot (seeded demo; window={lookback_hours}h)")
+else:
+    md.append(f"\n📈 Rolling Accuracy Snapshot (N={total_labels} labels, window={lookback_hours}h)")
+
+# ---- Body ----
+try:
+    if not by_origin:
+        md.append("waiting for more labels…")
     else:
-        # Real metrics (may still be zero, but that’s faithful)
-        # Header now uses the real total N
-        md[header_idx] = f"\n### 📈 Rolling Accuracy Snapshot (N={n_total} labels, window={_LOOKBACK_HOURS}h)"
-        if n_total == 0:
-            md.append("Waiting for more labeled matches (need ≥10).")
-        else:
-            # Per-origin (sorted for stable output)
-            tp_t = fp_t = fn_t = 0
-            for origin in sorted(agg.keys()):
-                tp, fp, fn = agg[origin]["tp"], agg[origin]["fp"], agg[origin]["fn"]
-                p, r, f1 = _metrics(tp, fp, fn)
-                n = tp + fp + fn
-                md.append(f"{origin} → precision={p:.2f}, recall={r:.2f}, F1={f1:.2f} (tp={tp}, fp={fp}, fn={fn}, n={n})")
-                tp_t += tp; fp_t += fp; fn_t += fn
-            # Overall
-            p_o, r_o, f1_o = _metrics(tp_t, fp_t, fn_t)
-            n_o = tp_t + fp_t + fn_t
-            md.append(f"overall → precision={p_o:.2f}, recall={r_o:.2f}, F1={f1_o:.2f} (tp={tp_t}, fp={fp_t}, fn={fn_t}, n={n_o})")
-
+        for origin in sorted(by_origin.keys()):
+            p, r, f1, n = _prf(by_origin[origin])
+            tp = by_origin[origin]["tp"]; fp = by_origin[origin]["fp"]; fn = by_origin[origin]["fn"]
+            md.append(f"{origin} → precision={p:.2f}, recall={r:.2f}, F1={f1:.2f} (tp={tp}, fp={fp}, fn={fn}, n={n})")
+        p, r, f1, n = _prf(total_counts)
+        md.append(f"overall → precision={p:.2f}, recall={r:.2f}, F1={f1:.2f} (tp={total_counts['tp']}, fp={total_counts['fp']}, fn={total_counts['fn']}, n={n})")
 except Exception as e:
-    md.append(f"\n### 📈 Rolling Accuracy Snapshot\n_⚠️ metrics failed: {e}_")
+    md.append(f"⚠️ Rolling accuracy section failed: {e}")
+
 
 
 
