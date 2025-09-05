@@ -86,6 +86,9 @@ jobs:
           DEMO_RICH_SCORES: "true"
           TL_DRIFT_Z_THRESHOLD: "0.5"         # ⚡ lower threshold for demo sensitivity
           TL_DRIFT_PER_FEATURE_PENALTY: "0.1" # ⚡ bigger penalty so effect is visible
+          METRICS_MIN_LABELS: "5"
+          METRICS_LOOKBACK_HOURS: "72"
+          METRICS_MIN_LABELS_ORIGIN: "3"
         run: python scripts/mw_demo_summary.py
 
       - name: Show artifacts (debug)
