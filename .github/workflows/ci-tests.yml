@@ -72,6 +72,133 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+              # --- Build/refresh training_data.jsonl from logs (join history + feedback) ---
+      - name: Build training data from logs (join)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DEMO_MODE: "true"            # seed if logs are empty
+        run: |
+          python - <<'PY'
+          import os, json, random
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+
+          MODELS = Path("models"); MODELS.mkdir(exist_ok=True)
+          hist = MODELS / "trigger_history.jsonl"
+          fb   = MODELS / "label_feedback.jsonl"
+          out  = MODELS / "training_data.jsonl"
+
+          def load_jsonl(p):
+            if not p.exists(): return []
+            out = []
+            for ln in p.read_text().splitlines():
+              ln = ln.strip()
+              if not ln: continue
+              try:
+                out.append(json.loads(ln))
+              except Exception:
+                pass
+            return out
+
+          def parse_ts(s):
+            try:
+              # allow Z suffix
+              s = s[:-1] + "+00:00" if isinstance(s, str) and s.endswith("Z") else s
+              return datetime.fromisoformat(s).astimezone(timezone.utc)
+            except Exception:
+              return None
+
+          hist_rows = load_jsonl(hist)
+          fb_rows   = load_jsonl(fb)
+
+          # DEMO seeding if both logs are empty
+          if os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes") and not hist_rows and not fb_rows:
+            now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+            demo = [
+              # triggered true
+              {"timestamp": (now - timedelta(minutes=40)).isoformat(), "origin": "reddit",   "adjusted_score": 0.72, "threshold": 0.68, "decision": "triggered", "volatility_regime":"calm", "drifted_features":["burst_z"], "features":{"burst_z":1.5,"count_24h":10}},
+              {"timestamp": (now - timedelta(minutes=25)).isoformat(), "origin": "twitter",  "adjusted_score": 0.66, "threshold": 0.62, "decision": "triggered", "volatility_regime":"normal", "drifted_features":[], "features":{"burst_z":0.9,"count_24h":5}},
+              # not triggered
+              {"timestamp": (now - timedelta(minutes=15)).isoformat(), "origin": "rss_news", "adjusted_score": 0.41, "threshold": 0.50, "decision": "not_triggered", "volatility_regime":"turbulent", "drifted_features":[], "features":{"burst_z":0.2,"count_24h":2}},
+            ]
+            hist.write_text("\n".join(json.dumps(x) for x in demo) + "\n")
+            fb_demo = [
+              {"timestamp": (now - timedelta(minutes=39)).isoformat(), "origin":"reddit",   "adjusted_score":0.72, "label": True,  "reviewer":"demo"},
+              {"timestamp": (now - timedelta(minutes=24)).isoformat(), "origin":"twitter",  "adjusted_score":0.66, "label": True,  "reviewer":"demo"},
+              {"timestamp": (now - timedelta(minutes=14)).isoformat(), "origin":"rss_news", "adjusted_score":0.41, "label": False, "reviewer":"demo"},
+            ]
+            fb.write_text("\n".join(json.dumps(x) for x in fb_demo) + "\n")
+            hist_rows = demo; fb_rows = fb_demo
+
+          # build or extend training_data.jsonl by joining fb to nearest hist (±5min)
+          out_exists = out.exists()
+          out_fp = out.open("a")
+          try:
+            used = 0
+            for lab in fb_rows:
+              to = parse_ts(lab.get("timestamp"))
+              if not to: continue
+              o  = (lab.get("origin") or "unknown").strip().lower()
+              best = None; best_dt = None
+              for h in hist_rows:
+                if (h.get("origin") or "unknown").strip().lower() != o: continue
+                th = parse_ts(h.get("timestamp"))
+                if not th: continue
+                dt = abs((to - th).total_seconds())
+                if dt <= 300 and (best_dt is None or dt < best_dt):
+                  best, best_dt = h, dt
+              if not best: continue
+
+              # features: prefer structured feature bag if present
+              feats = best.get("features") or {}
+              if not isinstance(feats, dict) or not feats:
+                # cheap fallback – derive minimal features from known keys
+                feats = {}
+                for k in ("burst_z","count_1h","count_6h","count_24h","count_72h",
+                          "precision_7d","recall_7d","leadership_max_r"):
+                  v = best.get(k)
+                  if isinstance(v,(int,float)): feats[k]=float(v)
+
+              row = {
+                "timestamp": (to.replace(tzinfo=timezone.utc)).isoformat(),
+                "origin": o,
+                "features": feats,
+                "label": bool(lab.get("label", False)),
+              }
+              out_fp.write(json.dumps(row) + "\n")
+              used += 1
+          finally:
+            out_fp.close()
+
+          print(f"[build-training-data] wrote to {out} (appended matches)")
+          PY
+
+      # --- Retrain from training_data.jsonl (versioned v0.5.0) ---
+      - name: Retrain from training data (v0.5.0)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MODEL_VERSION: "v0.5.0"
+          TRAIN_LOG_PATH: "models/training_data.jsonl"
+          SAVE_MODEL_DIR: "models"
+        run: |
+          python -m src.ml.retrain_from_log --train-log "$TRAIN_LOG_PATH" --save-dir "$SAVE_MODEL_DIR" --version "$MODEL_VERSION" || true
+          echo "Retrained artifacts (if any):"
+          ls -lah models || true
+
+      # --- Upload retrained artifacts (optional) ---
+      - name: Upload retrained model artifacts (v0.5.0)
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigger-likelihood-v050
+          path: |
+            models/v0.5.0/**
+          if-no-files-found: warn
+          retention-days: 14
+
+
       # --- Demo summary & artifacts (read-only, post-tests) ---
       - name: Prep artifacts dir
         if: ${{ success() }}
