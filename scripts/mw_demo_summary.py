@@ -1779,52 +1779,51 @@ except Exception as e:
 
 
 
-# ---------- Retrain Summary (v0.5.0) ----------
-md.append("\n### 🧪 Retrain Summary")
+# ---------- retrain summary (v0.5.0) ----------
 try:
-    # Prefer the version specified; default to v0.5.0
-    import os, json
     from pathlib import Path
-    from src.paths import MODELS_DIR
+    import json, os
+
+    md.append("\n### 🧪 Retrain Summary")
 
     version = os.getenv("MODEL_VERSION", "v0.5.0")
-    vdir = MODELS_DIR / version
-    meta_path = vdir / "trigger_likelihood_v0.meta.json"
+    base = Path("models") / version
 
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        m = meta.get("metrics", {}) or {}
-        auc = m.get("roc_auc_va", m.get("roc_auc_tr"))
-        pr  = m.get("pr_auc_va",  m.get("pr_auc_tr"))
-        ll  = m.get("logloss_va", m.get("logloss_tr"))
-        rows = (meta.get("source") or {}).get("rows", None)
+    # Prefer the logistic meta, then RF/GB if needed
+    cands = [
+        base / "trigger_likelihood_v0.meta.json",
+        base / "trigger_likelihood_rf.meta.json",
+        base / "trigger_likelihood_gb.meta.json",
+    ]
+    metas = []
+    for p in cands:
+        if p.exists():
+            try:
+                metas.append(json.loads(p.read_text()))
+            except Exception:
+                pass
 
-        bits = []
-        if rows is not None:
-            bits.append(f"(from {rows} rows)")
-        md.append(f"\n- version: **{version}** " + (" ".join(bits) if bits else ""))
-
-        line = []
-        if auc is not None:
-            try: line.append(f"ROC-AUC={float(auc):.2f}")
-            except Exception: line.append(f"ROC-AUC={auc}")
-        if pr is not None:
-            try: line.append(f"PR-AUC={float(pr):.2f}")
-            except Exception: line.append(f"PR-AUC={pr}")
-        if ll is not None:
-            try: line.append(f"LogLoss={float(ll):.2f}")
-            except Exception: line.append(f"LogLoss={ll}")
-        if line:
-            md.append("- " + " | ".join(line))
-
-        # Top features (logistic)
-        tfeat = (meta.get("top_features") or [])[:3]
-        if tfeat:
-            pretty = ", ".join(f"{d['feature']}({d['coef']:+.2f})" for d in tfeat if "feature" in d)
-            md.append(f"- top features: {pretty}")
+    if not metas:
+        # Demo-friendly line when no retrain artifacts exist yet
+        md.append("(no retrained artifacts found; skipping)")
     else:
-        # Demo fallback if no versioned meta exists yet
-        md.append("\n_(no retrain meta found; if this is CI, ensure retrain step ran or DEMO_MODE seeded metrics)_")
+        # Print a compact summary from the first meta we found
+        m = metas[0]
+        mm = (m.get("metrics") or {})
+        auc = mm.get("roc_auc_va", mm.get("roc_auc_tr"))
+        pr  = mm.get("pr_auc_va",  mm.get("pr_auc_tr"))
+        ll  = mm.get("logloss_va", mm.get("logloss_tr"))
+        top_feats = [tf.get("feature") for tf in (m.get("top_features") or [])]
+
+        md.append(f"- Models: {', '.join(sorted(set(['logistic' if 'v0.meta' in str(cands[0]) else 'rf','gb'])))}")
+        bits = []
+        if isinstance(auc, (int, float)): bits.append(f"ROC-AUC={auc:.2f}")
+        if isinstance(pr,  (int, float)): bits.append(f"PR-AUC={pr:.2f}")
+        if isinstance(ll,  (int, float)): bits.append(f"LogLoss={ll:.2f}")
+        if bits:
+            md.append("  - " + " | ".join(bits))
+        if top_feats:
+            md.append("  - top features: " + ", ".join(top_feats[:5]))
 except Exception as e:
     md.append(f"\n⚠️ Retrain summary failed: {e}")
 
