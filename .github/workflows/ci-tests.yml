@@ -108,6 +108,17 @@ jobs:
         run: python -m src.ml.training_data
 
 
+      # .github/workflows/ci-tests.yml  (add after demo summary build step)
+      - name: Retrain from training_data.jsonl (v0.5.0)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MODEL_VERSION: "v0.5.0"
+          TRAIN_LOG_PATH: "${{ github.workspace }}/models/training_data.jsonl"
+        run: |
+          python -m src.ml.retrain_from_log
+          echo "Wrote versioned artifacts to models/${MODEL_VERSION}"
+
       - name: Publish CI summary
         if: ${{ success() }}
         run: |
