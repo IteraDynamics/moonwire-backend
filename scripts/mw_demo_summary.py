@@ -1779,6 +1779,55 @@ except Exception as e:
 
 
 
+# ---------- Retrain Summary (v0.5.0) ----------
+md.append("\n### 🧪 Retrain Summary")
+try:
+    # Prefer the version specified; default to v0.5.0
+    import os, json
+    from pathlib import Path
+    from src.paths import MODELS_DIR
+
+    version = os.getenv("MODEL_VERSION", "v0.5.0")
+    vdir = MODELS_DIR / version
+    meta_path = vdir / "trigger_likelihood_v0.meta.json"
+
+    if meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        m = meta.get("metrics", {}) or {}
+        auc = m.get("roc_auc_va", m.get("roc_auc_tr"))
+        pr  = m.get("pr_auc_va",  m.get("pr_auc_tr"))
+        ll  = m.get("logloss_va", m.get("logloss_tr"))
+        rows = (meta.get("source") or {}).get("rows", None)
+
+        bits = []
+        if rows is not None:
+            bits.append(f"(from {rows} rows)")
+        md.append(f"\n- version: **{version}** " + (" ".join(bits) if bits else ""))
+
+        line = []
+        if auc is not None:
+            try: line.append(f"ROC-AUC={float(auc):.2f}")
+            except Exception: line.append(f"ROC-AUC={auc}")
+        if pr is not None:
+            try: line.append(f"PR-AUC={float(pr):.2f}")
+            except Exception: line.append(f"PR-AUC={pr}")
+        if ll is not None:
+            try: line.append(f"LogLoss={float(ll):.2f}")
+            except Exception: line.append(f"LogLoss={ll}")
+        if line:
+            md.append("- " + " | ".join(line))
+
+        # Top features (logistic)
+        tfeat = (meta.get("top_features") or [])[:3]
+        if tfeat:
+            pretty = ", ".join(f"{d['feature']}({d['coef']:+.2f})" for d in tfeat if "feature" in d)
+            md.append(f"- top features: {pretty}")
+    else:
+        # Demo fallback if no versioned meta exists yet
+        md.append("\n_(no retrain meta found; if this is CI, ensure retrain step ran or DEMO_MODE seeded metrics)_")
+except Exception as e:
+    md.append(f"\n⚠️ Retrain summary failed: {e}")
+
 
 
 
