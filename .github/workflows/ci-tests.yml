@@ -100,6 +100,14 @@ jobs:
           ls -lah artifacts || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
 
+      - name: Collect training data (join triggers + feedback)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          TRAINING_JOIN_WINDOW_MIN: "5"
+        run: python -m src.ml.training_data
+
+
       - name: Publish CI summary
         if: ${{ success() }}
         run: |
