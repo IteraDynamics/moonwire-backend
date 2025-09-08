@@ -1779,85 +1779,38 @@ except Exception as e:
 
 
 
-# ---------- Retrain Summary (version-aware, CV/holdout, NaN-safe) ----------
-md.append("\n### 🧪 Retrain Summary")
 
+# --- Retrain Summary (v0.5.0) ---
 try:
-    import os, json
-    from pathlib import Path
-    from src.paths import MODELS_DIR
+    from src.ml.retrain_from_log import retrain_from_log
 
-    # Prefer versioned artifacts if present; otherwise fall back to top-level.
-    ver = os.getenv("MODEL_VERSION", "v0.5.0")
-    vdir = (MODELS_DIR / ver) if (MODELS_DIR / ver).exists() else MODELS_DIR
+    retrain_out = retrain_from_log()
+    n_rows = retrain_out.get("training_rows", 0)
+    low_sample = retrain_out.get("low_sample", False)
 
-    meta_paths = [
-        (vdir / "trigger_likelihood_v0.meta.json",  "logistic"),
-        (vdir / "trigger_likelihood_rf.meta.json",  "rf"),
-        (vdir / "trigger_likelihood_gb.meta.json",  "gb"),
-    ]
+    md.append(f"\n🧪 Retrain Summary (rows={n_rows})")
+    if low_sample:
+        md.append("⚠️ Warning: low-sample retrain (results may be unstable)")
 
-    models: list[tuple[str, dict]] = []
-    for p, name in meta_paths:
-        if p.exists():
-            try:
-                with p.open("r") as f:
-                    models.append((name, json.load(f)))
-            except Exception:
-                pass
+    md.append(f"• Models: {', '.join([k for k, v in retrain_out['metrics'].items() if v])}")
+    md.append(f"◦ created_at={retrain_out.get('created_at')}")
 
-    def _fmt(x):
-        try:
-            xf = float(x)
-            if xf != xf or xf in (float("inf"), float("-inf")):
-                return "n/a"
-            return f"{xf:.2f}"
-        except Exception:
-            # already a string like "n/a"
-            return str(x)
+    for model_name, metrics in retrain_out["metrics"].items():
+        if not metrics:
+            continue
+        md.append(
+            f"◦ {model_name}: ROC-AUC={metrics.get('roc_auc_va', 0):.2f} | "
+            f"PR-AUC={metrics.get('pr_auc_va', 0):.2f} | "
+            f"LogLoss={metrics.get('logloss_va', 0):.2f}"
+        )
 
-    if not models:
-        # Demo fallback so CI stays populated when no retrain has occurred yet.
-        md.append("\n_No retrain artifacts found; showing demo metrics._")
-        md.append("\n- **Models:** logistic, rf, gb")
-        md.append("  - logistic: ROC-AUC=0.84 | PR-AUC=0.72 | LogLoss=0.43")
-        md.append("  - rf:       ROC-AUC=0.80 | PR-AUC=0.68 | LogLoss=0.49")
-        md.append("  - gb:       ROC-AUC=0.82 | PR-AUC=0.70 | LogLoss=0.46")
-        md.append("  - top features: burst_z, leadership_max_r, count_24h")
-    else:
-        # Header line with discovered models
-        mdl_names = ", ".join(name for name, _ in models)
-        md.append(f"\n- **Models:** {mdl_names}")
-
-        # Try to show a version stamp (from any meta that has it)
-        version_hint = next((m.get("version") for _, m in models if isinstance(m, dict) and m.get("version")), None)
-        created_at_hint = next((m.get("created_at") for _, m in models if isinstance(m, dict) and m.get("created_at")), None)
-        if version_hint or created_at_hint:
-            parts = []
-            if version_hint: parts.append(f"version={version_hint}")
-            if created_at_hint: parts.append(f"created_at={created_at_hint}")
-            md.append("  - " + " • ".join(parts))
-
-        # Print per-model metrics (prefer CV, then VA, then TR)
-        for name, meta in models:
-            metrics = meta.get("metrics", {}) or {}
-
-            roc = metrics.get("roc_auc_cv") or metrics.get("roc_auc_va") or metrics.get("roc_auc_tr") or "n/a"
-            pr  = metrics.get("pr_auc_cv")  or metrics.get("pr_auc_va")  or metrics.get("pr_auc_tr")  or "n/a"
-            ll  = metrics.get("logloss_cv") or metrics.get("logloss_va") or metrics.get("logloss_tr") or "n/a"
-
-            md.append(f"  - {name}: ROC-AUC={_fmt(roc)} | PR-AUC={_fmt(pr)} | LogLoss={_fmt(ll)}")
-
-        # Show top features from logistic, if available
-        logi_meta = next((m for (n, m) in models if n == "logistic"), None)
-        if isinstance(logi_meta, dict):
-            tops = [t.get("feature") for t in (logi_meta.get("top_features") or []) if isinstance(t, dict)]
-            tops = [t for t in tops if t][:3]
-            if tops:
-                md.append(f"  - top features: {', '.join(tops)}")
+    top_feats = retrain_out.get("feature_order", [])[:3]
+    if top_feats:
+        md.append(f"◦ top features: {', '.join(top_feats)}")
 
 except Exception as e:
-    md.append(f"\n⚠️ Retrain summary failed: {e}")
+    md.append(f"⚠️ Retrain Summary failed: {e}")
+
 
 
 
