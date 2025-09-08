@@ -1780,37 +1780,96 @@ except Exception as e:
 
 
 
-# --- Retrain Summary (v0.5.0) ---
+# ---------- Retrain Summary (robust) ----------
+import os, json
+from pathlib import Path
+
+md.append("\n### 🧪 Retrain Summary")
+
 try:
-    from src.ml.retrain_from_log import retrain_from_log
+    MODELS_DIR = Path("models")
+    version = os.getenv("MODEL_VERSION", "v0.5.0")
+    version_dir = MODELS_DIR / version
 
-    retrain_out = retrain_from_log()
-    n_rows = retrain_out.get("training_rows", 0)
-    low_sample = retrain_out.get("low_sample", False)
+    # Count training rows for context
+    train_log = Path(os.getenv("TRAIN_LOG_PATH", MODELS_DIR / "training_data.jsonl"))
+    rows = 0
+    if train_log.exists():
+        try:
+            rows = sum(1 for ln in train_log.read_text().splitlines() if ln.strip())
+        except Exception:
+            rows = 0
+    md.append(f"_rows={rows}_")
 
-    md.append(f"\n🧪 Retrain Summary (rows={n_rows})")
-    if low_sample:
-        md.append("⚠️ Warning: low-sample retrain (results may be unstable)")
+    # Discover meta files if retrain produced artifacts
+    metas = []
+    def _load_meta(p: Path):
+        try:
+            with p.open("r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
 
-    md.append(f"• Models: {', '.join([k for k, v in retrain_out['metrics'].items() if v])}")
-    md.append(f"◦ created_at={retrain_out.get('created_at')}")
+    if version_dir.exists():
+        # Known meta filenames
+        for name, label in [
+            ("trigger_likelihood_v0.meta.json", "logistic"),
+            ("trigger_likelihood_rf.meta.json", "rf"),
+            ("trigger_likelihood_gb.meta.json", "gb"),
+        ]:
+            p = version_dir / name
+            if p.exists():
+                meta = _load_meta(p)
+                metas.append((label, meta))
 
-    for model_name, metrics in retrain_out["metrics"].items():
-        if not metrics:
-            continue
-        md.append(
-            f"◦ {model_name}: ROC-AUC={metrics.get('roc_auc_va', 0):.2f} | "
-            f"PR-AUC={metrics.get('pr_auc_va', 0):.2f} | "
-            f"LogLoss={metrics.get('logloss_va', 0):.2f}"
-        )
+    if not metas:
+        # No artifacts found → likely retrain skipped due to low sample
+        md.append("\n- _retrain skipped or no artifacts found_")
+    else:
+        models_list = ", ".join(lbl for lbl, _ in metas)
+        md.append(f"\n- **Models:** {models_list}")
 
-    top_feats = retrain_out.get("feature_order", [])[:3]
-    if top_feats:
-        md.append(f"◦ top features: {', '.join(top_feats)}")
+        # created_at (from first meta that has it)
+        created = None
+        for _, m in metas:
+            created = m.get("created_at")
+            if created:
+                break
+        if created:
+            md.append(f"\n  - created_at={created}")
+
+        # per-model metrics (defensive)
+        for lbl, m in metas:
+            met = m.get("metrics", {}) or {}
+            roc = met.get("roc_auc_va", met.get("roc_auc_tr", "n/a"))
+            pra = met.get("pr_auc_va",  met.get("pr_auc_tr",  "n/a"))
+            ll  = met.get("logloss_va", met.get("logloss_tr", "n/a"))
+
+            # Ensure floats format cleanly if they are numbers
+            def _fmt(x):
+                try:
+                    return f"{float(x):.2f}"
+                except Exception:
+                    return str(x)
+
+            md.append(
+                f"\n  - {lbl}: ROC-AUC={_fmt(roc)} | PR-AUC={_fmt(pra)} | LogLoss={_fmt(ll)}"
+            )
+
+        # Top features if present (logistic only usually)
+        top_feats = None
+        for lbl, m in metas:
+            if lbl == "logistic":
+                tf = m.get("top_features")
+                if isinstance(tf, list) and tf:
+                    # take feature names only
+                    top_feats = [str(d.get("feature")) for d in tf if isinstance(d, dict) and d.get("feature")]
+                    break
+        if top_feats:
+            md.append(f"\n  - top features: {', '.join(top_feats[:3])}")
 
 except Exception as e:
-    md.append(f"⚠️ Retrain Summary failed: {e}")
-
+    md.append(f"\n⚠️ Retrain Summary failed: {e}")
 
 
 
