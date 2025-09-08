@@ -165,7 +165,7 @@ jobs:
           MODEL_VERSION: "v0.5.0"
           TRAIN_LOG_PATH: "models/training_data.jsonl"
           SAVE_MODEL_DIR: "models"
-          MODEL_RETRAIN_MIN_ROWS: "10"   # ⬅ low-sample guard
+          MODEL_RETRAIN_MIN_ROWS: "1"   # ⬅ low-sample guard
         run: |
           python -m src.ml.retrain_from_log --train-log "$TRAIN_LOG_PATH" --save-dir "$SAVE_MODEL_DIR" --version "$MODEL_VERSION"
           echo "Retrained artifacts (if any):"
