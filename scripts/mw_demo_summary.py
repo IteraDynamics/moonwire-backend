@@ -1866,6 +1866,53 @@ except Exception as e:
 
 
 
+# ---------- Latest Training Metadata Snapshot ----------
+try:
+    from src.ml.training_metadata import load_latest_training_metadata
+    mt = load_latest_training_metadata(allow_demo_seed=True)
+
+    md.append("\n### 📦 Latest Training Metadata")
+    if not mt:
+        md.append("_No training runs recorded yet._")
+    else:
+        ver = mt.get("version", "unknown")
+        rows = mt.get("rows", 0)
+        lbl = mt.get("label_counts", {})
+        pos = int(lbl.get("true", 0) or 0)
+        neg = int(lbl.get("false", 0) or 0)
+
+        oc = mt.get("origin_counts", {}) or {}
+        oc_pairs = ", ".join(f"{k}={v}" for k, v in sorted(oc.items()))
+        topf = mt.get("top_features", []) or []
+
+        md.append(f"- version: **{ver}**")
+        md.append(f"- rows: **{rows}**  (true={pos} | false={neg})")
+        if oc_pairs:
+            md.append(f"- by origin: {oc_pairs}")
+        if topf:
+            md.append(f"- top features: {', '.join(topf[:5])}")
+
+        m = mt.get("metrics", {}) or {}
+        if m:
+            md.append("- metrics:")
+            # One line per model
+            for name, mm in m.items():
+                try:
+                    ra = float(mm.get("roc_auc", 0.0))
+                    pr = float(mm.get("pr_auc", 0.0))
+                    ll = float(mm.get("logloss", 0.0))
+                    md.append(f"  - {name}: ROC-AUC={ra:.2f} | PR-AUC={pr:.2f} | LogLoss={ll:.2f}")
+                except Exception:
+                    md.append(f"  - {name}: {mm}")
+except Exception as e:
+    md.append(f"\n⚠️ Latest Training Metadata failed: {e}")
+
+
+
+
+
+
+
 # --- Calibration Metrics Summary ---
 
 meta = model_metadata()
