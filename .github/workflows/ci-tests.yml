@@ -49,17 +49,6 @@ jobs:
           test -f models/trigger_likelihood_v0.joblib    || (echo "missing logistic model" && exit 1)
           test -f models/trigger_likelihood_v0.meta.json || (echo "missing logistic meta"  && exit 1)
 
-      # OPTIONAL: compute per-origin thresholds (commented out for simplicity)
-      # - name: Compute per-origin thresholds
-      #   if: ${{ success() }}
-      #   env:
-      #     PYTHONPATH: ${{ github.workspace }}
-      #     DEMO_MODE: "true"
-      #   run: |
-      #     python -c "from src.ml.thresholds import fit_and_write_thresholds; fit_and_write_thresholds(days=7, interval='hour'); print('Wrote models/per_origin_thresholds.json')"
-      #     ls -lah models || true
-      #     test -f models/per_origin_thresholds.json || true
-
       # Upload logistic artifacts (only)
       - name: Upload logistic model artifacts
         if: ${{ success() }}
@@ -72,15 +61,15 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-              # --- Build/refresh training_data.jsonl from logs (join history + feedback) ---
+      # --- Build/refresh training_data.jsonl from logs (join history + feedback) ---
       - name: Build training data from logs (join)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"            # seed if logs are empty
+          DEMO_MODE: "true"            # seed if logs are empty in CI
         run: |
           python - <<'PY'
-          import os, json, random
+          import os, json
           from datetime import datetime, timezone, timedelta
           from pathlib import Path
 
@@ -103,7 +92,6 @@ jobs:
 
           def parse_ts(s):
             try:
-              # allow Z suffix
               s = s[:-1] + "+00:00" if isinstance(s, str) and s.endswith("Z") else s
               return datetime.fromisoformat(s).astimezone(timezone.utc)
             except Exception:
@@ -115,24 +103,21 @@ jobs:
           # DEMO seeding if both logs are empty
           if os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes") and not hist_rows and not fb_rows:
             now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-            demo = [
-              # triggered true
-              {"timestamp": (now - timedelta(minutes=40)).isoformat(), "origin": "reddit",   "adjusted_score": 0.72, "threshold": 0.68, "decision": "triggered", "volatility_regime":"calm", "drifted_features":["burst_z"], "features":{"burst_z":1.5,"count_24h":10}},
-              {"timestamp": (now - timedelta(minutes=25)).isoformat(), "origin": "twitter",  "adjusted_score": 0.66, "threshold": 0.62, "decision": "triggered", "volatility_regime":"normal", "drifted_features":[], "features":{"burst_z":0.9,"count_24h":5}},
-              # not triggered
-              {"timestamp": (now - timedelta(minutes=15)).isoformat(), "origin": "rss_news", "adjusted_score": 0.41, "threshold": 0.50, "decision": "not_triggered", "volatility_regime":"turbulent", "drifted_features":[], "features":{"burst_z":0.2,"count_24h":2}},
+            demo_hist = [
+              {"timestamp": (now - timedelta(minutes=40)).isoformat(), "origin": "reddit",   "adjusted_score": 0.72, "threshold": 0.68, "decision": "triggered",     "volatility_regime":"calm",     "drifted_features":["burst_z"], "features":{"burst_z":1.5,"count_24h":10}},
+              {"timestamp": (now - timedelta(minutes=25)).isoformat(), "origin": "twitter",  "adjusted_score": 0.66, "threshold": 0.62, "decision": "triggered",     "volatility_regime":"normal",   "drifted_features":[],          "features":{"burst_z":0.9,"count_24h":5}},
+              {"timestamp": (now - timedelta(minutes=15)).isoformat(), "origin": "rss_news", "adjusted_score": 0.41, "threshold": 0.50, "decision": "not_triggered", "volatility_regime":"turbulent","drifted_features":[],          "features":{"burst_z":0.2,"count_24h":2}},
             ]
-            hist.write_text("\n".join(json.dumps(x) for x in demo) + "\n")
-            fb_demo = [
+            demo_fb = [
               {"timestamp": (now - timedelta(minutes=39)).isoformat(), "origin":"reddit",   "adjusted_score":0.72, "label": True,  "reviewer":"demo"},
               {"timestamp": (now - timedelta(minutes=24)).isoformat(), "origin":"twitter",  "adjusted_score":0.66, "label": True,  "reviewer":"demo"},
               {"timestamp": (now - timedelta(minutes=14)).isoformat(), "origin":"rss_news", "adjusted_score":0.41, "label": False, "reviewer":"demo"},
             ]
-            fb.write_text("\n".join(json.dumps(x) for x in fb_demo) + "\n")
-            hist_rows = demo; fb_rows = fb_demo
+            hist.write_text("\n".join(json.dumps(x) for x in demo_hist) + "\n")
+            fb.write_text("\n".join(json.dumps(x) for x in demo_fb) + "\n")
+            hist_rows = demo_hist; fb_rows = demo_fb
 
-          # build or extend training_data.jsonl by joining fb to nearest hist (±5min)
-          out_exists = out.exists()
+          # build/append training_data.jsonl by joining fb to nearest hist (±5min)
           out_fp = out.open("a")
           try:
             used = 0
@@ -150,10 +135,8 @@ jobs:
                   best, best_dt = h, dt
               if not best: continue
 
-              # features: prefer structured feature bag if present
               feats = best.get("features") or {}
               if not isinstance(feats, dict) or not feats:
-                # cheap fallback – derive minimal features from known keys
                 feats = {}
                 for k in ("burst_z","count_1h","count_6h","count_24h","count_72h",
                           "precision_7d","recall_7d","leadership_max_r"):
@@ -161,7 +144,7 @@ jobs:
                   if isinstance(v,(int,float)): feats[k]=float(v)
 
               row = {
-                "timestamp": (to.replace(tzinfo=timezone.utc)).isoformat(),
+                "timestamp": to.isoformat(),
                 "origin": o,
                 "features": feats,
                 "label": bool(lab.get("label", False)),
@@ -182,8 +165,9 @@ jobs:
           MODEL_VERSION: "v0.5.0"
           TRAIN_LOG_PATH: "models/training_data.jsonl"
           SAVE_MODEL_DIR: "models"
+          MODEL_RETRAIN_MIN_ROWS: "1"   # ⬅ low-sample guard
         run: |
-          python -m src.ml.retrain_from_log --train-log "$TRAIN_LOG_PATH" --save-dir "$SAVE_MODEL_DIR" --version "$MODEL_VERSION" || true
+          python -m src.ml.retrain_from_log --train-log "$TRAIN_LOG_PATH" --save-dir "$SAVE_MODEL_DIR" --version "$MODEL_VERSION"
           echo "Retrained artifacts (if any):"
           ls -lah models || true
 
@@ -198,7 +182,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-
       # --- Demo summary & artifacts (read-only, post-tests) ---
       - name: Prep artifacts dir
         if: ${{ success() }}
@@ -211,8 +194,8 @@ jobs:
           DEMO_MODE: "true"
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
-          TL_DRIFT_Z_THRESHOLD: "0.5"         # ⚡ lower threshold for demo sensitivity
-          TL_DRIFT_PER_FEATURE_PENALTY: "0.1" # ⚡ bigger penalty so effect is visible
+          TL_DRIFT_Z_THRESHOLD: "0.5"         # demo sensitivity
+          TL_DRIFT_PER_FEATURE_PENALTY: "0.1" # demo visibility
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
@@ -226,25 +209,6 @@ jobs:
           echo "Artifacts in ./artifacts:"
           ls -lah artifacts || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
-
-      - name: Collect training data (join triggers + feedback)
-        if: ${{ success() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          TRAINING_JOIN_WINDOW_MIN: "5"
-        run: python -m src.ml.training_data
-
-
-      # .github/workflows/ci-tests.yml  (add after demo summary build step)
-      - name: Retrain from training_data.jsonl (v0.5.0)
-        if: ${{ success() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          MODEL_VERSION: "v0.5.0"
-          TRAIN_LOG_PATH: "${{ github.workspace }}/models/training_data.jsonl"
-        run: |
-          python -m src.ml.retrain_from_log
-          echo "Wrote versioned artifacts to models/${MODEL_VERSION}"
 
       - name: Publish CI summary
         if: ${{ success() }}

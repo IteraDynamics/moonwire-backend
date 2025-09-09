@@ -1779,85 +1779,90 @@ except Exception as e:
 
 
 
-# ---------- Retrain Summary (version-aware, CV/holdout, NaN-safe) ----------
+
+# ---------- Retrain Summary (from versioned artifacts) ----------
 md.append("\n### 🧪 Retrain Summary")
 
 try:
     import os, json
     from pathlib import Path
-    from src.paths import MODELS_DIR
 
-    # Prefer versioned artifacts if present; otherwise fall back to top-level.
-    ver = os.getenv("MODEL_VERSION", "v0.5.0")
-    vdir = (MODELS_DIR / ver) if (MODELS_DIR / ver).exists() else MODELS_DIR
+    version = os.getenv("MODEL_VERSION", "v0.5.0")
+    vdir = Path("models") / version
 
-    meta_paths = [
-        (vdir / "trigger_likelihood_v0.meta.json",  "logistic"),
-        (vdir / "trigger_likelihood_rf.meta.json",  "rf"),
-        (vdir / "trigger_likelihood_gb.meta.json",  "gb"),
-    ]
-
-    models: list[tuple[str, dict]] = []
-    for p, name in meta_paths:
-        if p.exists():
-            try:
-                with p.open("r") as f:
-                    models.append((name, json.load(f)))
-            except Exception:
-                pass
-
-    def _fmt(x):
+    # Count rows in training_data.jsonl if present
+    td_path = Path("models") / "training_data.jsonl"
+    rows_cnt = 0
+    if td_path.exists():
         try:
-            xf = float(x)
-            if xf != xf or xf in (float("inf"), float("-inf")):
-                return "n/a"
-            return f"{xf:.2f}"
+            rows_cnt = sum(1 for _ in td_path.open("r"))
         except Exception:
-            # already a string like "n/a"
-            return str(x)
+            rows_cnt = 0
+    md.append(f"rows={rows_cnt}")
 
-    if not models:
-        # Demo fallback so CI stays populated when no retrain has occurred yet.
-        md.append("\n_No retrain artifacts found; showing demo metrics._")
-        md.append("\n- **Models:** logistic, rf, gb")
-        md.append("  - logistic: ROC-AUC=0.84 | PR-AUC=0.72 | LogLoss=0.43")
-        md.append("  - rf:       ROC-AUC=0.80 | PR-AUC=0.68 | LogLoss=0.49")
-        md.append("  - gb:       ROC-AUC=0.82 | PR-AUC=0.70 | LogLoss=0.46")
-        md.append("  - top features: burst_z, leadership_max_r, count_24h")
+    if not vdir.exists():
+        md.append("\t- retrain skipped or no artifacts found")
     else:
-        # Header line with discovered models
-        mdl_names = ", ".join(name for name, _ in models)
-        md.append(f"\n- **Models:** {mdl_names}")
+        # Load metas if present
+        metas = []
+        for name, fname in [
+            ("logistic", "trigger_likelihood_v0.meta.json"),
+            ("rf",       "trigger_likelihood_rf.meta.json"),
+            ("gb",       "trigger_likelihood_gb.meta.json"),
+        ]:
+            j = vdir / fname
+            if j.exists():
+                try:
+                    with j.open("r") as f:
+                        metas.append((name, json.load(f)))
+                except Exception:
+                    pass
 
-        # Try to show a version stamp (from any meta that has it)
-        version_hint = next((m.get("version") for _, m in models if isinstance(m, dict) and m.get("version")), None)
-        created_at_hint = next((m.get("created_at") for _, m in models if isinstance(m, dict) and m.get("created_at")), None)
-        if version_hint or created_at_hint:
-            parts = []
-            if version_hint: parts.append(f"version={version_hint}")
-            if created_at_hint: parts.append(f"created_at={created_at_hint}")
-            md.append("  - " + " • ".join(parts))
+        if not metas:
+            md.append("\t- retrain skipped or no artifacts found")
+        else:
+            model_names = ", ".join(n for n, _ in metas)
+            md.append(f"\t- Models: {model_names}")
 
-        # Print per-model metrics (prefer CV, then VA, then TR)
-        for name, meta in models:
-            metrics = meta.get("metrics", {}) or {}
+            # show created_at once (from first model)
+            created = (metas[0][1] or {}).get("created_at")
+            if created:
+                md.append(f"\t- created_at={created}")
 
-            roc = metrics.get("roc_auc_cv") or metrics.get("roc_auc_va") or metrics.get("roc_auc_tr") or "n/a"
-            pr  = metrics.get("pr_auc_cv")  or metrics.get("pr_auc_va")  or metrics.get("pr_auc_tr")  or "n/a"
-            ll  = metrics.get("logloss_cv") or metrics.get("logloss_va") or metrics.get("logloss_tr") or "n/a"
+            # detail lines
+            for name, meta in metas:
+                m = (meta or {}).get("metrics") or {}
+                auc = m.get("roc_auc_va")
+                pr  = m.get("pr_auc_va")
+                ll  = m.get("logloss_va")
 
-            md.append(f"  - {name}: ROC-AUC={_fmt(roc)} | PR-AUC={_fmt(pr)} | LogLoss={_fmt(ll)}")
+                def _fmt(x):
+                    if x is None: return "n/a"
+                    try: return f"{float(x):.2f}"
+                    except Exception: return str(x)
 
-        # Show top features from logistic, if available
-        logi_meta = next((m for (n, m) in models if n == "logistic"), None)
-        if isinstance(logi_meta, dict):
-            tops = [t.get("feature") for t in (logi_meta.get("top_features") or []) if isinstance(t, dict)]
-            tops = [t for t in tops if t][:3]
-            if tops:
-                md.append(f"  - top features: {', '.join(tops)}")
+                md.append(f"\t- {name}: ROC-AUC={_fmt(auc)} | PR-AUC={_fmt(pr)} | LogLoss={_fmt(ll)}")
+
+                # class balance (if saved by retrainer)
+                cb = (meta or {}).get("class_balance") or {}
+                if isinstance(cb, dict) and (cb.get(0) is not None or cb.get(1) is not None):
+                    pos = int(cb.get(1, 0)); neg = int(cb.get(0, 0))
+                    md.append(f"\t  - labels: pos={pos}, neg={neg}")
+                    if auc is None or pr is None:
+                        md.append("\t  - ⚠️ insufficient label diversity for AUC (need both classes)")
+
+            # top features (logistic only)
+            try:
+                tf = (metas[0][1] or {}).get("top_features") or []
+            except Exception:
+                tf = []
+            if tf:
+                tops = ", ".join(t.get("feature","?") for t in tf[:3])
+                md.append(f"\t- top features: {tops}")
 
 except Exception as e:
-    md.append(f"\n⚠️ Retrain summary failed: {e}")
+    md.append(f"⚠️ Retrain Summary failed: {e}")
+
 
 
 
