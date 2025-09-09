@@ -1866,47 +1866,55 @@ except Exception as e:
 
 
 
-# ---------- Latest Training Metadata Snapshot ----------
+# 📦 Latest Training Metadata
+md.append("\n📦 Latest Training Metadata")
+
 try:
-    from src.ml.training_metadata import load_latest_training_metadata
-    mt = load_latest_training_metadata(allow_demo_seed=True)
-
-    md.append("\n### 📦 Latest Training Metadata")
-    if not mt:
-        md.append("_No training runs recorded yet._")
-    else:
-        ver = mt.get("version", "unknown")
-        rows = mt.get("rows", 0)
-        lbl = mt.get("label_counts", {})
-        pos = int(lbl.get("true", 0) or 0)
-        neg = int(lbl.get("false", 0) or 0)
-
-        oc = mt.get("origin_counts", {}) or {}
-        oc_pairs = ", ".join(f"{k}={v}" for k, v in sorted(oc.items()))
-        topf = mt.get("top_features", []) or []
-
-        md.append(f"- version: **{ver}**")
-        md.append(f"- rows: **{rows}**  (true={pos} | false={neg})")
-        if oc_pairs:
-            md.append(f"- by origin: {oc_pairs}")
-        if topf:
-            md.append(f"- top features: {', '.join(topf[:5])}")
-
-        m = mt.get("metrics", {}) or {}
-        if m:
-            md.append("- metrics:")
-            # One line per model
-            for name, mm in m.items():
-                try:
-                    ra = float(mm.get("roc_auc", 0.0))
-                    pr = float(mm.get("pr_auc", 0.0))
-                    ll = float(mm.get("logloss", 0.0))
-                    md.append(f"  - {name}: ROC-AUC={ra:.2f} | PR-AUC={pr:.2f} | LogLoss={ll:.2f}")
-                except Exception:
-                    md.append(f"  - {name}: {mm}")
+    from src.ml import training_metadata
+    latest = training_metadata.load_latest_training_metadata()
 except Exception as e:
-    md.append(f"\n⚠️ Latest Training Metadata failed: {e}")
+    latest = None
+    md.append(f"⚠️ Failed to load training metadata: {e}")
 
+if latest:
+    version = latest.get("version", "n/a")
+    rows = latest.get("rows", 0)
+    label_counts = latest.get("label_counts", {})
+    true_count = label_counts.get("true", 0)
+    false_count = label_counts.get("false", 0)
+    origin_counts = latest.get("origin_counts", {})
+    top_feats = latest.get("top_features", [])
+
+    md.append(f"version: {version}")
+    md.append(f"rows: {rows} (true={true_count} | false={false_count})")
+
+    if origin_counts:
+        breakdown = ", ".join(f"{k}={v}" for k, v in origin_counts.items())
+        md.append(f"by origin: {breakdown}")
+
+    if top_feats:
+        md.append(f"top features: {', '.join(top_feats)}")
+
+    # --- safe metrics formatting ---
+    from math import isnan
+
+    def _fmt(v):
+        try:
+            return "n/a" if v is None or (isinstance(v, float) and isnan(v)) else f"{v:.2f}"
+        except Exception:
+            return "n/a"
+
+    metrics = latest.get("metrics", {})
+    if metrics:
+        md.append("metrics:")
+        for model, m in metrics.items():
+            md.append(
+                f"{model}: ROC-AUC={_fmt(m.get('roc_auc'))} | "
+                f"PR-AUC={_fmt(m.get('pr_auc'))} | "
+                f"LogLoss={_fmt(m.get('logloss'))}"
+            )
+else:
+    md.append("No training metadata available (yet).")
 
 
 
