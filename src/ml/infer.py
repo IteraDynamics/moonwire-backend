@@ -21,8 +21,31 @@ _RF_META    = "trigger_likelihood_rf.meta.json"
 
 _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
-_TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
 
+# Trigger history path (env overrideable)
+def _resolve_trigger_log_path() -> Path:
+    envp = os.getenv("TRIGGER_LOG_PATH")
+    return Path(envp) if envp else (MODELS_DIR / "trigger_history.jsonl")
+
+_TRIGGER_LOG_PATH = _resolve_trigger_log_path()
+
+# Version file path
+_VERSION_FILE = MODELS_DIR / "training_version.txt"
+
+
+# ---------- helpers ----------
+def _read_model_version() -> str:
+    """
+    Read current training/model version from models/training_version.txt.
+    Fallback to 'unknown' if missing/unreadable.
+    """
+    try:
+        if _VERSION_FILE.exists():
+            txt = _VERSION_FILE.read_text().strip()
+            return txt or "unknown"
+    except Exception:
+        pass
+    return "unknown"
 
 
 # ---------- loaders ----------
@@ -97,26 +120,32 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
         return {}
 
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
+    version = _read_model_version()
     try:
         model, meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
     except Exception:
         if payload.get("features"):
             bz = float(payload["features"].get("burst_z", 0.0))
             p = 1 / (1 + np.exp(-0.1 * bz))
-            res = {"prob_trigger_next_6h": float(p), "demo": True}
+            res = {"prob_trigger_next_6h": float(p), "demo": True, "model_version": version}
             if explain:
                 res["contributions"] = {"burst_z": 0.1 * bz}
             return res
-        return {"prob_trigger_next_6h": 0.062, "demo": True}
+        return {"prob_trigger_next_6h": 0.062, "demo": True, "model_version": version}
 
     feats = payload.get("features")
     if feats is None:
-        return {"prob_trigger_next_6h": 0.062, "note": "origin path not wired", "demo": meta.get("demo", False)}
+        return {
+            "prob_trigger_next_6h": 0.062,
+            "note": "origin path not wired",
+            "demo": meta.get("demo", False),
+            "model_version": version,
+        }
 
     feat_order = meta.get("feature_order") or []
     x = _vectorize(feats, feat_order)
     proba = float(model.predict_proba(x)[0, 1])
-    out = {"prob_trigger_next_6h": proba}
+    out = {"prob_trigger_next_6h": proba, "model_version": version}
     if explain:
         out["contributions"] = _contributions_linear(model, x, feat_order, top_n=top_n)
     return out
@@ -125,8 +154,9 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
     Ensemble scoring over available models (logistic + random forest + gb).
-    Returns dict with mean prob, band, votes, etc.
+    Returns dict with mean prob, band, votes, etc., plus model_version.
     """
+    version = _read_model_version()
     votes: Dict[str, float] = {}
     demo = False
     feats = payload.get("features") or {}
@@ -166,32 +196,50 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
-    return {
+    out: Dict[str, Any] = {
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
         "votes": votes,
         "models": list(votes.keys()),
         "demo": demo,
+        "model_version": version,
     }
 
-        # --- Append to trigger history log ---
+    # --- Append to trigger history log (version-tagged) ---
+    # We log the best info we have; if the caller later adds an explanation/threshold,
+    # that gets logged elsewhere (e.g., via API or subsequent pass). This is a minimal,
+    # safe history record so we don't lose events.
     try:
+        # Ensure parent dir exists
+        _TRIGGER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # Allow upstream to pass decision/meta in payload (non-breaking)
+        explanation = (payload or {}).get("explanation") or {}
+        decision = explanation.get("decision") or ("triggered" if mean >= 0.5 else "not_triggered")
+        threshold_used = explanation.get("threshold_after_volatility")
+        drifted = explanation.get("drifted_features", [])
+        top_contribs = explanation.get("top_contributors", [])
+        regime = explanation.get("volatility_regime")
+
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "origin": payload.get("origin", "unknown"),
-            "adjusted_score": out.get("explanation", {}).get("adjusted_score", out["prob_trigger_next_6h"]),
-            "threshold": out.get("explanation", {}).get("threshold_after_volatility", None),
-            "decision": out.get("explanation", {}).get("decision", "unknown"),
-            "volatility_regime": out.get("explanation", {}).get("volatility_regime", None),
-            "drifted_features": out.get("explanation", {}).get("drifted_features", []),
-            "top_contributors": out.get("explanation", {}).get("top_contributors", []),
+            "origin": (payload.get("origin") or "unknown") if isinstance(payload, dict) else "unknown",
+            "adjusted_score": float(explanation.get("adjusted_score", mean)),
+            "threshold": threshold_used,
+            "decision": str(decision),
+            "volatility_regime": regime,
+            "drifted_features": drifted if isinstance(drifted, list) else [],
+            "top_contributors": top_contribs if isinstance(top_contribs, list) else [],
+            "model_version": version,
         }
         with _TRIGGER_LOG_PATH.open("a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:
+        # Never break inference due to logging problems
         pass
 
+    return out
 
 
 # ---------- Volatility-aware thresholds ----------
@@ -223,8 +271,11 @@ def score(payload: dict, explain: bool = False):
     return infer_score(payload, explain=explain)
 
 __all__ = [
-    "infer_score", "infer_score_ensemble", "score",
-    "model_metadata", "model_metadata_all",
+    "infer_score",
+    "infer_score_ensemble",
+    "score",
+    "model_metadata",
+    "model_metadata_all",
     "compute_volatility_adjusted_threshold",
 ]
 
