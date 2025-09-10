@@ -24,6 +24,25 @@ _GB_META    = "trigger_likelihood_gb.meta.json"
 _TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
 
 
+def _model_version_from_meta(meta: Dict[str, Any]) -> str:
+    return str(
+        meta.get("git_sha")
+        or meta.get("model_version")
+        or meta.get("created_at")
+        or "unknown"
+    )
+
+
+def _append_trigger_history(entry: Dict[str, Any]) -> None:
+    try:
+        _TRIGGER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _TRIGGER_LOG_PATH.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        # Never break inference if logging fails
+        pass
+
+
 
 # ---------- loaders ----------
 def _artifact_paths(model_name: str, meta_name: str, models_dir: Path | None = None) -> Tuple[Path, Path]:
@@ -117,8 +136,36 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
     x = _vectorize(feats, feat_order)
     proba = float(model.predict_proba(x)[0, 1])
     out = {"prob_trigger_next_6h": proba}
+    top_contrib: List[Dict[str, float]] = []
     if explain:
-        out["contributions"] = _contributions_linear(model, x, feat_order, top_n=top_n)
+        contrib = _contributions_linear(model, x, feat_order, top_n=top_n)
+        out["contributions"] = contrib
+        top_contrib = [{"feature": k, "contribution": v} for k, v in contrib.items()]
+
+    threshold = payload.get("threshold")
+    decision = payload.get("decision")
+    if threshold is None:
+        try:
+            threshold = float(os.getenv("TL_STATIC_PROBA_THR", "0.5"))
+        except Exception:
+            threshold = None
+    if decision is None and threshold is not None:
+        decision = "triggered" if proba >= float(threshold) else "not_triggered"
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "origin": payload.get("origin", "unknown"),
+        "adjusted_score": proba,
+        "threshold": threshold,
+        "decision": decision or "unknown",
+        "volatility_regime": payload.get("volatility_regime"),
+        "drifted_features": payload.get("drifted_features") or [],
+        "top_contributors": top_contrib,
+        "model_version": _model_version_from_meta(meta),
+        "features": feats,
+    }
+    _append_trigger_history(entry)
+
     return out
 
 
@@ -130,12 +177,14 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     votes: Dict[str, float] = {}
     demo = False
     feats = payload.get("features") or {}
+    model_version = "unknown"
 
     # logistic
     try:
         L_model, L_meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
         order = L_meta.get("feature_order") or []
         votes["logistic"] = float(L_model.predict_proba(_vectorize(feats, order))[0, 1])
+        model_version = _model_version_from_meta(L_meta)
     except Exception:
         pass
 
@@ -166,7 +215,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
-    return {
+    out = {
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
@@ -175,22 +224,31 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         "demo": demo,
     }
 
-        # --- Append to trigger history log ---
-    try:
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "origin": payload.get("origin", "unknown"),
-            "adjusted_score": out.get("explanation", {}).get("adjusted_score", out["prob_trigger_next_6h"]),
-            "threshold": out.get("explanation", {}).get("threshold_after_volatility", None),
-            "decision": out.get("explanation", {}).get("decision", "unknown"),
-            "volatility_regime": out.get("explanation", {}).get("volatility_regime", None),
-            "drifted_features": out.get("explanation", {}).get("drifted_features", []),
-            "top_contributors": out.get("explanation", {}).get("top_contributors", []),
-        }
-        with _TRIGGER_LOG_PATH.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
+    threshold = payload.get("threshold")
+    decision = payload.get("decision")
+    if threshold is None:
+        try:
+            threshold = float(os.getenv("TL_STATIC_PROBA_THR", "0.5"))
+        except Exception:
+            threshold = None
+    if decision is None and threshold is not None:
+        decision = "triggered" if mean >= float(threshold) else "not_triggered"
+
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "origin": payload.get("origin", "unknown"),
+        "adjusted_score": mean,
+        "threshold": threshold,
+        "decision": decision or "unknown",
+        "volatility_regime": payload.get("volatility_regime"),
+        "drifted_features": payload.get("drifted_features") or [],
+        "top_contributors": [],
+        "model_version": model_version,
+        "features": feats,
+    }
+    _append_trigger_history(entry)
+
+    return out
 
 
 
