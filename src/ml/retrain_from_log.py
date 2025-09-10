@@ -271,6 +271,14 @@ def retrain_from_log(
         except Exception:
             pass
 
+    # Record the training version for inference to reference later
+    try:
+        ver_file = out_root / "training_version.txt"
+        ver_file.parent.mkdir(parents=True, exist_ok=True)
+        ver_file.write_text(ver, encoding="utf-8")
+    except Exception:
+        pass
+
     # ---- compact summary (returned) ----
     summary = {
         "version": ver,

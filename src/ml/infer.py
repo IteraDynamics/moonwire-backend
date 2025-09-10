@@ -48,6 +48,14 @@ def _load_cov(models_dir: Path | None = None) -> Dict[str, Any]:
         return {}
 
 
+def _read_model_version(models_dir: Path | None = None) -> str:
+    path = (models_dir or MODELS_DIR) / "training_version.txt"
+    try:
+        return path.read_text(encoding="utf-8").strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 # ---------- public metadata helpers ----------
 def model_metadata(models_dir: Path | None = None) -> Dict[str, Any]:
     """Logistic metadata (+ coverage merged) for back-compat."""
@@ -165,8 +173,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     mean = float(np.mean(probs))
     low = float(min(probs))
     high = float(max(probs))
-
-    return {
+    out = {
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
@@ -175,7 +182,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         "demo": demo,
     }
 
-        # --- Append to trigger history log ---
+    # --- Append to trigger history log ---
     try:
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -186,11 +193,14 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
             "volatility_regime": out.get("explanation", {}).get("volatility_regime", None),
             "drifted_features": out.get("explanation", {}).get("drifted_features", []),
             "top_contributors": out.get("explanation", {}).get("top_contributors", []),
+            "model_version": _read_model_version(models_dir),
         }
         with _TRIGGER_LOG_PATH.open("a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass
+
+    return out
 
 
 

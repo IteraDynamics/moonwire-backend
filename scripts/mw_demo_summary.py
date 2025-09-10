@@ -1396,6 +1396,11 @@ try:
     # DEMO seeding if empty
     if not entries and is_demo_mode():
         now = datetime.now(timezone.utc)
+        ver = os.getenv("MODEL_VERSION", "v0.5.0")
+        try:
+            ver = (MODELS_DIR / "training_version.txt").read_text().strip() or ver
+        except Exception:
+            pass
         sample_entries = [
             {
                 "timestamp": (now - timedelta(minutes=15)).isoformat().replace("+00:00", "Z"),
@@ -1406,6 +1411,7 @@ try:
                 "volatility_regime": "calm",
                 "drifted_features": ["burst_z"],
                 "top_contributors": ["burst_z", "leadership_max_r", "precision_7d"],
+                "model_version": ver,
             },
             {
                 "timestamp": (now - timedelta(minutes=40)).isoformat().replace("+00:00", "Z"),
@@ -1416,6 +1422,7 @@ try:
                 "volatility_regime": "turbulent",
                 "drifted_features": [],
                 "top_contributors": ["count_72h", "count_24h", "count_6h"],
+                "model_version": ver,
             },
             {
                 "timestamp": (now - timedelta(minutes=65)).isoformat().replace("+00:00", "Z"),
@@ -1426,6 +1433,7 @@ try:
                 "volatility_regime": "normal",
                 "drifted_features": ["burst_z"],
                 "top_contributors": ["burst_z", "precision_7d", "recall_7d"],
+                "model_version": ver,
             },
         ]
         # Best-effort: write them to the history file so future runs see them
