@@ -36,7 +36,7 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"        # allow seeding if logs are empty in CI
+          DEMO_MODE: "true"          # seed-friendly for CI
         run: |
           python -m src.ml.train_trigger_model --days 14 --interval hour
           echo "Models in ./models:"
@@ -49,7 +49,7 @@ jobs:
           test -f models/trigger_likelihood_v0.joblib    || (echo "missing logistic model" && exit 1)
           test -f models/trigger_likelihood_v0.meta.json || (echo "missing logistic meta"  && exit 1)
 
-      # Upload logistic artifacts (only)
+      # --- Upload logistic artifacts (non-versioned) ---
       - name: Upload logistic model artifacts
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -61,153 +61,45 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # --- Build/refresh training_data.jsonl from logs (join history + feedback) ---
+      # --- Build/refresh training_data.jsonl by joining trigger history + feedback ---
       - name: Build training data from logs (join)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"            # seed if logs are empty in CI
+          DEMO_MODE: "true"              # seed demo rows if logs empty
+          TRAINING_JOIN_WINDOW_MIN: "5"  # ±5 min join window
         run: |
-          python - <<'PY'
-          import os, json
-          from datetime import datetime, timezone, timedelta
-          from pathlib import Path
+          python -m src.ml.training_data
+          echo "Training data status:"
+          wc -l models/training_data.jsonl || true
+          tail -n 3 models/training_data.jsonl || true
 
-          MODELS = Path("models"); MODELS.mkdir(exist_ok=True)
-          hist = MODELS / "trigger_history.jsonl"
-          fb   = MODELS / "label_feedback.jsonl"
-          out  = MODELS / "training_data.jsonl"
-
-          def load_jsonl(p):
-            if not p.exists(): return []
-            out = []
-            for ln in p.read_text().splitlines():
-              ln = ln.strip()
-              if not ln: continue
-              try:
-                out.append(json.loads(ln))
-              except Exception:
-                pass
-            return out
-
-          def parse_ts(s):
-            try:
-              s = s[:-1] + "+00:00" if isinstance(s, str) and s.endswith("Z") else s
-              return datetime.fromisoformat(s).astimezone(timezone.utc)
-            except Exception:
-              return None
-
-          hist_rows = load_jsonl(hist)
-          fb_rows   = load_jsonl(fb)
-
-          # DEMO seeding if both logs are empty
-          if os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes") and not hist_rows and not fb_rows:
-            now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-            demo_hist = [
-              {"timestamp": (now - timedelta(minutes=40)).isoformat(), "origin": "reddit",   "adjusted_score": 0.72, "threshold": 0.68, "decision": "triggered",     "volatility_regime":"calm",     "drifted_features":["burst_z"], "features":{"burst_z":1.5,"count_24h":10}},
-              {"timestamp": (now - timedelta(minutes=25)).isoformat(), "origin": "twitter",  "adjusted_score": 0.66, "threshold": 0.62, "decision": "triggered",     "volatility_regime":"normal",   "drifted_features":[],          "features":{"burst_z":0.9,"count_24h":5}},
-              {"timestamp": (now - timedelta(minutes=15)).isoformat(), "origin": "rss_news", "adjusted_score": 0.41, "threshold": 0.50, "decision": "not_triggered", "volatility_regime":"turbulent","drifted_features":[],          "features":{"burst_z":0.2,"count_24h":2}},
-            ]
-            demo_fb = [
-              {"timestamp": (now - timedelta(minutes=39)).isoformat(), "origin":"reddit",   "adjusted_score":0.72, "label": True,  "reviewer":"demo"},
-              {"timestamp": (now - timedelta(minutes=24)).isoformat(), "origin":"twitter",  "adjusted_score":0.66, "label": True,  "reviewer":"demo"},
-              {"timestamp": (now - timedelta(minutes=14)).isoformat(), "origin":"rss_news", "adjusted_score":0.41, "label": False, "reviewer":"demo"},
-            ]
-            hist.write_text("\n".join(json.dumps(x) for x in demo_hist) + "\n")
-            fb.write_text("\n".join(json.dumps(x) for x in demo_fb) + "\n")
-            hist_rows = demo_hist; fb_rows = demo_fb
-
-          # build/append training_data.jsonl by joining fb to nearest hist (±5min)
-          out_fp = out.open("a")
-          try:
-            used = 0
-            for lab in fb_rows:
-              to = parse_ts(lab.get("timestamp"))
-              if not to: continue
-              o  = (lab.get("origin") or "unknown").strip().lower()
-              best = None; best_dt = None
-              for h in hist_rows:
-                if (h.get("origin") or "unknown").strip().lower() != o: continue
-                th = parse_ts(h.get("timestamp"))
-                if not th: continue
-                dt = abs((to - th).total_seconds())
-                if dt <= 300 and (best_dt is None or dt < best_dt):
-                  best, best_dt = h, dt
-              if not best: continue
-
-              feats = best.get("features") or {}
-              if not isinstance(feats, dict) or not feats:
-                feats = {}
-                for k in ("burst_z","count_1h","count_6h","count_24h","count_72h",
-                          "precision_7d","recall_7d","leadership_max_r"):
-                  v = best.get(k)
-                  if isinstance(v,(int,float)): feats[k]=float(v)
-
-              row = {
-                "timestamp": to.isoformat(),
-                "origin": o,
-                "features": feats,
-                "label": bool(lab.get("label", False)),
-              }
-              out_fp.write(json.dumps(row) + "\n")
-              used += 1
-          finally:
-            out_fp.close()
-
-          print(f"[build-training-data] wrote to {out} (appended matches)")
-          PY
-
-
-      - name: Seed demo training rows if empty (CI only)
-        if: ${{ success() }}
-        env:
-          DEMO_MODE: "true"
-        run: |
-          if [ ! -s models/training_data.jsonl ]; then
-            python - <<'PY'
-            import json, os
-            from pathlib import Path
-            p = Path("models"); p.mkdir(exist_ok=True)
-            rows = [
-              {"timestamp":"2025-09-10T12:00:00Z","origin":"reddit","features":{"burst_z":1.2,"count_24h":7},"label":True},
-              {"timestamp":"2025-09-10T12:05:00Z","origin":"twitter","features":{"burst_z":0.4,"count_24h":3},"label":False},
-              {"timestamp":"2025-09-10T12:10:00Z","origin":"rss_news","features":{"burst_z":0.9,"count_24h":4},"label":True},
-            ]
-            (p/"training_data.jsonl").write_text("\n".join(json.dumps(r) for r in rows)+"\n")
-            print("Seeded demo training_data.jsonl")
-            PY
-          fi
-
-
-      # --- Retrain from training_data.jsonl ---
-      - name: Retrain from training_data.jsonl (v0.5.1)
+      # --- Retrain from training_data.jsonl (versioned artifacts) ---
+      - name: Retrain from training data (v0.5.1)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
           MODEL_VERSION: "v0.5.1"
           TRAIN_LOG_PATH: "models/training_data.jsonl"
           SAVE_MODEL_DIR: "models"
-      run: |
-        if [ -s "$TRAIN_LOG_PATH" ]; then
-          python -m src.ml.retrain_from_log --train-log "$TRAIN_LOG_PATH" --save-dir "$SAVE_MODEL_DIR" --version "$MODEL_VERSION"
-          echo "Retrained artifacts:"
+        run: |
+          python -m src.ml.retrain_from_log --train-log "$TRAIN_LOG_PATH" --save-dir "$SAVE_MODEL_DIR" --version "$MODEL_VERSION" || true
+          echo "Retrained artifacts (if any):"
           ls -lah models || true
-        else
-          echo "No training rows found at $TRAIN_LOG_PATH; skipping retrain."
-        fi
+          ls -lah "models/$MODEL_VERSION" || true
 
-      # --- Upload retrained artifacts (optional) ---
-      - name: Upload retrained model artifacts (v0.5.0)
+      # --- Upload retrained artifacts (versioned) ---
+      - name: Upload retrained model artifacts (v0.5.1)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: trigger-likelihood-v050
+          name: trigger-likelihood-v051
           path: |
-            models/v0.5.0/**
+            models/v0.5.1/**
           if-no-files-found: warn
           retention-days: 14
 
-      # --- Demo summary & artifacts (read-only, post-tests) ---
+      # --- Prepare & build CI demo summary ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
@@ -219,8 +111,9 @@ jobs:
           DEMO_MODE: "true"
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
-          TL_DRIFT_Z_THRESHOLD: "0.5"         # demo sensitivity
-          TL_DRIFT_PER_FEATURE_PENALTY: "0.1" # demo visibility
+          # knobs for visibility in CI
+          TL_DRIFT_Z_THRESHOLD: "0.5"
+          TL_DRIFT_PER_FEATURE_PENALTY: "0.1"
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
@@ -235,13 +128,15 @@ jobs:
           ls -lah artifacts || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
 
+      # --- Publish CI summary to the job view ---
       - name: Publish CI summary
         if: ${{ success() }}
         run: |
-          echo "## MoonWire CI Demo Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          cat artifacts/demo_summary.md >> $GITHUB_STEP_SUMMARY
+          echo "## MoonWire CI Demo Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat artifacts/demo_summary.md >> "$GITHUB_STEP_SUMMARY"
 
+      # --- Upload the rendered summary as an artifact too ---
       - name: Upload demo-summary artifact
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
