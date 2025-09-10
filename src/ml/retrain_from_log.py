@@ -108,6 +108,13 @@ def _git_sha() -> str | None:
         return None
 
 
+def _write_training_version_txt(version: str, models_dir: Path = MODELS_DIR) -> None:
+    try:
+        (models_dir / "training_version.txt").write_text((version or "unknown").strip() + "\n")
+    except Exception:
+        pass
+
+
 # ------------------------- training core -------------------------
 
 def _train_logistic(
@@ -270,6 +277,9 @@ def retrain_from_log(
                 fdst.write(fsrc.read())
         except Exception:
             pass
+
+    if ver:
+        _write_training_version_txt(ver, out_root)
 
     # ---- compact summary (returned) ----
     summary = {
