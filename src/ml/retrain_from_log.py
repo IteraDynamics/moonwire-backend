@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -212,6 +212,7 @@ def retrain_from_log(
 ) -> Dict[str, Any]:
     """
     Retrain ensemble models from models/training_data.jsonl and write versioned artifacts.
+    Also stamps models/training_version.txt with the current version for inference.
     """
     train_log = train_log_path or (MODELS_DIR / "training_data.jsonl")
     out_root = save_dir or MODELS_DIR
@@ -270,6 +271,15 @@ def retrain_from_log(
                 fdst.write(fsrc.read())
         except Exception:
             pass
+
+    # --- persist "current version" for inference ---
+    try:
+        version_file = (save_dir or MODELS_DIR) / "training_version.txt"
+        version_file.parent.mkdir(parents=True, exist_ok=True)
+        version_file.write_text(ver + "\n", encoding="utf-8")
+    except Exception:
+        # never fail retrain on version stamp write
+        pass
 
     # ---- compact summary (returned) ----
     summary = {
