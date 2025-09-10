@@ -22,27 +22,18 @@ _RF_META    = "trigger_likelihood_rf.meta.json"
 _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
 
-# Trigger history path (env overrideable)
-def _resolve_trigger_log_path() -> Path:
-    envp = os.getenv("TRIGGER_LOG_PATH")
-    return Path(envp) if envp else (MODELS_DIR / "trigger_history.jsonl")
-
-_TRIGGER_LOG_PATH = _resolve_trigger_log_path()
-
-# Version file path
-_VERSION_FILE = MODELS_DIR / "training_version.txt"
+# Logs / version
+_TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
+_VERSION_FILE     = MODELS_DIR / "training_version.txt"
 
 
-# ---------- helpers ----------
-def _read_model_version() -> str:
-    """
-    Read current training/model version from models/training_version.txt.
-    Fallback to 'unknown' if missing/unreadable.
-    """
+# ---------- tiny utils ----------
+def _read_model_version(models_dir: Path | None = None) -> str:
     try:
-        if _VERSION_FILE.exists():
-            txt = _VERSION_FILE.read_text().strip()
-            return txt or "unknown"
+        vf = (models_dir or MODELS_DIR) / "training_version.txt"
+        if vf.exists():
+            v = vf.read_text(encoding="utf-8").strip()
+            return v or "unknown"
     except Exception:
         pass
     return "unknown"
@@ -61,7 +52,7 @@ def _load_model_and_meta(model_name: str, meta_name: str, models_dir: Path | Non
     return model, meta
 
 def _load_cov(models_dir: Path | None = None) -> Dict[str, Any]:
-    cpath = (models_dir or MODELS_DIR) / _COV_NAME
+    cpath = (models_dir or MODELES_DIR) / _COV_NAME if False else (models_dir or MODELS_DIR) / _COV_NAME
     if not cpath.exists():
         return {}
     try:
@@ -120,7 +111,7 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
         return {}
 
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
-    version = _read_model_version()
+    version = _read_model_version(models_dir)
     try:
         model, meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
     except Exception:
@@ -151,12 +142,38 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
     return out
 
 
+def _append_trigger_history(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    """
+    Append a minimally structured line to trigger_history.jsonl.
+    Tries to pull rich fields from result['explanation'] if present; otherwise falls back.
+    """
+    try:
+        expl = result.get("explanation", {}) if isinstance(result, dict) else {}
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "origin": payload.get("origin", "unknown"),
+            "adjusted_score": float(expl.get("adjusted_score", result.get("prob_trigger_next_6h", 0.0)) or 0.0),
+            "threshold": expl.get("threshold_after_volatility"),
+            "decision": expl.get("decision", "unknown"),
+            "volatility_regime": expl.get("volatility_regime"),
+            "drifted_features": expl.get("drifted_features", []),
+            "top_contributors": expl.get("top_contributors", []),
+            "model_version": result.get("model_version", "unknown"),
+        }
+        _TRIGGER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _TRIGGER_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        # never break inference on logging
+        pass
+
+
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
     Ensemble scoring over available models (logistic + random forest + gb).
-    Returns dict with mean prob, band, votes, etc., plus model_version.
+    Returns dict with mean prob, band, votes, etc.
     """
-    version = _read_model_version()
+    version = _read_model_version(models_dir)
     votes: Dict[str, float] = {}
     demo = False
     feats = payload.get("features") or {}
@@ -196,7 +213,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
-    out: Dict[str, Any] = {
+    result = {
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
@@ -206,40 +223,9 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         "model_version": version,
     }
 
-    # --- Append to trigger history log (version-tagged) ---
-    # We log the best info we have; if the caller later adds an explanation/threshold,
-    # that gets logged elsewhere (e.g., via API or subsequent pass). This is a minimal,
-    # safe history record so we don't lose events.
-    try:
-        # Ensure parent dir exists
-        _TRIGGER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-        # Allow upstream to pass decision/meta in payload (non-breaking)
-        explanation = (payload or {}).get("explanation") or {}
-        decision = explanation.get("decision") or ("triggered" if mean >= 0.5 else "not_triggered")
-        threshold_used = explanation.get("threshold_after_volatility")
-        drifted = explanation.get("drifted_features", [])
-        top_contribs = explanation.get("top_contributors", [])
-        regime = explanation.get("volatility_regime")
-
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "origin": (payload.get("origin") or "unknown") if isinstance(payload, dict) else "unknown",
-            "adjusted_score": float(explanation.get("adjusted_score", mean)),
-            "threshold": threshold_used,
-            "decision": str(decision),
-            "volatility_regime": regime,
-            "drifted_features": drifted if isinstance(drifted, list) else [],
-            "top_contributors": top_contribs if isinstance(top_contribs, list) else [],
-            "model_version": version,
-        }
-        with _TRIGGER_LOG_PATH.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        # Never break inference due to logging problems
-        pass
-
-    return out
+    # try to persist a history entry (uses explanation if upstream layering added it)
+    _append_trigger_history(payload, result)
+    return result
 
 
 # ---------- Volatility-aware thresholds ----------
@@ -271,11 +257,8 @@ def score(payload: dict, explain: bool = False):
     return infer_score(payload, explain=explain)
 
 __all__ = [
-    "infer_score",
-    "infer_score_ensemble",
-    "score",
-    "model_metadata",
-    "model_metadata_all",
+    "infer_score", "infer_score_ensemble", "score",
+    "model_metadata", "model_metadata_all",
     "compute_volatility_adjusted_threshold",
 ]
 
