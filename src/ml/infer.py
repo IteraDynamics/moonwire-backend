@@ -23,6 +23,28 @@ _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
 _TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
 
+# --- model version helper ---
+def _read_model_version(path: Path | None = None) -> str:
+    try:
+        base = path or MODELS_DIR
+        v = (base / "training_version.txt").read_text().strip()
+        return v or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _append_trigger_history(record: Dict[str, Any], models_dir: Path | None = None) -> None:
+    """Best-effort append of trigger decisions to history log."""
+    try:
+        p = Path(os.getenv("TRIGGER_LOG_PATH", (models_dir or MODELS_DIR) / "trigger_history.jsonl"))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        rec = dict(record)
+        rec.setdefault("model_version", _read_model_version(models_dir))
+        with p.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
 
 
 # ---------- loaders ----------
@@ -100,23 +122,32 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
     try:
         model, meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
     except Exception:
+        mv = _read_model_version(models_dir)
         if payload.get("features"):
             bz = float(payload["features"].get("burst_z", 0.0))
             p = 1 / (1 + np.exp(-0.1 * bz))
-            res = {"prob_trigger_next_6h": float(p), "demo": True}
-            if explain:
-                res["contributions"] = {"burst_z": 0.1 * bz}
+            res = {
+                "prob_trigger_next_6h": float(p),
+                "demo": True,
+                **({"contributions": {"burst_z": 0.1 * bz}} if explain else {}),
+                "model_version": mv,
+            }
             return res
-        return {"prob_trigger_next_6h": 0.062, "demo": True}
+        return {"prob_trigger_next_6h": 0.062, "demo": True, "model_version": mv}
 
     feats = payload.get("features")
     if feats is None:
-        return {"prob_trigger_next_6h": 0.062, "note": "origin path not wired", "demo": meta.get("demo", False)}
+        return {
+            "prob_trigger_next_6h": 0.062,
+            "note": "origin path not wired",
+            "demo": meta.get("demo", False),
+            "model_version": _read_model_version(models_dir),
+        }
 
     feat_order = meta.get("feature_order") or []
     x = _vectorize(feats, feat_order)
     proba = float(model.predict_proba(x)[0, 1])
-    out = {"prob_trigger_next_6h": proba}
+    out = {"prob_trigger_next_6h": proba, "model_version": _read_model_version(models_dir)}
     if explain:
         out["contributions"] = _contributions_linear(model, x, feat_order, top_n=top_n)
     return out
@@ -166,6 +197,7 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
+    mv = _read_model_version(models_dir)
     return {
         "prob_trigger_next_6h": mean,
         "low": low,
@@ -173,26 +205,8 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         "votes": votes,
         "models": list(votes.keys()),
         "demo": demo,
+        "model_version": mv,
     }
-
-        # --- Append to trigger history log ---
-    try:
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "origin": payload.get("origin", "unknown"),
-            "adjusted_score": out.get("explanation", {}).get("adjusted_score", out["prob_trigger_next_6h"]),
-            "threshold": out.get("explanation", {}).get("threshold_after_volatility", None),
-            "decision": out.get("explanation", {}).get("decision", "unknown"),
-            "volatility_regime": out.get("explanation", {}).get("volatility_regime", None),
-            "drifted_features": out.get("explanation", {}).get("drifted_features", []),
-            "top_contributors": out.get("explanation", {}).get("top_contributors", []),
-        }
-        with _TRIGGER_LOG_PATH.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
-
-
 
 # ---------- Volatility-aware thresholds ----------
 def compute_volatility_adjusted_threshold(base_threshold: float, regime: str) -> Dict[str, Any]:

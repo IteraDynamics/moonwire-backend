@@ -1406,6 +1406,7 @@ try:
                 "volatility_regime": "calm",
                 "drifted_features": ["burst_z"],
                 "top_contributors": ["burst_z", "leadership_max_r", "precision_7d"],
+                "model_version": "v0.5.1",
             },
             {
                 "timestamp": (now - timedelta(minutes=40)).isoformat().replace("+00:00", "Z"),
@@ -1416,6 +1417,7 @@ try:
                 "volatility_regime": "turbulent",
                 "drifted_features": [],
                 "top_contributors": ["count_72h", "count_24h", "count_6h"],
+                "model_version": "v0.5.1",
             },
             {
                 "timestamp": (now - timedelta(minutes=65)).isoformat().replace("+00:00", "Z"),
@@ -1426,6 +1428,7 @@ try:
                 "volatility_regime": "normal",
                 "drifted_features": ["burst_z"],
                 "top_contributors": ["burst_z", "precision_7d", "recall_7d"],
+                "model_version": "v0.5.1",
             },
         ]
         # Best-effort: write them to the history file so future runs see them
@@ -1465,8 +1468,12 @@ try:
             regime = (e.get("volatility_regime") or e.get("regime") or "normal")
             drift = e.get("drifted_features") or []
             drift_txt = ", ".join(drift) if isinstance(drift, list) and drift else "none"
-
-            md.append(f"- [{hhmm}] {origin} → {icon} {decision} @ {adj:.2f} (thr={thr:.2f}) — {regime}, drift: {drift_txt}")
+            mv = (e.get("model_version") or "unknown")
+            line = (
+                f"[{hhmm}] {origin} (v{mv}) → {icon} {decision} "
+                f"@ {adj:.2f} (thr={thr:.2f}) — {regime}, drift: {drift_txt}"
+            )
+            md.append(f"- {line}")
 except Exception as e:
     md.append(f"⚠️ Trigger history failed: {e}")
 
