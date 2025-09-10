@@ -10,8 +10,12 @@ import os, json, hashlib, random, uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, Rectangle
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch, Rectangle
+except Exception:  # pragma: no cover - optional in tests
+    plt = None
+    FancyBboxPatch = Rectangle = object
 
 from src.analytics.origin_utils import compute_origin_breakdown
 from src.analytics.source_yield import compute_source_yield
@@ -24,7 +28,6 @@ from src.analytics.burst_detection import compute_bursts
 from src.analytics.volatility_regimes import compute_volatility_regimes
 from src.analytics.threshold_policy import threshold_for_regime
 from src.analytics.nowcast_attention import compute_nowcast_attention
-from src.ml.infer import infer_score, model_metadata, infer_score_ensemble
 from src.ml.thresholds import load_per_origin_thresholds
 from typing import Dict, List
 from src.ml.metrics import rolling_precision_recall_snapshot
@@ -34,7 +37,7 @@ from src.ml.metrics import rolling_precision_recall_snapshot
 _ML_OK = False
 _ML_ERR = None
 try:
-    from src.ml.infer import score as infer_score, model_metadata
+    from src.ml.infer import score as infer_score, model_metadata, infer_score_ensemble
     _ML_OK = True
 except Exception as e:
     _ML_ERR = f"{type(e).__name__}: {e}"

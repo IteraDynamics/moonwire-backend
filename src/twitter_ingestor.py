@@ -1,4 +1,7 @@
-import snscrape.modules.twitter as sntwitter
+try:
+    import snscrape.modules.twitter as sntwitter
+except Exception:  # pragma: no cover - optional dependency may fail on newer Pythons
+    sntwitter = None
 import os
 import logging
 from datetime import datetime, timedelta
@@ -20,6 +23,8 @@ MOCK_TWEETS = [
 ]
 
 def fetch_from_snscrape(query: str, limit: int = 10):
+    if sntwitter is None:
+        return []
     try:
         tweets = []
         for i, tweet in enumerate(sntwitter.TwitterSearchScraper(query).get_items()):
@@ -39,11 +44,20 @@ def fetch_from_snscrape(query: str, limit: int = 10):
 def fetch_from_twitter_api(query: str, limit: int = 10):
     try:
         bearer = os.getenv("TWITTER_BEARER_TOKEN")
+        if not bearer:
+            logging.warning({
+                "event": "twitter_fetch_error",
+                "method": "api",
+                "error": "Missing bearer token",
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+            return []
+
         client = tweepy.Client(bearer_token=bearer)
         resp = client.search_recent_tweets(
             query=query,
             tweet_fields=["created_at", "lang"],
-            max_results=max(limit, 10)
+            max_results=max(10, min(limit, 100))
         )
 
         logging.info({
