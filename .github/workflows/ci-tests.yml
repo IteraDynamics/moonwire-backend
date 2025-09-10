@@ -157,19 +157,44 @@ jobs:
           print(f"[build-training-data] wrote to {out} (appended matches)")
           PY
 
-      # --- Retrain from training_data.jsonl (versioned v0.5.0) ---
-      - name: Retrain from training data (v0.5.0)
+
+      - name: Seed demo training rows if empty (CI only)
+        if: ${{ success() }}
+        env:
+          DEMO_MODE: "true"
+        run: |
+          if [ ! -s models/training_data.jsonl ]; then
+            python - <<'PY'
+            import json, os
+            from pathlib import Path
+            p = Path("models"); p.mkdir(exist_ok=True)
+            rows = [
+              {"timestamp":"2025-09-10T12:00:00Z","origin":"reddit","features":{"burst_z":1.2,"count_24h":7},"label":True},
+              {"timestamp":"2025-09-10T12:05:00Z","origin":"twitter","features":{"burst_z":0.4,"count_24h":3},"label":False},
+              {"timestamp":"2025-09-10T12:10:00Z","origin":"rss_news","features":{"burst_z":0.9,"count_24h":4},"label":True},
+            ]
+            (p/"training_data.jsonl").write_text("\n".join(json.dumps(r) for r in rows)+"\n")
+            print("Seeded demo training_data.jsonl")
+            PY
+          fi
+
+
+      # --- Retrain from training_data.jsonl ---
+      - name: Retrain from training_data.jsonl (v0.5.1)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          MODEL_VERSION: "v0.5.0"
+          MODEL_VERSION: "v0.5.1"
           TRAIN_LOG_PATH: "models/training_data.jsonl"
           SAVE_MODEL_DIR: "models"
-          MODEL_RETRAIN_MIN_ROWS: "1"   # ⬅ low-sample guard
-        run: |
+      run: |
+        if [ -s "$TRAIN_LOG_PATH" ]; then
           python -m src.ml.retrain_from_log --train-log "$TRAIN_LOG_PATH" --save-dir "$SAVE_MODEL_DIR" --version "$MODEL_VERSION"
-          echo "Retrained artifacts (if any):"
+          echo "Retrained artifacts:"
           ls -lah models || true
+        else
+          echo "No training rows found at $TRAIN_LOG_PATH; skipping retrain."
+        fi
 
       # --- Upload retrained artifacts (optional) ---
       - name: Upload retrained model artifacts (v0.5.0)
