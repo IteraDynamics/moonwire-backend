@@ -1371,76 +1371,54 @@ except Exception as e:
 
 
 
-# --- Trigger History (Last 3) ------------------------------------------------
-from pathlib import Path
-import json, os
-from datetime import datetime, timezone
-from src.paths import MODELS_DIR
+# ---------- Trigger History (Last 3) ----------
+try:
+    hist_path = MODELS_DIR / "trigger_history.jsonl"
+    last = []
+    if hist_path.exists():
+        for ln in hist_path.read_text(encoding="utf-8").splitlines()[-64:]:
+            s = ln.strip()
+            if not s:
+                continue
+            try:
+                last.append(json.loads(s))
+            except Exception:
+                pass
+    last = last[-3:]  # just the tail
 
-md.append("\n🗂️ Trigger History (Last 3)")
+    if last:
+        md.append("\n🗂️ Trigger History (Last 3)")
+        for row in last:
+            ts = row.get("timestamp")
+            # show just HH:MM
+            hhmm = "??:??"
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+                hhmm = dt.strftime("%H:%M")
+            except Exception:
+                pass
 
-hist_path = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
+            origin = row.get("origin", "unknown")
+            decision = row.get("decision", "unknown")
+            check = "✅ triggered" if decision == "triggered" else "❌ not_triggered"
+            score = row.get("adjusted_score", 0.0)
+            thr = row.get("threshold", None)
+            regime = row.get("volatility_regime", None)
+            drift = row.get("drifted_features") or []
+            drift_txt = "none" if not drift else ", ".join(drift[:2]) + ("" if len(drift) <= 2 else "…")
+            ver = row.get("model_version", "unknown")
 
-def _safe_load_jsonl(p: Path, max_lines: int = 200) -> list[dict]:
-    if not p.exists():
-        return []
-    rows = []
-    # read tail-ish (file should be small in CI, so simple read is fine)
-    for ln in p.read_text().splitlines()[-max_lines:]:
-        ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            rows.append(json.loads(ln))
-        except Exception:
-            pass
-    return rows
+            if thr is None:
+                md.append(f"[{hhmm}] {origin} → {check} @ {score:.2f} — {regime or 'n/a'} — v{ver}")
+            else:
+                md.append(f"[{hhmm}] {origin} → {check} @ {score:.2f} (thr={thr:.2f}) — {regime or 'n/a'} — v{ver} (drift: {drift_txt})")
+    else:
+        md.append("\n🗂️ Trigger History (Last 3)\n(waiting for events…)")
 
-rows = _safe_load_jsonl(hist_path)
-if not rows:
-    # demo seed (if needed)
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    demo = [
-        {"timestamp": now.isoformat(), "origin": "reddit",   "adjusted_score": 0.72, "threshold": 0.68, "decision": "triggered",     "volatility_regime": "normal", "drifted_features": ["burst_z"], "top_contributors": ["burst_z","count_24h"], "model_version": "v0.demo"},
-        {"timestamp": now.isoformat(), "origin": "rss_news", "adjusted_score": 0.41, "threshold": 0.50, "decision": "not_triggered", "volatility_regime": "calm",   "drifted_features": [],         "top_contributors": ["count_24h"],          "model_version": "v0.demo"},
-        {"timestamp": now.isoformat(), "origin": "twitter",  "adjusted_score": 0.66, "threshold": 0.62, "decision": "triggered",     "volatility_regime": "turbulent","drifted_features": [],        "top_contributors": ["burst_z"],            "model_version": "v0.demo"},
-    ]
-    rows = demo
+except Exception as e:
+    md.append("\n🗂️ Trigger History (Last 3)")
+    md.append(f"⚠️ trigger history failed: {type(e).__name__}: {e}")
 
-# take last 3 newest
-rows_tail = rows[-3:]
-
-def _short_time(ts: str) -> str:
-    try:
-        # handle ...Z
-        s = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
-        dt = datetime.fromisoformat(s)
-        return dt.strftime("%H:%M")
-    except Exception:
-        return ts
-
-for r in rows_tail:
-    t  = _short_time(str(r.get("timestamp","")))
-    o  = str(r.get("origin","unknown"))
-    s  = r.get("adjusted_score")
-    thr = r.get("threshold")
-    dec = str(r.get("decision",""))
-    reg = str(r.get("volatility_regime",""))
-    drift = r.get("drifted_features") or []
-    ver = str(r.get("model_version","unknown"))
-
-    icon = "✅" if dec == "triggered" else "❌"
-    drift_str = ", ".join(drift) if drift else "none"
-    try:
-        s_str = f"{float(s):.2f}" if s is not None else "n/a"
-    except Exception:
-        s_str = "n/a"
-    try:
-        thr_str = f"{float(thr):.2f}" if thr is not None else "n/a"
-    except Exception:
-        thr_str = "n/a"
-
-    md.append(f"• [{t}] {o} (v={ver}) → {icon} {dec} @ {s_str} (thr={thr_str}) — {reg}, drift: {drift_str}")
 
 
 
