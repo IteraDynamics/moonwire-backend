@@ -1,4 +1,7 @@
-import snscrape.modules.twitter as sntwitter
+try:  # optional dependency
+    import snscrape.modules.twitter as sntwitter  # type: ignore
+except Exception:  # pragma: no cover - fallback when snscrape isn't available
+    sntwitter = None
 import os
 import logging
 from datetime import datetime, timedelta
@@ -20,6 +23,8 @@ MOCK_TWEETS = [
 ]
 
 def fetch_from_snscrape(query: str, limit: int = 10):
+    if sntwitter is None:
+        return []
     try:
         tweets = []
         for i, tweet in enumerate(sntwitter.TwitterSearchScraper(query).get_items()):

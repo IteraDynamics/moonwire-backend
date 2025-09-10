@@ -10,8 +10,12 @@ import os, json, hashlib, random, uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
-import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, Rectangle
+try:  # optional plotting dependency
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import FancyBboxPatch, Rectangle
+except Exception:  # pragma: no cover - demo summary can run without matplotlib
+    plt = None
+    FancyBboxPatch = Rectangle = None
 
 from src.analytics.origin_utils import compute_origin_breakdown
 from src.analytics.source_yield import compute_source_yield

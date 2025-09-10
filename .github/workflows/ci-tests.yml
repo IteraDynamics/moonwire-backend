@@ -157,12 +157,12 @@ jobs:
           print(f"[build-training-data] wrote to {out} (appended matches)")
           PY
 
-      # --- Retrain from training_data.jsonl (versioned v0.5.0) ---
-      - name: Retrain from training data (v0.5.0)
+      # --- Retrain from training_data.jsonl (versioned v0.5.1) ---
+      - name: Retrain from training data (v0.5.1)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          MODEL_VERSION: "v0.5.0"
+          MODEL_VERSION: "v0.5.1"
           TRAIN_LOG_PATH: "models/training_data.jsonl"
           SAVE_MODEL_DIR: "models"
           MODEL_RETRAIN_MIN_ROWS: "1"   # ⬅ low-sample guard
@@ -172,13 +172,13 @@ jobs:
           ls -lah models || true
 
       # --- Upload retrained artifacts (optional) ---
-      - name: Upload retrained model artifacts (v0.5.0)
+      - name: Upload retrained model artifacts (v0.5.1)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: trigger-likelihood-v050
+          name: trigger-likelihood-v051
           path: |
-            models/v0.5.0/**
+            models/v0.5.1/**
           if-no-files-found: warn
           retention-days: 14
 
@@ -199,6 +199,7 @@ jobs:
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
+          MODEL_VERSION: "v0.5.1"
         run: python scripts/mw_demo_summary.py
 
       - name: Show artifacts (debug)

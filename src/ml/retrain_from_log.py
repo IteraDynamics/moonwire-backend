@@ -100,6 +100,19 @@ def _write_meta(path: Path, meta: Dict[str, Any]) -> None:
         json.dump(meta, f, indent=2)
 
 
+def _write_training_version_txt(version: str, root: Path) -> None:
+    """Write the version string to root/training_version.txt.
+
+    Silently skips any filesystem errors so retraining doesn't fail just
+    because we cannot persist this helper file.
+    """
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "training_version.txt").write_text(version.strip() + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _git_sha() -> str | None:
     try:
         import subprocess
@@ -218,6 +231,7 @@ def retrain_from_log(
     ver = (version or os.getenv("MODEL_VERSION") or "v0.5.0").strip()
     ver_dir = out_root / ver
     ver_dir.mkdir(parents=True, exist_ok=True)
+    _write_training_version_txt(ver, out_root)
 
     rows = _load_jsonl(train_log)
     if not rows:
