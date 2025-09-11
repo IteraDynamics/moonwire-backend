@@ -117,6 +117,7 @@ jobs:
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
+          TL_LOG_FALLBACK_ORIGIN: "rss_news"
         run: python scripts/mw_demo_summary.py
 
       - name: Show artifacts (debug)
