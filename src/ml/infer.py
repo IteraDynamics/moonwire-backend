@@ -22,24 +22,20 @@ _RF_META    = "trigger_likelihood_rf.meta.json"
 _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
 
-# Logs / version
+# Logs / metadata
 _TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
-_VERSION_FILE     = MODELS_DIR / "training_version.txt"
+_TRAINING_VERSION_FILE = Path(os.getenv("TRAINING_VERSION_FILE", MODELS_DIR / "training_version.txt"))
 
 
 # ---------- tiny utils ----------
-def _read_model_version(models_dir: Path | None = None) -> str:
+def _read_model_version() -> str:
     try:
-        vf = (models_dir or MODELS_DIR) / "training_version.txt"
-        if vf.exists():
-            v = vf.read_text(encoding="utf-8").strip()
-            return v or "unknown"
+        if _TRAINING_VERSION_FILE.exists():
+            return _TRAINING_VERSION_FILE.read_text(encoding="utf-8").strip() or "unknown"
     except Exception:
         pass
     return "unknown"
 
-
-# ---------- loaders ----------
 def _artifact_paths(model_name: str, meta_name: str, models_dir: Path | None = None) -> Tuple[Path, Path]:
     md = models_dir or MODELS_DIR
     return md / model_name, md / meta_name
@@ -47,16 +43,16 @@ def _artifact_paths(model_name: str, meta_name: str, models_dir: Path | None = N
 def _load_model_and_meta(model_name: str, meta_name: str, models_dir: Path | None = None):
     mpath, jpath = _artifact_paths(model_name, meta_name, models_dir)
     model = joblib.load(mpath)
-    with jpath.open("r") as f:
+    with jpath.open("r", encoding="utf-8") as f:
         meta = json.load(f)
     return model, meta
 
 def _load_cov(models_dir: Path | None = None) -> Dict[str, Any]:
-    cpath = (models_dir or MODELES_DIR) / _COV_NAME if False else (models_dir or MODELS_DIR) / _COV_NAME
+    cpath = (models_dir or MODELS_DIR) / _COV_NAME
     if not cpath.exists():
         return {}
     try:
-        with cpath.open("r") as f:
+        with cpath.open("r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -111,74 +107,41 @@ def _contributions_linear(model, xrow: np.ndarray, feat_order: List[str], top_n:
         return {}
 
 def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 5, models_dir: Path | None = None) -> Dict[str, Any]:
-    version = _read_model_version(models_dir)
     try:
         model, meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
     except Exception:
         if payload.get("features"):
             bz = float(payload["features"].get("burst_z", 0.0))
             p = 1 / (1 + np.exp(-0.1 * bz))
-            res = {"prob_trigger_next_6h": float(p), "demo": True, "model_version": version}
+            res = {"prob_trigger_next_6h": float(p), "demo": True}
             if explain:
                 res["contributions"] = {"burst_z": 0.1 * bz}
             return res
-        return {"prob_trigger_next_6h": 0.062, "demo": True, "model_version": version}
+        return {"prob_trigger_next_6h": 0.062, "demo": True}
 
     feats = payload.get("features")
     if feats is None:
-        return {
-            "prob_trigger_next_6h": 0.062,
-            "note": "origin path not wired",
-            "demo": meta.get("demo", False),
-            "model_version": version,
-        }
+        return {"prob_trigger_next_6h": 0.062, "note": "origin path not wired", "demo": meta.get("demo", False)}
 
     feat_order = meta.get("feature_order") or []
     x = _vectorize(feats, feat_order)
     proba = float(model.predict_proba(x)[0, 1])
-    out = {"prob_trigger_next_6h": proba, "model_version": version}
+    out = {"prob_trigger_next_6h": proba}
     if explain:
         out["contributions"] = _contributions_linear(model, x, feat_order, top_n=top_n)
     return out
 
 
-def _append_trigger_history(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
-    """
-    Append a minimally structured line to trigger_history.jsonl.
-    Tries to pull rich fields from result['explanation'] if present; otherwise falls back.
-    """
-    try:
-        expl = result.get("explanation", {}) if isinstance(result, dict) else {}
-        entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "origin": payload.get("origin", "unknown"),
-            "adjusted_score": float(expl.get("adjusted_score", result.get("prob_trigger_next_6h", 0.0)) or 0.0),
-            "threshold": expl.get("threshold_after_volatility"),
-            "decision": expl.get("decision", "unknown"),
-            "volatility_regime": expl.get("volatility_regime"),
-            "drifted_features": expl.get("drifted_features", []),
-            "top_contributors": expl.get("top_contributors", []),
-            "model_version": result.get("model_version", "unknown"),
-        }
-        _TRIGGER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _TRIGGER_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        # never break inference on logging
-        pass
-
-
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
     """
     Ensemble scoring over available models (logistic + random forest + gb).
-    Returns dict with mean prob, band, votes, etc.
+    Returns dict with mean prob, band, votes, etc., and **logs** the scoring event.
     """
-    version = _read_model_version(models_dir)
     votes: Dict[str, float] = {}
     demo = False
-    feats = payload.get("features") or {}
+    feats: Dict[str, Any] = payload.get("features") or {}
 
-    # logistic
+    # try logistic
     try:
         L_model, L_meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
         order = L_meta.get("feature_order") or []
@@ -213,19 +176,58 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
     low = float(min(probs))
     high = float(max(probs))
 
-    result = {
+    res: Dict[str, Any] = {
         "prob_trigger_next_6h": mean,
         "low": low,
         "high": high,
         "votes": votes,
         "models": list(votes.keys()),
         "demo": demo,
-        "model_version": version,
     }
 
-    # try to persist a history entry (uses explanation if upstream layering added it)
-    _append_trigger_history(payload, result)
-    return result
+    # -------- logging (robust; never throws) --------
+    try:
+        # 1) figure out origin, with many fallbacks
+        origin_for_log = (
+            payload.get("origin")
+            or feats.get("_origin")
+            or feats.get("origin")
+            or payload.get("source")
+            or os.getenv("TL_LOG_FALLBACK_ORIGIN", "unknown")
+        )
+        origin_for_log = str(origin_for_log).strip().lower() if origin_for_log is not None else "unknown"
+
+        # 2) explanation fields (if a caller added them upstream)
+        exp = res.get("explanation") or payload.get("explanation") or {}
+
+        adjusted_score = float(
+            exp.get("adjusted_score", res.get("prob_trigger_next_6h", 0.0)) or 0.0
+        )
+        threshold_used = exp.get("threshold_after_volatility")
+        decision = exp.get("decision", "not_triggered" if adjusted_score < (threshold_used or 1.0) else "triggered")
+        regime = exp.get("volatility_regime")
+        drifted = exp.get("drifted_features", [])
+        top_feats = exp.get("top_contributors", [])
+
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "origin": origin_for_log,
+            "adjusted_score": adjusted_score,
+            "threshold": threshold_used,
+            "decision": decision,
+            "volatility_regime": regime,
+            "drifted_features": drifted,
+            "top_contributors": top_feats,
+            "model_version": _read_model_version(),
+        }
+        _TRIGGER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _TRIGGER_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        # never fail user scoring for logging issues
+        pass
+
+    return res
 
 
 # ---------- Volatility-aware thresholds ----------
@@ -266,7 +268,7 @@ __all__ = [
 # ---------- Online backtest ----------
 def _load_jsonl(path: Path) -> List[dict]:
     try:
-        return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
     except Exception:
         return []
 
@@ -300,8 +302,9 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
     for o in origins[:10]:
         tp=fp=fn=tn=0
         for t in buckets:
+            t_iso = t.isoformat()
             try:
-                p = score({"origin": o, "timestamp": t.isoformat()}).get("prob_trigger_next_6h", 0.0)
+                p = score({"origin": o, "timestamp": t_iso}).get("prob_trigger_next_6h", 0.0)
             except Exception:
                 p = 0.0
             y = _label_has_trigger_between(triggers, o, t, t + timedelta(hours=6))
@@ -312,8 +315,7 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
             else: tn+=1
         prec = tp/float(tp+fp) if (tp+fp)>0 else 0.0
         rec  = tp/float(tp+fn) if (tp+fn)>0 else 0.0
-        per_origin.append({"origin": o, "precision": round(prec,3), "recall": round(rec,3),
-                           "tp":tp,"fp":fp,"fn":fn,"tn":tn})
+        per_origin.append({"origin": o, "precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn})
 
     tp=sum(po["tp"] for po in per_origin); fp=sum(po["fp"] for po in per_origin)
     fn=sum(po["fn"] for po in per_origin); tn=sum(po["tn"] for po in per_origin)
@@ -323,7 +325,6 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
     return {
         "window_hours": 24,
         "threshold": threshold,
-        "overall": {"precision": round(prec,3), "recall": round(rec,3),
-                    "tp":tp,"fp":fp,"fn":fn,"tn":tn},
+        "overall": {"precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn},
         "per_origin": per_origin[:3],
     }
