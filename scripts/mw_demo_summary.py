@@ -1426,6 +1426,7 @@ except Exception as e:
 try:
     from src.paths import MODELS_DIR
     import os, json
+    from pathlib import Path
     md.append("\n### 🟨 Label Feedback")
 
     feedback_path = MODELS_DIR / "label_feedback.jsonl"
@@ -1453,27 +1454,41 @@ try:
     demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
     if not rows and demo_mode:
         now = datetime.now(timezone.utc)
+        # pull a demo model version from training_version.txt if present
+        try:
+            tv_path = MODELS_DIR / "training_version.txt"
+            demo_mv = tv_path.read_text(encoding="utf-8").strip() if tv_path.exists() else "v0.0.0-demo"
+            if not isinstance(demo_mv, str) or not demo_mv:
+                demo_mv = "v0.0.0-demo"
+            if not demo_mv.startswith("v"):
+                demo_mv = f"v{demo_mv}"
+        except Exception:
+            demo_mv = "v0.0.0-demo"
+
         rows = [
             {
                 "timestamp": (now - timedelta(minutes=40)).isoformat(),
                 "origin": "reddit",
                 "adjusted_score": 0.72,
                 "label": True,
-                "reviewer": "demo_reviewer"
+                "reviewer": "demo_reviewer",
+                "model_version": demo_mv,
             },
             {
                 "timestamp": (now - timedelta(minutes=65)).isoformat(),
                 "origin": "rss_news",
                 "adjusted_score": 0.44,
                 "label": False,
-                "reviewer": "demo_reviewer"
+                "reviewer": "demo_reviewer",
+                "model_version": demo_mv,
             },
             {
                 "timestamp": (now - timedelta(minutes=90)).isoformat(),
                 "origin": "twitter",
                 "adjusted_score": 0.68,
                 "label": True,
-                "reviewer": "demo_reviewer"
+                "reviewer": "demo_reviewer",
+                "model_version": demo_mv,
             },
         ]
 
@@ -1499,8 +1514,10 @@ try:
             o = r.get("origin","unknown")
             ok = bool(r.get("label", False))
             score = float(r.get("adjusted_score", 0.0) or 0.0)
+            mv = r.get("model_version", "unknown")
+            mv_str = mv if (isinstance(mv, str) and mv.startswith("v")) else f"v{mv}"
             mark = "✅ confirmed" if ok else "❌ rejected"
-            md.append(f"- {o} @ {hhmm} → {mark} (score {score:.2f})")
+            md.append(f"- {o} @ {hhmm} → {mark} (score {score:.2f}, {mv_str})")
 
         # Small stats
         pos = sum(1 for r in rows if bool(r.get("label", False)))
@@ -1516,6 +1533,8 @@ try:
             pass
 except Exception as e:
     md.append(f"\n⚠️ Label feedback section failed: {e}")
+
+
 
 
 
