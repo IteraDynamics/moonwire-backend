@@ -1422,10 +1422,12 @@ except Exception as e:
 
 
 
+
 # ---------- Label Feedback (last 3) ----------
 try:
     from src.paths import MODELS_DIR
     import os, json
+    from pathlib import Path
     md.append("\n### 🟨 Label Feedback")
 
     feedback_path = MODELS_DIR / "label_feedback.jsonl"
@@ -1499,8 +1501,10 @@ try:
             o = r.get("origin","unknown")
             ok = bool(r.get("label", False))
             score = float(r.get("adjusted_score", 0.0) or 0.0)
+            mv = r.get("model_version", "unknown")
+            mv_str = mv if (isinstance(mv, str) and mv.startswith("v")) else f"v{mv}"
             mark = "✅ confirmed" if ok else "❌ rejected"
-            md.append(f"- {o} @ {hhmm} → {mark} (score {score:.2f})")
+            md.append(f"- {o} @ {hhmm} → {mark} (score {score:.2f}, {mv_str})")
 
         # Small stats
         pos = sum(1 for r in rows if bool(r.get("label", False)))
@@ -1516,6 +1520,8 @@ try:
             pass
 except Exception as e:
     md.append(f"\n⚠️ Label feedback section failed: {e}")
+
+
 
 
 
