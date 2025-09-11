@@ -300,3 +300,133 @@ def rolling_precision_recall_snapshot(
     metrics = compute_pr_metrics(joined, min_labels=mn)
     metrics["window_hours"] = lb
     return metrics
+
+
+def _mw_parse_ts(ts: Any) -> datetime:
+    """Accept ISO with 'Z' or '+00:00' or epoch seconds; return tz-aware UTC."""
+    if isinstance(ts, (int, float)):
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    s = str(ts).strip()
+    if s.endswith("Z"):
+        if "." in s:
+            s = s.split(".")[0] + "Z"
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
+
+def _iter_jsonl_file(p: Path) -> Iterable[Dict[str, Any]]:
+    if not p.exists():
+        return
+    with p.open("r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                yield json.loads(ln)
+            except Exception:
+                continue
+
+def compute_accuracy_by_version(
+    trigger_log_path: str | Path,
+    label_log_path: str | Path,
+    window_hours: int = 72,
+    match_window_minutes: int = 5,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Join triggers ↔ feedback by (origin, timestamp ± match_window) and
+    compute TP/FP/FN per model_version, then precision/recall/F1.
+
+    Returns: { version: {tp, fp, fn, n, precision, recall, f1} }
+    """
+    trig_p = Path(trigger_log_path)
+    lab_p  = Path(label_log_path)
+
+    now = datetime.now(timezone.utc)
+    t_min = now - timedelta(hours=window_hours)
+    win   = timedelta(minutes=match_window_minutes)
+
+    # Load & filter window
+    triggers = []
+    for r in _iter_jsonl_file(trig_p) or []:
+        ts = r.get("timestamp")
+        if not ts:
+            continue
+        try:
+            dt = _mw_parse_ts(ts)
+        except Exception:
+            continue
+        if dt >= t_min:
+            r["_dt"] = dt
+            triggers.append(r)
+
+    labels = []
+    for r in _iter_jsonl_file(lab_p) or []:
+        ts = r.get("timestamp")
+        if not ts:
+            continue
+        try:
+            dt = _mw_parse_ts(ts)
+        except Exception:
+            continue
+        if dt >= t_min:
+            r["_dt"] = dt
+            labels.append(r)
+
+    # Index triggers by origin
+    by_origin: Dict[str, list] = {}
+    for r in triggers:
+        by_origin.setdefault(r.get("origin", "unknown"), []).append(r)
+    for o in by_origin:
+        by_origin[o].sort(key=lambda x: x["_dt"])
+
+    # Nearest trigger within ±win
+    def _nearest_trigger(origin: str, ldt: datetime) -> Tuple[Dict[str, Any] | None, timedelta | None]:
+        rows = by_origin.get(origin, [])
+        best, best_abs = None, None
+        for tr in rows:
+            d = tr["_dt"] - ldt
+            ad = abs(d)
+            if ad <= win and (best is None or ad < best_abs):
+                best, best_abs = tr, ad
+        return best, best_abs
+
+    # Tally per version
+    stats: Dict[str, Dict[str, int]] = {}
+    for lb in labels:
+        origin = lb.get("origin", "unknown")
+        ldt    = lb["_dt"]
+        label  = bool(lb.get("label", False))
+
+        tr, _ = _nearest_trigger(origin, ldt)
+        if not tr:
+            continue  # skip unmatched
+
+        decision = bool(tr.get("decision", False))
+        version = lb.get("model_version") or tr.get("model_version") or "unknown"
+        version = str(version)
+
+        s = stats.setdefault(version, {"tp": 0, "fp": 0, "fn": 0})
+        if decision and label:
+            s["tp"] += 1
+        elif decision and not label:
+            s["fp"] += 1
+        elif not decision and label:
+            s["fn"] += 1
+        # TN omitted by design
+
+    # Metrics
+    out: Dict[str, Dict[str, Any]] = {}
+    for v, s in stats.items():
+        tp, fp, fn = s["tp"], s["fp"], s["fn"]
+        n = tp + fp + fn
+        prec = (tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+        rec  = (tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+        f1   = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+        out[v] = {"tp": tp, "fp": fp, "fn": fn, "n": n,
+                  "precision": prec, "recall": rec, "f1": f1}
+    return out
