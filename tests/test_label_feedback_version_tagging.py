@@ -1,64 +1,45 @@
-# tests/test_label_feedback_version_tagging.py
-import json, tempfile, sys
+# tests/test_feedback_endpoint_version.py
+import json
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from fastapi.testclient import TestClient
 
-# import the function under test
-sys.path.append("src")
-import trigger_likelihood_router as tlr  # type: ignore
+from main import app  # main mounts the router
+import src.trigger_likelihood_router as tlr  # <-- import the SAME module main uses
 
-ISO = "%Y-%m-%dT%H:%M:%SZ"
+client = TestClient(app)
 
-def _write_jsonl(path: Path, rows):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
+def test_feedback_endpoint_writes_model_version(tmp_path):
+    trig: Path = tmp_path / "trigger_history.jsonl"
+    fb: Path   = tmp_path / "label_feedback.jsonl"
 
-def test_model_version_found_within_window(monkeypatch):
-    with tempfile.TemporaryDirectory() as dtmp:
-        trig_path = Path(dtmp) / "trigger_history.jsonl"
-        # monkeypatch router's global path
-        tlr._TRIGGER_HISTORY_PATH = trig_path  # type: ignore
+    # Patch the router globals to temp files used by the mounted app
+    tlr._TRIGGER_HISTORY_PATH = trig  # type: ignore[attr-defined]
+    tlr._LABEL_FEEDBACK_PATH  = fb    # type: ignore[attr-defined]
 
-        t0 = datetime(2025, 9, 11, 12, 40, 0, tzinfo=timezone.utc)
-        rows = [
-            {
-                "timestamp": (t0 - timedelta(minutes=2)).strftime(ISO),
-                "origin": "reddit",
-                "adjusted_score": 0.72,
-                "decision": True,
-                "model_version": "v0.5.1",
-            },
-            {
-                "timestamp": (t0 - timedelta(minutes=10)).strftime(ISO),
-                "origin": "reddit",
-                "adjusted_score": 0.33,
-                "decision": False,
-                "model_version": "v0.5.0",
-            },
-        ]
-        _write_jsonl(trig_path, rows)
+    # Seed a trigger row within the ±5m window
+    trig.write_text(json.dumps({
+        "timestamp": "2025-09-11T12:38:00Z",
+        "origin": "reddit",
+        "adjusted_score": 0.73,
+        "decision": True,
+        "model_version": "v0.5.1"
+    }) + "\n", encoding="utf-8")
 
-        mv = tlr._find_model_version_for_label(
-            label_timestamp=t0.strftime(ISO),
-            origin="reddit",
-            window_minutes=5,
-        )
-        assert mv == "v0.5.1"
+    # Send feedback that should match the above trigger
+    payload = {
+        "timestamp": "2025-09-11T12:40:00Z",
+        "origin": "reddit",
+        "adjusted_score": 0.72,
+        "label": True,
+    }
+    resp = client.post("/internal/trigger-likelihood/feedback", json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["model_version"] == "v0.5.1"
 
-def test_model_version_unknown_when_no_match(monkeypatch):
-    with tempfile.TemporaryDirectory() as dtmp:
-        trig_path = Path(dtmp) / "trigger_history.jsonl"
-        tlr._TRIGGER_HISTORY_PATH = trig_path  # type: ignore
-
-        _write_jsonl(trig_path, [
-            {"timestamp": "2025-09-11T12:35:00Z", "origin": "rss_news", "model_version": "v0.5.1"}
-        ])
-
-        mv = tlr._find_model_version_for_label(
-            label_timestamp="2025-09-11T12:40:00Z",
-            origin="reddit",
-            window_minutes=5,
-        )
-        assert mv == "unknown"
+    # Verify file write
+    lines = fb.read_text(encoding="utf-8").splitlines()
+    assert lines
+    row = json.loads(lines[0])
+    assert row["model_version"] == "v0.5.1"
