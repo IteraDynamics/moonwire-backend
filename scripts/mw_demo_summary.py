@@ -1701,6 +1701,45 @@ except Exception as e:
 
 
 
+
+# ---------- Accuracy by Model Version ----------
+try:
+    from src.paths import MODELS_DIR
+    from src.ml.metrics import compute_accuracy_by_version
+    import os
+    md.append("\n### 🧪 Accuracy by Model Version")
+
+    trig_path = MODELS_DIR / "trigger_history.jsonl"
+    lab_path  = MODELS_DIR / "label_feedback.jsonl"
+
+    res = compute_accuracy_by_version(trig_path, lab_path, window_hours=72)
+
+    if not res:
+        demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
+        if demo_mode:
+            demo_rows = [
+                ("v0.5.2", {"precision": 0.67, "recall": 0.50, "f1": 0.57, "tp": 2, "fp": 1, "fn": 2, "n": 5}),
+                ("v0.5.1", {"precision": 1.00, "recall": 0.33, "f1": 0.50, "tp": 1, "fp": 0, "fn": 2, "n": 3}),
+            ]
+            for ver, m in demo_rows:
+                md.append(f"- {ver} → precision={m['precision']:.2f}, recall={m['recall']:.2f}, "
+                          f"F1={m['f1']:.2f} (tp={m['tp']}, fp={m['fp']}, fn={m['fn']}, n={m['n']})")
+        else:
+            md.append("_Waiting for more feedback..._")
+    else:
+        # order by version string desc, then by n desc
+        items = sorted(res.items(), key=lambda kv: (kv[0], kv[1]['n']), reverse=True)
+        for ver, m in items:
+            md.append(f"- {ver} → precision={m['precision']:.2f}, recall={m['recall']:.2f}, "
+                      f"F1={m['f1']:.2f} (tp={m['tp']}, fp={m['fp']}, fn={m['fn']}, n={m['n']})")
+except Exception as e:
+    md.append(f"\n⚠️ Accuracy by version failed: {e}")
+
+
+
+
+
+
 # ---------- Training Data Snapshot ----------
 try:
     from src.paths import MODELS_DIR
