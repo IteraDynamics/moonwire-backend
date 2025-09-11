@@ -1706,15 +1706,42 @@ except Exception as e:
 try:
     from src.paths import MODELS_DIR
     from src.ml.metrics import compute_accuracy_by_version
-    import os
+    import os, json
     md.append("\n### 🧪 Accuracy by Model Version")
 
     trig_path = MODELS_DIR / "trigger_history.jsonl"
     lab_path  = MODELS_DIR / "label_feedback.jsonl"
 
-    res = compute_accuracy_by_version(trig_path, lab_path, window_hours=72)
+    # window via env, default 72h
+    try:
+        window_h = int(os.getenv("MW_ACCURACY_WINDOW_H", "72"))
+    except Exception:
+        window_h = 72
 
-    if not res:
+    res = compute_accuracy_by_version(trig_path, lab_path, window_hours=window_h)
+
+    # persist snapshot for diffs across runs
+    try:
+        snap_path = MODELS_DIR / "accuracy_by_version.json"
+        with open(snap_path, "w", encoding="utf-8") as f:
+            json.dump(res or {}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+    def _parse_semver(v: str):
+        v = str(v)
+        if v.startswith("v"): v = v[1:]
+        # tolerate suffixes like '-demo' or 'v.test'
+        parts = v.split("-", 1)[0].split(".")
+        nums = []
+        for i in range(3):
+            try:
+                nums.append(int(parts[i]))
+            except Exception:
+                nums.append(-1)
+        return tuple(nums)  # (major, minor, patch)
+
+    if not res or all(k.startswith("_") for k in res.keys()):
         demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
         if demo_mode:
             demo_rows = [
@@ -1727,14 +1754,24 @@ try:
         else:
             md.append("_Waiting for more feedback..._")
     else:
-        # order by version string desc, then by n desc
-        items = sorted(res.items(), key=lambda kv: (kv[0], kv[1]['n']), reverse=True)
+        # show versions sorted by sample size desc, then semver desc
+        items = [(ver, m) for ver, m in res.items() if not str(ver).startswith("_")]
+        items.sort(key=lambda kv: (kv[1].get("n", 0), _parse_semver(kv[0])), reverse=True)
         for ver, m in items:
+            suffix = " (low n)" if m.get("n", 0) < 5 else ""
             md.append(f"- {ver} → precision={m['precision']:.2f}, recall={m['recall']:.2f}, "
-                      f"F1={m['f1']:.2f} (tp={m['tp']}, fp={m['fp']}, fn={m['fn']}, n={m['n']})")
+                      f"F1={m['f1']:.2f} (tp={m['tp']}, fp={m['fp']}, fn={m['fn']}, n={m['n']}){suffix}")
+
+        # micro & macro lines
+        micro = res.get("_micro"); macro = res.get("_macro")
+        if micro:
+            md.append(f"- Overall (micro) → precision={micro['precision']:.2f}, recall={micro['recall']:.2f}, "
+                      f"F1={micro['f1']:.2f} (tp={micro['tp']}, fp={micro['fp']}, fn={micro['fn']}, n={micro['n']})")
+        if macro:
+            md.append(f"- Macro avg → precision={macro['precision']:.2f}, recall={macro['recall']:.2f}, "
+                      f"F1={macro['f1']:.2f} (versions={macro['versions']})")
 except Exception as e:
     md.append(f"\n⚠️ Accuracy by version failed: {e}")
-
 
 
 
