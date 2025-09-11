@@ -276,7 +276,7 @@ def _validate_feedback_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-@router.post("/internal/trigger-likelihood/feedback")
+@router.post("/trigger-likelihood/feedback")
 async def post_label_feedback(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Accepts label feedback and appends it to models/label_feedback.jsonl.
