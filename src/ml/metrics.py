@@ -215,3 +215,39 @@ def compute_accuracy_by_version(
             }
 
     return out
+    
+    
+# Back-compat shim for older callers/tests
+def rolling_precision_recall_snapshot(
+    trigger_log_path: str | Path,
+    label_log_path: str | Path,
+    window_hours: int = 72,
+    match_window_minutes: int = 5,
+    dedup_one_label_per_trigger: bool = True,
+) -> Dict[str, Any]:
+    """
+    Backward-compatible overall (micro) accuracy snapshot across all versions.
+
+    Returns a dict with keys: tp, fp, fn, n, precision, recall, f1
+    """
+    res = compute_accuracy_by_version(
+        trigger_log_path=trigger_log_path,
+        label_log_path=label_log_path,
+        window_hours=window_hours,
+        match_window_minutes=match_window_minutes,
+        dedup_one_label_per_trigger=dedup_one_label_per_trigger,
+    )
+    # Prefer micro aggregate if any matches exist
+    micro = res.get("_micro") if isinstance(res, dict) else None
+    if micro:
+        return {
+            "tp": micro["tp"],
+            "fp": micro["fp"],
+            "fn": micro["fn"],
+            "n":  micro["n"],
+            "precision": micro["precision"],
+            "recall":    micro["recall"],
+            "f1":        micro["f1"],
+        }
+    # No matches -> return zeros
+    return {"tp": 0, "fp": 0, "fn": 0, "n": 0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
