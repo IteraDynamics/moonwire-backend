@@ -2429,25 +2429,7 @@ except Exception as e:
 
 
 
-# ---------- source precision & recall ----------
-try:
-    metrics = compute_source_metrics(
-        flags_path=LOGS_DIR / "retraining_log.jsonl",
-        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
-        days=7,
-        min_count=1
-    )
-    metrics = generate_demo_source_metrics_if_needed(metrics)
-    rows = metrics.get("origins", [])
 
-    md.append("\n### 📉 Source Precision & Recall (7d)")
-    if not rows:
-        md.append("_No eligible origins to display._")
-    else:
-        for row in rows:
-            md.append(f"- `{row['origin']}`: precision={row['precision']} | recall={row['recall']}")
-except Exception as e:
-    md.append(f"\n_⚠️ Source metrics failed: {e}_")
 
 # ---------- write file ----------
 (ART / "demo_summary.md").write_text("\n".join(md))
@@ -2471,5 +2453,4 @@ if meta_path.exists():
 else:
     md.append("\n📦 Raw Calibration Meta: _not available in demo_")
 
-   md.append(f"\n⚠️ Score distribution snapshot failed: {e}")
 
