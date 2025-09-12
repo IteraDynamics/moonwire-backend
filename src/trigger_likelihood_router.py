@@ -40,9 +40,12 @@ def score_endpoint(
     """
     try:
         if use == "ensemble":
-            return infer_score_ensemble(payload)
-        # default to logistic
-        return infer_score(payload, explain=explain)
+            out = infer_score_ensemble(payload)
+            _log_score_history(payload, out, use_model="ensemble")
+            return out
+        out = infer_score(payload, explain=explain)
+        _log_score_history(payload, out, use_model="logistic")
+        return out
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"scoring error: {e}")
 
