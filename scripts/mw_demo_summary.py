@@ -1843,7 +1843,7 @@ try:
             f">%0.5={snap['pct_above_threshold']*100:.1f}%"
         )
         bins_str = " | ".join(
-            [f\"{b['lo']:.1f}-{b['hi']:.1f}:{b['count']}\" for b in snap.get(\"hist\", [])]
+            [f"{b['lo']:.1f}-{b['hi']:.1f}:{b['count']}" for b in snap.get("hist", [])]
         )
         md.append(f"  - hist: {bins_str}")
 
@@ -1852,7 +1852,6 @@ try:
 
 except Exception as e:
     md.append(f"\n⚠️ Score distribution snapshot failed: {e}")
-
 
 # ---------- Training Data Snapshot ----------
 try:
