@@ -30,6 +30,13 @@ from typing import Dict, List
 from src.ml.metrics import rolling_precision_recall_snapshot
 
 
+########imports##########
+from scripts.summary_sections import score_distribution
+from scripts.summary_sections import source_precision_recall
+from scripts.summary_sections import burst_detection_section
+
+
+
 # ---- ML (trigger likelihood) import guard ----
 _ML_OK = False
 _ML_ERR = None
@@ -2385,43 +2392,6 @@ if _printed == 0 and not _overall:
 
 
 
-# ---------- burst detection ----------
-try:
-    raw_bursts = compute_bursts(
-        flags_path=LOGS_DIR / "retraining_log.jsonl",
-        triggers_path=LOGS_DIR / "retraining_triggered.jsonl",
-        days=7,
-        interval="hour",
-        z_thresh=2.0,
-    )
-
-    def _known_only(bundle):
-        return [
-            o for o in (bundle or {}).get("origins", [])
-            if o.get("origin") != "unknown" and o.get("bursts")
-        ]
-
-    display_origins = _known_only(raw_bursts)
-
-    # If we only have unknown (or nothing at all) and we're in demo mode, seed
-    if not display_origins and is_demo_mode():
-        seeded = generate_demo_bursts_if_needed(raw_bursts, days=7, interval="hour", z_thresh=2.0)
-        display_origins = _known_only(seeded) or seeded.get("origins", [])
-
-    md.append("\n### 🚨 Burst Detection (7d, hour)")
-    if not display_origins:
-        md.append("_No bursts detected._")
-    else:
-        # Flatten and show the top 3 by z-score
-        items = []
-        for o in display_origins:
-            for b in o.get("bursts", []):
-                items.append((o["origin"], b))
-        items.sort(key=lambda t: t[1].get("z_score", 0), reverse=True)
-        for origin, b in items[:3]:
-            md.append(f"- {origin}: {b['timestamp_bucket']} (count={b['count']}, z={b['z_score']})")
-except Exception as e:
-    md.append(f"\n_⚠️ Burst detection failed: {e}_")
 
 
 
