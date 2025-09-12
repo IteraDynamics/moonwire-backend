@@ -1797,31 +1797,43 @@ try:
     snap72 = compute_score_distribution(score_log, window_hours=win72, threshold=0.5)
 
     # Demo seed if empty
-    demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1","true","yes")
+    demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
     if not snap24 and demo_mode:
-        import random, math
+        import random
+        import math
         random.seed(42)
         synth = [max(0.0, min(1.0, random.gauss(0.25, 0.08))) for _ in range(5)] + \
                 [max(0.0, min(1.0, random.gauss(0.75, 0.08))) for _ in range(5)]
         synth.sort()
         n = len(synth)
-        mean = sum(synth)/n
-        med = synth[n//2] if n%2 else 0.5*(synth[n//2-1]+synth[n//2])
-        var = sum((x-mean)**2 for x in synth)/n
+        mean = sum(synth) / n
+        med = synth[n // 2] if n % 2 else 0.5 * (synth[n // 2 - 1] + synth[n // 2])
+        var = sum((x - mean) ** 2 for x in synth) / n
         std = math.sqrt(var)
         vmin, vmax = synth[0], synth[-1]
         above = sum(1 for x in synth if x > 0.5)
-        pct = above/n
+        pct = above / n
         buckets = []
         for i in range(10):
-            lo, hi = i/10, (i+1)/10
-            cnt = sum(1 for x in synth if (lo <= x < hi)) if i<9 else sum(1 for x in synth if (lo <= x <= hi))
+            lo, hi = i / 10, (i + 1) / 10
+            if i < 9:
+                cnt = sum(1 for x in synth if (lo <= x < hi))
+            else:
+                cnt = sum(1 for x in synth if (lo <= x <= hi))
             buckets.append({"lo": lo, "hi": hi, "count": cnt})
-        snap24 = {"count": n, "mean": mean, "median": med, "std": std, "min": vmin, "max": vmax,
-                  "pct_above_threshold": pct, "hist": buckets}
+        snap24 = {
+            "count": n,
+            "mean": mean,
+            "median": med,
+            "std": std,
+            "min": vmin,
+            "max": vmax,
+            "pct_above_threshold": pct,
+            "hist": buckets,
+        }
         snap72 = snap24
 
-    def _fmt(snap: dict, label: str):
+    def _fmt(snap: dict, label: str) -> None:
         if not snap:
             md.append(f"- _{label}: waiting for scores..._")
             return
@@ -1830,7 +1842,9 @@ try:
             f"std={snap['std']:.3f} | min={snap['min']:.3f} | max={snap['max']:.3f} | "
             f">%0.5={snap['pct_above_threshold']*100:.1f}%"
         )
-        bins_str = " | ".join([f"{b['lo']:.1f}-{b['hi']:.1f}:{b['count']}" for b in snap.get("hist", [])])
+        bins_str = " | ".join(
+            [f\"{b['lo']:.1f}-{b['hi']:.1f}:{b['count']}\" for b in snap.get(\"hist\", [])]
+        )
         md.append(f"  - hist: {bins_str}")
 
     _fmt(snap24, "24h")
@@ -1838,7 +1852,6 @@ try:
 
 except Exception as e:
     md.append(f"\n⚠️ Score distribution snapshot failed: {e}")
-
 
 
 # ---------- Training Data Snapshot ----------
