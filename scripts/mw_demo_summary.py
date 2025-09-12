@@ -1774,84 +1774,88 @@ except Exception as e:
     md.append(f"\n⚠️ Accuracy by version failed: {e}")
 
 
-# ---------- Score Distribution Snapshot ----------
-try:
-    from src.paths import MODELS_DIR
-    from src.ml.metrics import compute_score_distribution
-    import os
-    md.append("\n### 📊 Score Distribution Snapshot")
 
-    score_log = MODELS_DIR / "score_history.jsonl"
-
-    # Window knobs (defaults: 24h & 72h)
+def append_score_distribution_snapshot(md):
+    """Append the '📊 Score Distribution Snapshot' section."""
     try:
-        win24 = int(os.getenv("MW_SCORE_SNAPSHOT_24H", "24"))
-    except Exception:
-        win24 = 24
-    try:
-        win72 = int(os.getenv("MW_SCORE_SNAPSHOT_72H", "72"))
-    except Exception:
-        win72 = 72
+        from src.paths import MODELS_DIR
+        from src.ml.metrics import compute_score_distribution
+        import os, math, random
 
-    snap24 = compute_score_distribution(score_log, window_hours=win24, threshold=0.5)
-    snap72 = compute_score_distribution(score_log, window_hours=win72, threshold=0.5)
+        md.append("\n### 📊 Score Distribution Snapshot")
 
-    # Demo seed if empty
-    demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
-    if not snap24 and demo_mode:
-        import random
-        import math
-        random.seed(42)
-        synth = [max(0.0, min(1.0, random.gauss(0.25, 0.08))) for _ in range(5)] + \
-                [max(0.0, min(1.0, random.gauss(0.75, 0.08))) for _ in range(5)]
-        synth.sort()
-        n = len(synth)
-        mean = sum(synth) / n
-        med = synth[n // 2] if n % 2 else 0.5 * (synth[n // 2 - 1] + synth[n // 2])
-        var = sum((x - mean) ** 2 for x in synth) / n
-        std = math.sqrt(var)
-        vmin, vmax = synth[0], synth[-1]
-        above = sum(1 for x in synth if x > 0.5)
-        pct = above / n
-        buckets = []
-        for i in range(10):
-            lo, hi = i / 10, (i + 1) / 10
-            if i < 9:
-                cnt = sum(1 for x in synth if (lo <= x < hi))
-            else:
-                cnt = sum(1 for x in synth if (lo <= x <= hi))
-            buckets.append({"lo": lo, "hi": hi, "count": cnt})
-        snap24 = {
-            "count": n,
-            "mean": mean,
-            "median": med,
-            "std": std,
-            "min": vmin,
-            "max": vmax,
-            "pct_above_threshold": pct,
-            "hist": buckets,
-        }
-        snap72 = snap24
+        score_log = MODELS_DIR / "score_history.jsonl"
 
-    def _fmt(snap: dict, label: str) -> None:
-        if not snap:
-            md.append(f"- _{label}: waiting for scores..._")
-            return
-        md.append(
-            f"- {label}: n={snap['count']} | mean={snap['mean']:.3f} | median={snap['median']:.3f} | "
-            f"std={snap['std']:.3f} | min={snap['min']:.3f} | max={snap['max']:.3f} | "
-            f">%0.5={snap['pct_above_threshold']*100:.1f}%"
-        )
-        bins_str = " | ".join(
-            [f"{b['lo']:.1f}-{b['hi']:.1f}:{b['count']}" for b in snap.get("hist", [])]
-        )
-        md.append(f"  - hist: {bins_str}")
+        # Window knobs (defaults: 24h & 72h)
+        try:
+            win24 = int(os.getenv("MW_SCORE_SNAPSHOT_24H", "24"))
+        except Exception:
+            win24 = 24
+        try:
+            win72 = int(os.getenv("MW_SCORE_SNAPSHOT_72H", "72"))
+        except Exception:
+            win72 = 72
 
-    _fmt(snap24, "24h")
-    _fmt(snap72, "72h")
+        snap24 = compute_score_distribution(score_log, window_hours=win24, threshold=0.5)
+        snap72 = compute_score_distribution(score_log, window_hours=win72, threshold=0.5)
 
-except Exception as e:
-    md.append(f"\n⚠️ Score distribution snapshot failed: {e}")
+        # Demo seed if empty
+        demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
+        if not snap24 and demo_mode:
+            random.seed(42)
+            synth = [max(0.0, min(1.0, random.gauss(0.25, 0.08))) for _ in range(5)] + \
+                    [max(0.0, min(1.0, random.gauss(0.75, 0.08))) for _ in range(5)]
+            synth.sort()
+            n = len(synth)
+            mean = sum(synth) / n
+            med = synth[n // 2] if n % 2 else 0.5 * (synth[n // 2 - 1] + synth[n // 2])
+            var = sum((x - mean) ** 2 for x in synth) / n
+            std = math.sqrt(var)
+            vmin, vmax = synth[0], synth[-1]
+            above = sum(1 for x in synth if x > 0.5)
+            pct = above / n
+            buckets = []
+            for i in range(10):
+                lo, hi = i / 10, (i + 1) / 10
+                if i < 9:
+                    cnt = sum(1 for x in synth if (lo <= x < hi))
+                else:
+                    cnt = sum(1 for x in synth if (lo <= x <= hi))
+                buckets.append({"lo": lo, "hi": hi, "count": cnt})
+            snap24 = {
+                "count": n,
+                "mean": mean,
+                "median": med,
+                "std": std,
+                "min": vmin,
+                "max": vmax,
+                "pct_above_threshold": pct,
+                "hist": buckets,
+            }
+            snap72 = snap24
+
+        def _fmt(snap: dict, label: str) -> None:
+            if not snap:
+                md.append(f"- _{label}: waiting for scores..._")
+                return
+            md.append(
+                f"- {label}: n={snap['count']} | mean={snap['mean']:.3f} | median={snap['median']:.3f} | "
+                f"std={snap['std']:.3f} | min={snap['min']:.3f} | max={snap['max']:.3f} | "
+                f">%0.5={snap['pct_above_threshold']*100:.1f}%"
+            )
+            bins_str = " | ".join(
+                [f"{b['lo']:.1f}-{b['hi']:.1f}:{b['count']}" for b in snap.get('hist', [])]
+            )
+            md.append(f"  - hist: {bins_str}")
+
+        _fmt(snap24, "24h")
+        _fmt(snap72, "72h")
+
+    except Exception as e:
+        md.append(f"\n⚠️ Score distribution snapshot failed: {e}")
+
+
+
 
 # ---------- Training Data Snapshot ----------
 try:
