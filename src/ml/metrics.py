@@ -251,3 +251,88 @@ def rolling_precision_recall_snapshot(
         }
     # No matches -> return zeros
     return {"tp": 0, "fp": 0, "fn": 0, "n": 0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
+
+# --- v0.5.4: score distribution snapshot -------------------------------------
+from typing import List
+import math
+
+def compute_score_distribution(
+    score_log_path: str | Path,
+    window_hours: int = 24,
+    bucket_edges: List[float] | None = None,
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """
+    Aggregate score stats from models/score_history.jsonl over a recent window.
+
+    Returns {} if no rows in window, else:
+      {
+        "count": int, "mean": float, "median": float, "std": float,
+        "min": float, "max": float,
+        "pct_above_threshold": float,   # in [0,1]
+        "hist": [{"lo":0.0, "hi":0.1, "count":c}, ...],  # 10 buckets by default
+      }
+    """
+    p = Path(score_log_path)
+    if not p.exists():
+        return {}
+
+    now = datetime.now(timezone.utc)
+    t_min = now - timedelta(hours=window_hours)
+
+    vals: List[float] = []
+    for r in _iter_jsonl_file(p) or []:
+        ts = r.get("timestamp")
+        sc = r.get("adjusted_score")
+        if ts is None or sc is None:
+            continue
+        try:
+            dt = _mw_parse_ts(ts)
+            if dt < t_min:
+                continue
+            vals.append(float(sc))
+        except Exception:
+            continue
+
+    if not vals:
+        return {}
+
+    vals.sort()
+    n = len(vals)
+    mean = sum(vals) / n
+    if n % 2:
+        median = vals[n // 2]
+    else:
+        median = 0.5 * (vals[n // 2 - 1] + vals[n // 2])
+
+    # population std (stable for monitoring; TN not relevant here)
+    var = sum((x - mean) ** 2 for x in vals) / n
+    std = math.sqrt(var)
+
+    vmin, vmax = vals[0], vals[-1]
+    above = sum(1 for x in vals if x > threshold)
+    pct_above = above / n
+
+    # histogram
+    if bucket_edges is None:
+        bucket_edges = [i / 10 for i in range(11)]  # 0.0..1.0 in 0.1 steps
+    buckets: List[Dict[str, Any]] = []
+    for i in range(len(bucket_edges) - 1):
+        lo, hi = bucket_edges[i], bucket_edges[i + 1]
+        # include right edge only on the final bucket
+        if i < len(bucket_edges) - 2:
+            cnt = sum(1 for x in vals if (lo <= x < hi))
+        else:
+            cnt = sum(1 for x in vals if (lo <= x <= hi))
+        buckets.append({"lo": lo, "hi": hi, "count": cnt})
+
+    return {
+        "count": n,
+        "mean": mean,
+        "median": median,
+        "std": std,
+        "min": vmin,
+        "max": vmax,
+        "pct_above_threshold": pct_above,
+        "hist": buckets,
+    }
