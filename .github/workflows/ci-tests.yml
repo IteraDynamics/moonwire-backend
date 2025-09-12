@@ -120,6 +120,9 @@ jobs:
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
           # --- optional: window for accuracy-by-version snapshot (default 72h) ---
           MW_ACCURACY_WINDOW_H: "72"
+          MW_SCORE_SNAPSHOT_24H: "24"
+          MW_SCORE_SNAPSHOT_72H: "72"
+
         run: python scripts/mw_demo_summary.py
 
       # --- Upload accuracy-by-version snapshot JSON ---
