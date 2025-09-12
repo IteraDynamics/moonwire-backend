@@ -125,6 +125,58 @@ def get_trigger_model_metadata():
 # Locations in MODELS_DIR
 _LABEL_FEEDBACK_PATH: Path = MODELS_DIR / "label_feedback.jsonl"
 _TRIGGER_HISTORY_PATH: Path = MODELS_DIR / "trigger_history.jsonl"
+# Location: models/score_history.jsonl (append-only)
+_SCORE_HISTORY_PATH: Path = MODELS_DIR / "score_history.jsonl"
+
+def _safe_origin_from_payload(payload: Dict[str, Any]) -> str:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("origin"), str) and payload["origin"].strip():
+            return payload["origin"].strip()
+        feats = payload.get("features")
+        if isinstance(feats, dict):
+            o = feats.get("origin")
+            if isinstance(o, str) and o.strip():
+                return o.strip()
+    return "unknown"
+
+def _read_training_version() -> str:
+    try:
+        tv = (MODELS_DIR / "training_version.txt")
+        if tv.exists():
+            s = tv.read_text(encoding="utf-8").strip()
+            return s if s else "unknown"
+    except Exception:
+        pass
+    return "unknown"
+
+def _log_score_history(payload: Dict[str, Any], result: Dict[str, Any], use_model: str = "logistic") -> None:
+    """Best-effort append of a single inference to score_history.jsonl."""
+    try:
+        origin = _safe_origin_from_payload(payload)
+        # prefer 'adjusted_score' (our canonical), else fall back to 'score'
+        score = result.get("adjusted_score", result.get("score"))
+        if score is None:
+            return  # nothing to log
+        rec = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "origin": origin,
+            "adjusted_score": float(score),
+            "model_version": str(result.get("model_version") or _read_training_version()),
+        }
+        # Optional fields if present
+        for k in ("volatility_regime", "drifted_features", "threshold"):
+            if k in result:
+                rec[k] = result[k]
+        # include which scorer was used (logistic|ensemble)
+        rec["scorer"] = use_model
+        _append_jsonl(_SCORE_HISTORY_PATH, rec)
+    except Exception:
+        # never block inference on logging errors
+        pass
+
+
+
+
 
 
 def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
