@@ -42,7 +42,7 @@ from scripts.summary_sections import calibration_section
 from scripts.summary_sections import training_metadata_section
 from scripts.summary_sections import retrain_summary_section
 from scripts.summary_sections import training_data_snapshot_section
-
+from scripts.summary_sections import accuracy_by_version_section
 
 
 # ---- ML (trigger likelihood) import guard ----
