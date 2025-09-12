@@ -118,7 +118,19 @@ jobs:
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
+          # --- optional: window for accuracy-by-version snapshot (default 72h) ---
+          MW_ACCURACY_WINDOW_H: "72"
         run: python scripts/mw_demo_summary.py
+
+      # --- Upload accuracy-by-version snapshot JSON ---
+      - name: Upload accuracy-by-version snapshot
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: accuracy-by-version
+          path: models/accuracy_by_version.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Show artifacts (debug)
         if: ${{ success() }}
