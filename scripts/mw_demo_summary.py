@@ -39,7 +39,7 @@ from scripts.summary_sections import drift_check_section
 from scripts.summary_sections import drift_aware_inference_section
 from scripts.summary_sections import per_origin_thresholds_section
 from scripts.summary_sections import calibration_section
-
+from scripts.summary_sections import training_metadata_section
 
 
 
