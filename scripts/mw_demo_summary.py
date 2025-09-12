@@ -37,6 +37,8 @@ from scripts.summary_sections import burst_detection_section
 from scripts.summary_sections import live_backtest_section
 from scripts.summary_sections import drift_check_section
 from scripts.summary_sections import drift_aware_inference_section
+from scripts.summary_sections import per_origin_thresholds_section
+
 
 
 
@@ -2153,20 +2155,7 @@ elif calib:
 else:
     md.append("[demo] calibration not available")
 
-# --- Per-Origin Thresholds Summary ---
-thresholds = load_per_origin_thresholds()
-md.append("\n### 🎯 Per-Origin Thresholds")
 
-example_count = 0
-for origin, vals in thresholds.items():
-    if "p70" in vals and "p80" in vals:
-        md.append(f"- {origin}: p70={vals['p70']:.2f}, p80={vals['p80']:.2f}")
-        example_count += 1
-    if example_count >= 2:
-        break
-
-if example_count == 0:
-    md.append("- [demo] fallback thresholds in use")
 
 
 
