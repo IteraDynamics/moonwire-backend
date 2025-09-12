@@ -1774,85 +1774,165 @@ except Exception as e:
     md.append(f"\n⚠️ Accuracy by version failed: {e}")
 
 
+# scripts/summary_sections/score_distribution.py
+from __future__ import annotations
+from typing import List, Dict, Any
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+import json
+import os
+import random
 
-def append_score_distribution_snapshot(md):
-    """Append the '📊 Score Distribution Snapshot' section."""
+def render(md: List[str]) -> None:
+    """
+    Renders:
+      ### 📊 Score Distribution Snapshot
+      - 24h stats (n, mean, median, std, min, max, >thr%)
+      - 72h histogram (0.0–0.1, …, 0.9–1.0)
+    Reads models/score_history.jsonl (append-only; optional).
+    DEMO_MODE seeds ~10 plausible rows if the log is empty.
+    """
     try:
         from src.paths import MODELS_DIR
-        from src.ml.metrics import compute_score_distribution
-        import os, math, random
-
+    except Exception:
         md.append("\n### 📊 Score Distribution Snapshot")
+        md.append("_paths not available_")
+        return
 
-        score_log = MODELS_DIR / "score_history.jsonl"
+    md.append("\n### 📊 Score Distribution Snapshot")
 
-        # Window knobs (defaults: 24h & 72h)
+    log_path = MODELS_DIR / "score_history.jsonl"
+    now = datetime.now(timezone.utc)
+    cutoff_24 = now - timedelta(hours=24)
+    cutoff_72 = now - timedelta(hours=72)
+
+    # Threshold (global display): env override → default 0.5
+    try:
+        thr_env = os.getenv("TL_DECISION_THRESHOLD")
+        threshold = float(thr_env) if thr_env is not None else 0.5
+    except Exception:
+        threshold = 0.5
+
+    def _parse_ts(v) -> datetime | None:
+        if v is None:
+            return None
         try:
-            win24 = int(os.getenv("MW_SCORE_SNAPSHOT_24H", "24"))
+            return datetime.fromtimestamp(float(v), tz=timezone.utc)
         except Exception:
-            win24 = 24
+            pass
         try:
-            win72 = int(os.getenv("MW_SCORE_SNAPSHOT_72H", "72"))
+            s = str(v)
+            s = s[:-1] + "+00:00" if s.endswith("Z") else s
+            dt = datetime.fromisoformat(s)
+            return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except Exception:
-            win72 = 72
+            return None
 
-        snap24 = compute_score_distribution(score_log, window_hours=win24, threshold=0.5)
-        snap72 = compute_score_distribution(score_log, window_hours=win72, threshold=0.5)
+    def _load_jsonl(p: Path) -> list[dict]:
+        if not p.exists():
+            return []
+        out: list[dict] = []
+        try:
+            for ln in p.read_text(encoding="utf-8").splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(json.loads(ln))
+                except Exception:
+                    continue
+        except Exception:
+            return []
+        return out
 
-        # Demo seed if empty
-        demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
-        if not snap24 and demo_mode:
-            random.seed(42)
-            synth = [max(0.0, min(1.0, random.gauss(0.25, 0.08))) for _ in range(5)] + \
-                    [max(0.0, min(1.0, random.gauss(0.75, 0.08))) for _ in range(5)]
-            synth.sort()
-            n = len(synth)
-            mean = sum(synth) / n
-            med = synth[n // 2] if n % 2 else 0.5 * (synth[n // 2 - 1] + synth[n // 2])
-            var = sum((x - mean) ** 2 for x in synth) / n
-            std = math.sqrt(var)
-            vmin, vmax = synth[0], synth[-1]
-            above = sum(1 for x in synth if x > 0.5)
-            pct = above / n
-            buckets = []
-            for i in range(10):
-                lo, hi = i / 10, (i + 1) / 10
-                if i < 9:
-                    cnt = sum(1 for x in synth if (lo <= x < hi))
-                else:
-                    cnt = sum(1 for x in synth if (lo <= x <= hi))
-                buckets.append({"lo": lo, "hi": hi, "count": cnt})
-            snap24 = {
-                "count": n,
-                "mean": mean,
-                "median": med,
-                "std": std,
-                "min": vmin,
-                "max": vmax,
-                "pct_above_threshold": pct,
-                "hist": buckets,
-            }
-            snap72 = snap24
+    rows = _load_jsonl(log_path)
 
-        def _fmt(snap: dict, label: str) -> None:
-            if not snap:
-                md.append(f"- _{label}: waiting for scores..._")
-                return
-            md.append(
-                f"- {label}: n={snap['count']} | mean={snap['mean']:.3f} | median={snap['median']:.3f} | "
-                f"std={snap['std']:.3f} | min={snap['min']:.3f} | max={snap['max']:.3f} | "
-                f">%0.5={snap['pct_above_threshold']*100:.1f}%"
-            )
-            bins_str = " | ".join(
-                [f"{b['lo']:.1f}-{b['hi']:.1f}:{b['count']}" for b in snap.get('hist', [])]
-            )
-            md.append(f"  - hist: {bins_str}")
+    # DEMO: seed plausible scores in-memory (do NOT write file)
+    demo_mode = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
+    if not rows and demo_mode:
+        origins = ["reddit", "twitter", "rss_news"]
+        versions = ["v0.5.2", "v0.5.1"]
+        n = 10
+        # mixture: mild bimodal around ~0.1 and ~0.6
+        for i in range(n):
+            t = now - timedelta(minutes=5 * i)
+            if i % 3 == 0:
+                s = max(0.0, min(1.0, random.gauss(0.60, 0.12)))
+            else:
+                s = max(0.0, min(1.0, random.gauss(0.15, 0.08)))
+            rows.append({
+                "timestamp": t.isoformat(),
+                "origin": random.choice(origins),
+                "adjusted_score": float(s),
+                "model_version": random.choice(versions),
+            })
 
-        _fmt(snap24, "24h")
-        _fmt(snap72, "72h")
+    # Extract recent scores
+    scores_24: list[float] = []
+    scores_72: list[float] = []
 
-    except Exception as e:
-        md.append(f"\n⚠️ Score distribution snapshot failed: {e}")
+    for r in rows:
+        ts = _parse_ts(r.get("timestamp"))
+        if ts is None:
+            continue
+        try:
+            s = float(r.get("adjusted_score"))
+        except Exception:
+            continue
+        if ts >= cutoff_72:
+            scores_72.append(s)
+            if ts >= cutoff_24:
+                scores_24.append(s)
+
+    def _safe_stats(vals: list[float]) -> Dict[str, Any]:
+        if not vals:
+            return {"n": 0, "mean": 0.0, "median": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "gt_thr_pct": 0.0}
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        mean = sum(vals_sorted) / n
+        # median
+        if n % 2 == 1:
+            median = vals_sorted[n // 2]
+        else:
+            median = 0.5 * (vals_sorted[n // 2 - 1] + vals_sorted[n // 2])
+        # population std (display; robust for small n)
+        var = 0.0
+        if n > 0:
+            mu = mean
+            var = sum((x - mu) ** 2 for x in vals_sorted) / n
+        std = var ** 0.5
+        vmin = vals_sorted[0]
+        vmax = vals_sorted[-1]
+        gt = sum(1 for x in vals_sorted if x > threshold)
+        gt_pct = 100.0 * gt / n
+        return {"n": n, "mean": mean, "median": median, "std": std, "min": vmin, "max": vmax, "gt_thr_pct": gt_pct}
+
+    s24 = _safe_stats(scores_24)
+    s72 = _safe_stats(scores_72)
+
+    # Print 24h stats (compact)
+    md.append(
+        f"- **last 24h**: n={s24['n']}, mean={s24['mean']:.3f}, median={s24['median']:.3f}, "
+        f"std={s24['std']:.3f}, min={s24['min']:.3f}, max={s24['max']:.3f}, "
+        f">thr({threshold:.2f})={s24['gt_thr_pct']:.1f}%"
+    )
+
+    # Histogram over 72h (10 buckets: [0.0,0.1), …, [0.9,1.0])
+    buckets = [{"lo": i / 10.0, "hi": (i + 1) / 10.0, "count": 0} for i in range(10)]
+    for x in scores_72:
+        idx = int(min(9, max(0, int(x * 10))))
+        buckets[idx]["count"] += 1
+
+    if s72["n"] == 0:
+        md.append("- _no scores in last 72h_")
+    else:
+        # Show compact histogram string, then one per line for readability
+        compact = ", ".join(f"{b['lo']:.1f}-{b['hi']:.1f}:{b['count']}" for b in buckets)
+        md.append(f"- **72h histogram**: {compact}")
+        # (optional) per-line view for quick scan
+        for b in buckets:
+            md.append(f"  - {b['lo']:.1f}–{b['hi']:.1f}: {b['count']}")
+    # Done
 
 
 
