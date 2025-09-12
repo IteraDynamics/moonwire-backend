@@ -15,24 +15,34 @@ def test_dedup_and_overalls(tmp_path):
     trig = tmp_path / "trigger_history.jsonl"
     lab  = tmp_path / "label_feedback.jsonl"
 
-    t0 = datetime(2025, 9, 11, 12, 0, 0, tzinfo=timezone.utc)
+    # Use relative "now" so the 24h window always contains our rows
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    t0 = now - timedelta(minutes=3)  # trigger 3 minutes ago
 
     # One trigger (v0.5.2, decision=True)
     _w(trig, [{
-        "timestamp": (t0 + timedelta(minutes=0)).strftime(ISO),
-        "origin": "reddit", "decision": True, "model_version": "v0.5.2"
+        "timestamp": t0.strftime(ISO),
+        "origin": "reddit",
+        "decision": True,
+        "model_version": "v0.5.2",
     }])
 
-    # Two labels mapping to same trigger within window: first True (TP), then False (would be FP)
+    # Two labels mapping to same trigger within the ±5m window:
+    # first True (TP), then False (would be FP) — but dedup keeps only the first.
     _w(lab, [
-        {"timestamp": (t0 + timedelta(minutes=1)).strftime(ISO), "origin": "reddit", "label": True,  "adjusted_score": 0.7, "model_version": "v0.5.2"},
-        {"timestamp": (t0 + timedelta(minutes=2)).strftime(ISO), "origin": "reddit", "label": False, "adjusted_score": 0.4, "model_version": "v0.5.2"},
+        {"timestamp": (t0 + timedelta(minutes=1)).strftime(ISO), "origin": "reddit",
+         "label": True,  "adjusted_score": 0.7, "model_version": "v0.5.2"},
+        {"timestamp": (t0 + timedelta(minutes=2)).strftime(ISO), "origin": "reddit",
+         "label": False, "adjusted_score": 0.4, "model_version": "v0.5.2"},
     ])
 
-    res = compute_accuracy_by_version(trig, lab, window_hours=24, match_window_minutes=5, dedup_one_label_per_trigger=True)
+    res = compute_accuracy_by_version(
+        trig, lab, window_hours=24, match_window_minutes=5, dedup_one_label_per_trigger=True
+    )
+
     v = res.get("v0.5.2")
-    assert v is not None
-    # Dedup → only first label counts: TP=1, FP=0, FN=0
+    assert v is not None, f"expected version present, got res={res}"
+    # Dedup → only the first label counts: TP=1, FP=0, FN=0
     assert v["tp"] == 1 and v["fp"] == 0 and v["fn"] == 0 and v["n"] == 1
 
     # Overalls exist
