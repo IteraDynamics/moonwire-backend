@@ -35,6 +35,8 @@ from scripts.summary_sections import score_distribution
 from scripts.summary_sections import source_precision_recall
 from scripts.summary_sections import burst_detection_section
 from scripts.summary_sections import live_backtest_section
+from scripts.summary_sections import drift_check_section
+
 
 
 
@@ -2271,71 +2273,7 @@ except Exception as e:
 
 
 
-# ---------- drift check (polish) ----------
-md.append("\n### 🔎 Drift Check (features)")
-try:
-    _drift_raw = (
-        locals().get("drift")
-        or locals().get("drift_result")
-        or locals().get("drift_check")
-        or {}
-    )
-    _items = _drift_raw.get("features") or _drift_raw.get("items") or []
-except Exception:
-    _items = []
 
-# Normalize fields defensively and compute a score field
-_norm_items = []
-for it in _items:
-    if not isinstance(it, dict):
-        continue
-    try:
-        feat = it.get("feature") or it.get("name") or "feature"
-        score = float(it.get("score", it.get("drift_score", 0.0) or 0.0))
-        dmean = float(it.get("delta_mean", it.get("delta", 0.0) or 0.0))
-        nz_tr = float(
-            it.get("nz_train")
-            or it.get("nz_pct_train")
-            or it.get("nz_train_pct")
-            or it.get("nz_train_percent")
-            or it.get("train_nonzero_pct")
-            or 0.0
-        )
-        nz_lv = float(
-            it.get("nz_live")
-            or it.get("nz_pct_live")
-            or it.get("nz_live_pct")
-            or it.get("nz_live_percent")
-            or it.get("live_nonzero_pct")
-            or 0.0
-        )
-    except Exception:
-        continue
-    _norm_items.append(
-        {
-            "feature": feat,
-            "score": score,
-            "delta_mean": dmean,
-            "nz_train": nz_tr,
-            "nz_live": nz_lv,
-        }
-    )
-
-# Only show material drift (score >= threshold), top 3
-_DRIFT_SCORE_MIN = 0.6  # was 1.0
-_top = [x for x in _norm_items if x["score"] >= _DRIFT_SCORE_MIN]
-_top.sort(key=lambda x: x["score"], reverse=True)
-_top = _top[:3]
-
-if not _top:
-    md.append("No material drift detected.")
-else:
-    for x in _top:
-        md.append(
-            f"- {x['feature']}: Δmean={round(x['delta_mean'], 2)}, "
-            f"nz% {round(x['nz_train'])}→{round(x['nz_live'])}, "
-            f"score={round(x['score'], 2)}"
-        )
             
             
             
