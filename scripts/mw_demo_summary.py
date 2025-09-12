@@ -44,7 +44,7 @@ from scripts.summary_sections import retrain_summary_section
 from scripts.summary_sections import training_data_snapshot_section
 from scripts.summary_sections import accuracy_by_version_section
 from scripts.summary_sections import rolling_accuracy_section
-
+from scripts.summary_sections import label_feedback_section
 
 
 
