@@ -19,7 +19,7 @@ def append(md: list[str], ctx: SummaryContext):
     bursts_map  = ctx.caches.get("bursts_map", {})
     dyn_map     = ctx.caches.get("dyn_thresholds", {}) or {}
 
-    from .trigger_likelihood_v0 import _build_summary_features_for_origin
+    from .common import _build_summary_features_for_origin
 
     shown = 0
     for o in origins_list:
