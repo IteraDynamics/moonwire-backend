@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from scripts.summary_sections.common import pick_candidate_origins
 from src.ml.infer import score as infer_score, model_metadata
+from .common import _build_summary_features_for_origin
 
 def append(md, ctx, **kwargs):
     md.append("\n### 🤖 Trigger Likelihood v0 (next 6h)")
