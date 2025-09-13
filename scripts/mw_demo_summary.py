@@ -197,6 +197,7 @@ def main():
     volatility_regimes.append(md, ctx)
     nowcast_attention.append(md, ctx)
     trigger_likelihood_v0.append(md, ctx)
+    score_distribution.append(md, ctx)
     ensemble_v0_4.append(md, ctx)
     dynamic_vs_static_thresholds.append(md, ctx)
     volatility_aware_thresholds.append(md, ctx)
