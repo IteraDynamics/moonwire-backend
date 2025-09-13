@@ -150,8 +150,6 @@ jobs:
       - name: Publish CI summary
         if: ${{ success() }}
         run: |
-          echo "## MoonWire CI Demo Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
           cat artifacts/demo_summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # --- Upload the rendered summary as an artifact too ---
