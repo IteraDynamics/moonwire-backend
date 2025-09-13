@@ -67,6 +67,93 @@ def pick_candidate_origins(origins_rows, yield_data=None, top=3, default=("twitt
             out.append(o); seen.add(o)
             if len(out) >= top: break
     return out[:top]
+    
+def _build_summary_features_for_origin(
+    origin: str,
+    trends_by_origin: dict[str, list] | None = None,
+    regimes_map: dict | None = None,   # can be str OR {"regime": ...}
+    metrics_map: dict[str, dict] | None = None,
+    bursts_by_origin: dict[str, list] | None = None,
+) -> dict:
+    """
+    Build a compact feature vector for one origin from summary analytics:
+      - rolling counts over last 1/6/24/72 buckets (flags_count / flags / count)
+      - latest burst z-score
+      - regime one-hot (calm/normal/turbulent)
+      - precision_7d / recall_7d
+      - leadership_max_r placeholder (sections may overwrite)
+    """
+    series = (trends_by_origin or {}).get(origin, []) or []
+
+    # Determine chronological order; then take the last k (most recent) buckets.
+    def _series_latest_k(k: int) -> list:
+        if not series:
+            return []
+        try:
+            first = series[0].get("timestamp_bucket")
+            last  = series[-1].get("timestamp_bucket")
+            asc = (str(first) <= str(last))
+        except Exception:
+            asc = True
+        s = series if asc else list(reversed(series))
+        return s[-k:] if k <= len(s) else s
+
+    def _flags_from_bucket(b: dict) -> float:
+        # accept multiple key names to be robust across sources/demos
+        v = b.get("flags_count")
+        if v is None: v = b.get("flags")
+        if v is None: v = b.get("count")
+        try:
+            return float(v or 0.0)
+        except Exception:
+            return 0.0
+
+    def sum_last(k: int) -> float:
+        buckets = _series_latest_k(k)
+        return float(sum(_flags_from_bucket(x) for x in buckets))
+
+    feats = {
+        "count_1h":  sum_last(1),
+        "count_6h":  sum_last(6),
+        "count_24h": sum_last(24),
+        "count_72h": sum_last(72),
+        "burst_z":   0.0,
+        "regime_calm": 0.0,
+        "regime_normal": 0.0,
+        "regime_turbulent": 0.0,
+        "precision_7d": 0.0,
+        "recall_7d": 0.0,
+        "leadership_max_r": 0.0,  # another section may set this
+    }
+
+    # Latest burst z
+    bursts = (bursts_by_origin or {}).get(origin) or []
+    if bursts:
+        try:
+            feats["burst_z"] = float((bursts[-1] or {}).get("z_score", 0.0) or 0.0)
+        except Exception:
+            pass
+
+    # Regime (handles str or dict{"regime": ...})
+    raw_reg = (regimes_map or {}).get(origin)
+    if isinstance(raw_reg, dict):
+        regime = (raw_reg.get("regime") or "").strip().lower()
+    elif isinstance(raw_reg, str):
+        regime = raw_reg.strip().lower()
+    else:
+        regime = ""
+    if regime in ("calm", "normal", "turbulent"):
+        feats[f"regime_{regime}"] = 1.0
+
+    # Precision/recall (7d)
+    m = (metrics_map or {}).get(origin) or {}
+    try:
+        feats["precision_7d"] = float(m.get("precision", 0.0) or 0.0)
+        feats["recall_7d"]    = float(m.get("recall", 0.0) or 0.0)
+    except Exception:
+        pass
+
+    return feats
 
 # --- DEMO seeders used by a few sections ---
 def generate_demo_data_if_needed(reviewers, flag_times=None):
