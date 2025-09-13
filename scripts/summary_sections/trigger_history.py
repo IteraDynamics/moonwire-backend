@@ -1,52 +1,77 @@
 # scripts/summary_sections/trigger_history.py
-from __future__ import annotations
 from datetime import datetime, timezone
 import json
-from scripts.summary_sections.common import SummaryContext
 
-def append(md: list[str], ctx: SummaryContext):
-    md.append("\n🗂️ Trigger History (Last 3)")
+def _parse_ts_iso(s):
+    try:
+        return datetime.fromisoformat(str(s).replace("Z","+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+
+def _ensure_v_prefix(v):
+    v = str(v or "unknown")
+    return v if v.startswith("v") else f"v.{v}" if v and v[0].isalpha() else f"v{v}"
+
+def append(md, ctx):
     try:
         hist_path = ctx.models_dir / "trigger_history.jsonl"
-        last = []
+        rows = []
         if hist_path.exists():
             for ln in hist_path.read_text(encoding="utf-8").splitlines()[-64:]:
-                s = ln.strip()
-                if not s:
+                ln = ln.strip()
+                if not ln:
                     continue
                 try:
-                    last.append(json.loads(s))
+                    rows.append(json.loads(ln))
                 except Exception:
                     pass
-        last = last[-3:]
 
-        if not last:
+        # last 3 unique by (origin, timestamp, decision, score)
+        seen = set()
+        tail = []
+        for r in reversed(rows):
+            key = (
+                r.get("origin","unknown"),
+                r.get("timestamp",""),
+                r.get("decision",""),
+                round(float(r.get("adjusted_score", 0.0) or 0.0), 4),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            tail.append(r)
+            if len(tail) >= 3:
+                break
+        tail = list(reversed(tail))
+
+        md.append("\n🗂️ Trigger History (Last 3)")
+        if not tail:
             md.append("(waiting for events…)")
             return
 
-        def _hhmm(s):
-            try:
-                dt = datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
-                return dt.strftime("%H:%M")
-            except Exception:
-                return "??:??"
-
-        for row in last:
-            hhmm = _hhmm(row.get("timestamp", ""))
+        for row in tail:
+            ts = _parse_ts_iso(row.get("timestamp"))
+            hhmm = ts.strftime("%H:%M")
             origin = row.get("origin", "unknown")
             decision = row.get("decision", "unknown")
             check = "✅ triggered" if decision == "triggered" else "❌ not_triggered"
-            score = float(row.get("adjusted_score", 0.0) or 0.0)
-            thr = row.get("threshold", None)
-            regime = row.get("volatility_regime", None)
-            drift = row.get("drifted_features") or []
-            drift_txt = "none" if not drift else ", ".join(drift[:2]) + ("" if len(drift) <= 2 else "…")
-            ver = row.get("model_version", "unknown")
 
-            if thr is None:
-                md.append(f"[{hhmm}] {origin} → {check} @ 0.00{score:.2f}"[0:])  # safe formatting
-                md.append(f"[{hhmm}] {origin} → {check} @ {score:.2f} — {regime or 'n/a'} — v{ver}")
+            try:
+                score = float(row.get("adjusted_score", 0.0) or 0.0)
+            except Exception:
+                score = 0.0
+
+            thr = row.get("threshold", None)
+            regime = row.get("volatility_regime") or "n/a"
+            ver = _ensure_v_prefix(row.get("model_version", "unknown"))
+            drift = row.get("drifted_features") or []
+            drift_txt = "none" if not drift else ", ".join(map(str, drift[:2])) + ("…" if len(drift) > 2 else "")
+
+            if isinstance(thr, (int, float)):
+                md.append(f"- [{hhmm}] {origin} → {check} @ {score:.2f} (thr={thr:.2f}) — {regime} — {ver} (drift: {drift_txt})")
             else:
-                md.append(f"[{hhmm}] {origin} → {check} @ {score:.2f} (thr={thr:.2f}) — {regime or 'n/a'} — v{ver} (drift: {drift_txt})")
+                md.append(f"- [{hhmm}] {origin} → {check} @ {score:.2f} — {regime} — {ver}")
+
     except Exception as e:
+        md.append("\n🗂️ Trigger History (Last 3)")
         md.append(f"⚠️ trigger history failed: {type(e).__name__}: {e}")
