@@ -48,6 +48,7 @@ from scripts.summary_sections import (
     trigger_likelihood_v0,
     ensemble_v0_4,
     dynamic_vs_static_thresholds,
+    score_distribution,
     volatility_aware_thresholds,
     trigger_explainability,
     trigger_history,
