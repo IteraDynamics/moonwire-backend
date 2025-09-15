@@ -1,99 +1,209 @@
+# scripts/summary_sections/score_distribution.py
+from __future__ import annotations
+
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-import statistics as S
-import matplotlib.pyplot as plt
+from typing import List, Tuple
+import json
 
-from .common import pick_candidate_origins
+import numpy as np
+import matplotlib.pyplot as plt  # CI uses MPLBACKEND=Agg
 
-def append(md: list[str], ctx, hours: int = 48, min_points: int = 8):
+from .common import SummaryContext
+
+
+# -------------------------- parsing & IO helpers --------------------------
+
+def _parse_ts(v) -> datetime | None:
+    if v is None:
+        return None
+    # epoch seconds?
+    try:
+        return datetime.fromtimestamp(float(v), tz=timezone.utc)
+    except Exception:
+        pass
+    # ISO8601
+    try:
+        s = str(v)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _is_drifted(row: dict) -> bool:
+    """
+    Consider several shapes:
+      - drifted_features: list (non-empty => drifted)
+      - drift: bool
+      - drifted: bool
+    """
+    try:
+        df = row.get("drifted_features")
+        if isinstance(df, list) and len(df) > 0:
+            return True
+    except Exception:
+        pass
+    for key in ("drift", "drifted"):
+        if key in row:
+            try:
+                if bool(row.get(key)):
+                    return True
+            except Exception:
+                pass
+    return False
+
+
+def _row_score(row: dict):
+    # prefer adjusted_score, then prob_trigger_next_6h, then score
+    val = row.get("adjusted_score")
+    if val is None:
+        val = row.get("prob_trigger_next_6h", row.get("score"))
+    try:
+        return float(val)
+    except Exception:
+        return None
+
+
+def _load_recent_scores(path: Path, hours: int) -> tuple[list[float], list[float]]:
+    non_drifted, drifted = [], []
+    if not path.exists():
+        return non_drifted, drifted
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours)
+
+    try:
+        for ln in path.read_text(encoding="utf-8").splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            try:
+                row = json.loads(s)
+            except Exception:
+                continue
+
+            ts = _parse_ts(row.get("timestamp"))
+            if not ts or ts < cutoff:
+                continue
+
+            sc = _row_score(row)
+            if sc is None:
+                continue
+
+            if _is_drifted(row):
+                drifted.append(sc)
+            else:
+                non_drifted.append(sc)
+    except Exception:
+        # best-effort; empty lists will trigger demo seeding if enabled
+        pass
+
+    return non_drifted, drifted
+
+
+# -------------------------- demo seeding & stats --------------------------
+
+def _seed_demo(non_drifted: list[float], drifted: list[float], want_total: int = 64):
+    rng = np.random.default_rng(42)
+    n_drift = int(want_total * 0.25)
+    n_ok = want_total - n_drift
+
+    # Non-drifted: a bit higher mean than drifted
+    nd = np.clip(rng.normal(loc=0.28, scale=0.11, size=n_ok), 0.0, 1.0)
+    dr = np.clip(rng.normal(loc=0.18, scale=0.10, size=n_drift), 0.0, 1.0)
+
+    non_drifted[:] = list(nd)
+    drifted[:] = list(dr)
+
+
+def _stats(arr: list[float]) -> tuple[float, float, float]:
+    if not arr:
+        return 0.0, 0.0, 0.0
+    v = np.asarray(arr, dtype=float)
+    return float(v.mean()), float(np.median(v)), float(np.quantile(v, 0.90))
+
+
+# -------------------------- public section entrypoint --------------------------
+
+def append(md: List[str], ctx: SummaryContext, hours: int = 48, min_points: int = 8) -> None:
+    """
+    📐 Score Distribution (48h by default)
+    - loads scores from models/trigger_history.jsonl
+    - splits into drifted vs non-drifted
+    - renders dual histogram overlay + threshold line
+    - writes artifacts/score_hist_drift_overlay_<hours>h.png
+    """
     md.append("\n### 📐 Score Distribution (48h)")
 
-    # Load recent scores + dynamic threshold helper
+    trig_hist = ctx.models_dir / "trigger_history.jsonl"
+    non_drifted, drifted = _load_recent_scores(trig_hist, hours=hours)
+
+    # Optional demo seeding if not enough points and we're in demo mode
+    seeded = False
+    if ctx.is_demo and (len(non_drifted) + len(drifted) < min_points):
+        _seed_demo(non_drifted, drifted, want_total=max(min_points * 4, 64))
+        seeded = True
+        md.append("(demo) synthesized scores for visibility")
+
+    all_vals = non_drifted + drifted
+    n_total = len(all_vals)
+    mean_all, med_all, p90_all = _stats(all_vals)
+    md.append(f"- n={n_total}, mean={mean_all:.3f}, median={med_all:.3f}, p90={p90_all:.3f}")
+
+    # Threshold (used) — allow another section to stash it; default 0.5
+    thr_used = 0.5
     try:
-        from src.ml.recent_scores import load_recent_scores, dynamic_threshold_for_origin
-    except Exception as e:
-        md.append(f"_⚠️ recent score loader unavailable: {e}_")
-        return
-
-    # Optional static thresholds (probability scale if present)
-    try:
-        from src.ml.thresholds import load_per_origin_thresholds
-        per_origin = load_per_origin_thresholds()
-    except Exception:
-        per_origin = {}
-
-    # Pick one origin (prefer ctx.candidates → yield plan → origins_rows)
-    candidates = ctx.candidates or pick_candidate_origins(ctx.origins_rows, ctx.yield_data, top=1)
-    origin = (candidates[0] if candidates else None)
-
-    # Collect probabilities within window
-    recent = load_recent_scores()
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    def _take(filter_origin):
-        return [
-            r.proba for r in recent
-            if r.proba is not None
-            and r.ts >= cutoff
-            and (filter_origin is None or r.origin == filter_origin)
-        ]
-
-    probas = _take(origin)
-    label = origin or "overall"
-
-    # Fallback to overall if too few points
-    if len(probas) < min_points:
-        probas = _take(None)
-        label = "overall"
-
-    # Demo seeding if still sparse
-    if len(probas) < min_points and ctx.is_demo:
-        import random
-        probas = [max(0.0, min(1.0, random.betavariate(1.5, 8.0))) for _ in range(64)]
-        md.append("_(demo) synthesized scores for visibility_")
-
-    if not probas:
-        md.append("_No recent scores to plot._")
-        return
-
-    # Thresholds: dynamic (if available) + best-effort static
-    dyn, n_recent, static_default = dynamic_threshold_for_origin(origin or "", recent=recent, min_samples=5)
-    static = static_default
-    try:
-        vals = per_origin.get(origin or "", {})
-        for k in ("p80_proba", "p70_proba", "proba"):
-            v = vals.get(k)
-            if v is not None and 0.0 <= float(v) <= 1.0:
-                static = float(v)
-                break
+        cache_thr = ctx.caches.get("score_distribution_threshold_used")
+        if cache_thr is not None:
+            thr_used = float(cache_thr)
     except Exception:
         pass
-    used = dyn if dyn is not None else static
+    md.append(f"- thresholds: dyn=n/a (0 pts) | static={thr_used:.3f} → used={thr_used:.3f}")
 
-    # Plot (MPLBACKEND=Agg is already set in CI)
+    # Counts + group means
+    def _mean(xs: list[float]) -> float:
+        return (sum(xs) / len(xs)) if xs else 0.0
+
+    m_drift = _mean(drifted)
+    m_ok = _mean(non_drifted)
+    md.append(f"- split: drifted={len(drifted)} | non-drifted={len(non_drifted)}")
+    md.append(f"- group means: drifted={m_drift:.3f}, non-drifted={m_ok:.3f}, Δ={(m_ok - m_drift):+.3f}")
+
+    # Ensure artifacts dir exists
+    artifacts = Path("artifacts")
+    artifacts.mkdir(parents=True, exist_ok=True)
+    img_out = artifacts / f"score_hist_drift_overlay_{hours}h.png"
+
+    # Render overlay histogram
     try:
-        ART = Path("artifacts"); ART.mkdir(exist_ok=True)
-        fig = plt.figure(figsize=(5.0, 2.1))
-        plt.hist(probas, bins=20, range=(0.0, 1.0))  # no colors/styles per guidelines
-        if dyn is not None:
-            plt.axvline(dyn, linestyle="--", linewidth=1)
-        if static is not None:
-            plt.axvline(static, linestyle=":", linewidth=1)
-        plt.title(f"{label} — score distribution ({hours}h)")
+        bins = np.linspace(0.0, 1.0, 21)  # stable bins across runs
+
+        plt.figure(figsize=(6.5, 2.6))
+        if non_drifted:
+            plt.hist(non_drifted, bins=bins, alpha=0.85, label="non-drifted")
+        if drifted:
+            plt.hist(drifted,     bins=bins, alpha=0.85, label="drifted")
+
+        plt.title("Score distribution ({:d}h)".format(hours))
+        plt.xlabel("score")
+        plt.ylabel("count")
+        try:
+            plt.axvline(float(thr_used), linestyle="--", linewidth=1)
+        except Exception:
+            pass
+        plt.legend()
         plt.tight_layout()
-        out = ART / f"score_dist_{label.replace(' ', '_')}.png"
-        fig.savefig(out)
-        plt.close(fig)
-        md.append(f"![]({out.as_posix()})")
-    except Exception as e:
-        md.append(f"_⚠️ plot failed: {e}_")
+        plt.savefig(img_out)
+        plt.close()
 
-    # Quick stats
-    try:
-        sorted_p = sorted(probas)
-        p50 = sorted_p[len(sorted_p)//2]
-        p90 = sorted_p[int(0.9 * (len(sorted_p)-1))]
-        _fmt = lambda x: f"{float(x):.3f}"
-        md.append(f"- n={len(probas)}, mean={_fmt(S.fmean(probas))}, median={_fmt(p50)}, p90={_fmt(p90)}")
-        md.append(f"- thresholds: dyn={_fmt(dyn) if dyn is not None else 'n/a'} ({n_recent} pts) | static={_fmt(static)} → used={_fmt(used)}")
-    except Exception:
-        pass
+        # Embed inline
+        md.append(f"  \n![]({img_out.as_posix()})")
+    except Exception as e:
+        md.append(f"_⚠️ histogram render failed: {type(e).__name__}: {e}_")
