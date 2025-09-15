@@ -146,6 +146,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Upload per-origin signal quality artifact
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-quality-per-origin
+          path: models/signal_quality_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+
       - name: Show artifacts (debug)
         if: ${{ success() }}
         run: |
