@@ -9,19 +9,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11 (with pip cache)
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: |
-            requirements.txt
-            requirements-dev.txt
 
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
@@ -123,8 +118,12 @@ jobs:
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
-          # optional: window for accuracy-by-version snapshot (default 72h)
+          # --- optional: window for accuracy-by-version snapshot (default 72h) ---
           MW_ACCURACY_WINDOW_H: "72"
+          # --- Signal Quality section knobs ---
+          MW_SIGNAL_WINDOW_H: "72"
+          MW_SIGNAL_BATCH_H: "3"
+          MW_SIGNAL_JOIN_MIN: "5"
         run: python scripts/mw_demo_summary.py
 
       # --- Upload accuracy-by-version snapshot JSON ---
@@ -137,6 +136,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Upload Signal Quality summary JSON ---
+      - name: Upload signal-quality summary
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-quality-summary
+          path: models/signal_quality_summary.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Show artifacts (debug)
         if: ${{ success() }}
         run: |
@@ -144,12 +153,16 @@ jobs:
           ls -lah
           echo "Artifacts in ./artifacts:"
           ls -lah artifacts || true
+          echo "Models dir:"
+          ls -lah models || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
 
       # --- Publish CI summary to the job view ---
       - name: Publish CI summary
         if: ${{ success() }}
         run: |
+          echo "## MoonWire CI Demo Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           cat artifacts/demo_summary.md >> "$GITHUB_STEP_SUMMARY"
 
       # --- Upload the rendered summary as an artifact too ---
