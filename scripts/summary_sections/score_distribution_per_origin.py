@@ -34,7 +34,7 @@ from .common import SummaryContext
 ART_DIR = Path("artifacts")
 ART_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_WINDOW_H = int(float(Path.cwd().joinpath(".").exists() and 48 or 48))  # 48h default
+DEFAULT_WINDOW_H = 48  # default 48h
 
 
 # ---------- helpers ----------
@@ -76,7 +76,6 @@ def _score_of_row(r: dict) -> float | None:
             try:
                 v = float(r[k])
                 if math.isfinite(v):
-                    # most of our scores are 0..1; if not, still plot
                     return v
             except Exception:
                 pass
@@ -100,7 +99,6 @@ def _quantile(xs: List[float], q: float) -> float:
     if not xs:
         return float("nan")
     xs2 = sorted(xs)
-    # simple nearest-rank / linear approach
     i = q * (len(xs2) - 1)
     lo = int(math.floor(i))
     hi = int(math.ceil(i))
@@ -113,6 +111,12 @@ def _quantile(xs: List[float], q: float) -> float:
 def _safe_name(s: str) -> str:
     s = s or "unknown"
     return "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in s)
+
+
+# TEST VISIBILITY: some tests import `_slug` from this module
+def _slug(origin: str) -> str:
+    """Return a filesystem/URL-safe slug for an origin."""
+    return _safe_name(origin)
 
 
 def _seed_demo_for_origin(origin: str, n: int = 40) -> Tuple[List[float], List[float]]:
@@ -185,7 +189,7 @@ def _render_hist(origin: str, nodrift: List[float], drifted: List[float]) -> str
     Save figure to artifacts/score_hist_<origin>_overlay.png
     Return the **basename** to be embedded in markdown.
     """
-    safe = _safe_name(origin)
+    safe = _slug(origin)
     fname = f"score_hist_{safe}_overlay.png"
     out_path = ART_DIR / fname
 
@@ -258,15 +262,12 @@ def append(md: List[str], ctx: SummaryContext):
         md.append(
             f"  - n={s_all['n']}, mean={s_all['mean']:.3f}, median={s_all['median']:.3f}, p90={s_all['p90']:.3f}"
         )
-        md.append(
-            f"  - split: drifted={s_dr['n']} | non-drifted={s_nd['n']}"
-        )
+        md.append(f"  - split: drifted={s_dr['n']} | non-drifted={s_nd['n']}")
         if math.isfinite(delta):
             md.append(
                 f"  - group means: drifted={s_dr['mean']:.3f}, non-drifted={s_nd['mean']:.3f}, Δ={delta:.3f}"
             )
         else:
-            # one group missing → still print available mean
             if s_dr["n"] > 0:
                 md.append(f"  - drifted mean={s_dr['mean']:.3f}")
             if s_nd["n"] > 0:
