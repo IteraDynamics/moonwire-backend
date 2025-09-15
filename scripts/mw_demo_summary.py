@@ -65,6 +65,7 @@ from scripts.summary_sections import (
     live_backtest,
     burst_detection,
     source_precision_recall,
+    signal_quality,
 )
 
 # ---- Compatibility re-exports for any tests that import from mw_demo_summary ----
@@ -204,6 +205,7 @@ def main():
     trigger_explainability.append(md, ctx)
     trigger_history.append(md, ctx)
     label_feedback.append(md, ctx)
+    signal_quality.append(md, ctx)
     rolling_accuracy_snapshot.append(md, ctx)
     accuracy_by_model_version.append(md, ctx)
     training_data_snapshot.append(md, ctx)
