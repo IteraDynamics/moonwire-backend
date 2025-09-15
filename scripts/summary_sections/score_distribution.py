@@ -3,175 +3,202 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from statistics import median
-import json, random
+from typing import List, Tuple
+import os, json
 
-import matplotlib
-matplotlib.use("Agg")  # headless for CI
-import matplotlib.pyplot as plt
+import numpy as np  # stable bins
 
-from .common import SummaryContext, is_demo_mode, parse_ts
+# Headless plotting (CI-safe)
+import matplotlib.pyplot as plt  # CI sets MPLBACKEND=Agg
+
+from .common import SummaryContext
 
 
-def _load_jsonl_safe(p: Path) -> list[dict]:
-    if not p.exists():
-        return []
-    out = []
+def _parse_ts(s: str | float | int | None) -> datetime | None:
+    if s is None:
+        return None
+    # epoch seconds
     try:
-        for ln in p.read_text(encoding="utf-8").splitlines():
+        return datetime.fromtimestamp(float(s), tz=timezone.utc)
+    except Exception:
+        pass
+    # ISO8601 (with Z)
+    try:
+        txt = str(s)
+        if txt.endswith("Z"):
+            txt = txt[:-1] + "+00:00"
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _load_recent_scores(trigger_history: Path, hours: int = 48) -> Tuple[list[float], list[float]]:
+    """
+    Returns (non_drifted_scores, drifted_scores) from the last `hours`.
+    Uses `adjusted_score` if available; otherwise falls back to
+    `prob_trigger_next_6h` or `score`.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=hours)
+
+    non_drifted: list[float] = []
+    drifted: list[float] = []
+
+    if not trigger_history.exists():
+        return non_drifted, drifted
+
+    try:
+        for ln in trigger_history.read_text(encoding="utf-8").splitlines():
             ln = ln.strip()
             if not ln:
                 continue
             try:
-                out.append(json.loads(ln))
+                row = json.loads(ln)
             except Exception:
                 continue
-    except Exception:
-        return []
-    return out
 
+            ts = _parse_ts(row.get("timestamp"))
+            if not ts or ts < cutoff:
+                continue
 
-def _p90(vals: list[float]) -> float:
-    if not vals:
-        return 0.0
-    s = sorted(vals)
-    # simple, robust p90 for small n
-    idx = max(0, min(len(s) - 1, int(round(0.9 * (len(s) - 1)))))
-    return float(s[idx])
-
-
-def _fmt(v: float, nd: int = 3) -> str:
-    try:
-        return f"{float(v):.{nd}f}"
-    except Exception:
-        return "n/a"
-
-
-def _is_drifted(row: dict) -> bool:
-    """
-    Heuristic for 'drifted' — treat as drifted if:
-      - 'drifted_features' exists and is non-empty, or
-      - 'drifted' or 'drift' is True-ish
-    """
-    try:
-        if isinstance(row.get("drifted_features"), list) and row["drifted_features"]:
-            return True
-    except Exception:
-        pass
-    for k in ("drifted", "drift"):
-        v = row.get(k)
-        if isinstance(v, bool) and v:
-            return True
-        # allow truthy strings like "true"
-        if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes"):
-            return True
-    return False
-
-
-def _score_of(row: dict) -> float | None:
-    """
-    Prefer adjusted_score; fall back to prob_trigger_next_6h or ensemble_score.
-    """
-    for k in ("adjusted_score", "prob_trigger_next_6h", "ensemble_score"):
-        v = row.get(k)
-        if isinstance(v, (int, float)):
+            # score best-effort
+            val = (
+                row.get("adjusted_score", None)
+                if row.get("adjusted_score", None) is not None
+                else row.get("prob_trigger_next_6h", None)
+            )
+            if val is None:
+                val = row.get("score", None)
             try:
-                f = float(v)
-                if 0.0 <= f <= 1.0:
-                    return f
-                # tolerate logit-like scores by squashing (rare)
-                if f > 1.0:
-                    return max(0.0, min(1.0, f))
+                sc = float(val)
             except Exception:
                 continue
-    return None
+
+            drifted_features = row.get("drifted_features") or []
+            if isinstance(drifted_features, list) and len(drifted_features) > 0:
+                drifted.append(sc)
+            else:
+                non_drifted.append(sc)
+    except Exception:
+        # fall back silently — caller may synthesize in demo mode
+        pass
+
+    return non_drifted, drifted
 
 
-def append(md: list[str], ctx: SummaryContext, hours: int = 48, min_points: int = 12) -> None:
+def _seed_demo_if_needed(non_drifted: list[float], drifted: list[float], want_total: int = 64) -> Tuple[list[float], list[float], bool]:
     """
-    Renders '📐 Score Distribution (48h)' with an overlay of drifted vs non-drifted scores
-    and saves a stacked histogram to artifacts/score_hist_drift_overlay_48h.png.
+    If there aren't enough real points, synthesize a plausible split
+    (non-drifted > drifted, slightly lower mean for drifted).
+    Returns (non_drifted, drifted, seeded_flag).
+    """
+    n = len(non_drifted) + len(drifted)
+    if n >= max(8, want_total // 4):
+        return non_drifted, drifted, False
 
-    Also keeps the earlier summary stats line for continuity.
+    rng = np.random.default_rng(42)
+    n_total = max(want_total, 2 * max(1, n))
+    n_drift = int(n_total * 0.25)
+    n_ok = n_total - n_drift
+
+    # Non-drifted: mean ~0.28, some tail to ~0.6
+    nd = np.clip(rng.normal(loc=0.28, scale=0.11, size=n_ok), 0.0, 1.0)
+    # Drifted: mean lower ~0.18, similar spread
+    dr = np.clip(rng.normal(loc=0.18, scale=0.10, size=n_drift), 0.0, 1.0)
+
+    return list(nd), list(dr), True
+
+
+def _summary_stats(values: list[float]) -> Tuple[float, float, float]:
+    if not values:
+        return 0.0, 0.0, 0.0
+    arr = np.asarray(values, dtype=float)
+    return float(arr.mean()), float(np.median(arr)), float(np.quantile(arr, 0.90))
+
+
+def append(md: List[str], ctx: SummaryContext, window_hours: int = 48) -> None:
+    """
+    📐 Score Distribution (48h)
+    - Reads scores from models/trigger_history.jsonl (last 48h)
+    - Splits into drifted vs non-drifted buckets
+    - Renders a dual histogram and embeds it
+    - Prints summary stats and counts
     """
     md.append("\n### 📐 Score Distribution (48h)")
 
-    # ---- load recent trigger history ----
-    hist_path = ctx.models_dir / "trigger_history.jsonl"
-    rows = _load_jsonl_safe(hist_path)
+    trig_hist = ctx.models_dir / "trigger_history.jsonl"
 
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=hours)
-
-    drifted, clean = [], []
-    for r in rows:
-        ts = parse_ts(r.get("timestamp"))
-        if not ts or ts < cutoff:
-            continue
-         # pick a score
-        s = _score_of(r)
-        if s is None:
-            continue
-        if _is_drifted(r):
-            drifted.append(s)
-        else:
-            clean.append(s)
-
+    non_drifted_scores, drifted_scores = _load_recent_scores(trig_hist, hours=window_hours)
     seeded = False
-    total = len(drifted) + len(clean)
+    if ctx.is_demo:
+        non_drifted_scores, drifted_scores, seeded = _seed_demo_if_needed(non_drifted_scores, drifted_scores)
 
-    # ---- demo seeding if not enough data ----
-    if total < min_points and is_demo_mode():
-        # Create a plausible mix: non-drifted slightly higher scores; drifted slightly lower
-        rng = random.Random(42)
-        # target totals: roughly 64 with a 3:1 clean:drifted mix
-        n_clean = max(8, int(0.75 * max(min_points, 64)))
-        n_drift = max(4, int(0.25 * max(min_points, 64)))
-        clean = [max(0.0, min(1.0, rng.betavariate(2.5, 6.0))) for _ in range(n_clean)]
-        drifted = [max(0.0, min(1.0, rng.betavariate(2.0, 9.0))) for _ in range(n_drift)]
-        seeded = True
-        total = len(drifted) + len(clean)
-
-    if total == 0:
-        md.append("_No recent scores in the last 48h._")
-        return
-
-    # ---- summary stats (overall, like before) ----
-    all_scores = clean + drifted
-    mean_val = sum(all_scores) / float(len(all_scores))
-    med_val = median(all_scores)
-    p90_val = _p90(all_scores)
+    all_scores = non_drifted_scores + drifted_scores
+    n_total = len(all_scores)
+    mean_all, median_all, p90_all = _summary_stats(all_scores)
 
     if seeded:
-        md.append("_(demo) synthesized scores for visibility_")
-    md.append(f"- n={total}, mean={_fmt(mean_val)}, median={_fmt(med_val)}, p90={_fmt(p90_val)}")
+        md.append("(demo) synthesized scores for visibility")
 
-    # ---- drift split counts ----
-    md.append(f"- split: drifted={len(drifted)} | non-drifted={len(clean)}")
+    md.append(f"- n={n_total}, mean={mean_all:.3f}, median={median_all:.3f}, p90={p90_all:.3f}")
 
-    # ---- render histogram (stacked overlay) ----
-    ART = Path("artifacts"); ART.mkdir(exist_ok=True)
-    overlay_path = ART / "score_hist_drift_overlay_48h.png"
-
+    # --- threshold line metadata (simple, section-local) ---
+    # If another section stored a 'used' threshold into ctx.caches, use it;
+    # otherwise fall back to 0.5 so the plot always has a sensible line.
+    thr_used = 0.5
     try:
-        # common bins across both groups: 0.00..1.00 in 0.02 steps (51 edges)
-        bins = [i / 50.0 for i in range(51)]
-        plt.figure(figsize=(6.0, 2.4))
-        # Stacked so the total per bin is immediately visible; legend differentiates groups
-        plt.hist([clean, drifted],
-                 bins=bins,
-                 stacked=True,
-                 label=["non-drifted", "drifted"],
-                 alpha=0.85)
+        # e.g., ctx.caches.get("thresholds", {}).get("used", 0.5)
+        cache_thr = ctx.caches.get("score_distribution_threshold_used")
+        if cache_thr is not None:
+            thr_used = float(cache_thr)
+    except Exception:
+        pass
+
+    # Print the same short thresholds line you already used
+    md.append(f"- thresholds: dyn=n/a (0 pts) | static={thr_used:.3f} → used={thr_used:.3f}")
+
+    # --- group split + means (NEW) ---
+    def _mean(xs: list[float]) -> float:
+        return (sum(xs) / len(xs)) if xs else 0.0
+
+    mean_nd = _mean(non_drifted_scores)
+    mean_d  = _mean(drifted_scores)
+    delta   = mean_nd - mean_d  # >0 means non-drifted scores higher
+    md.append(f"- split: drifted={len(drifted_scores)} | non-drifted={len(non_drifted_scores)}")
+    md.append(f"- group means: drifted={mean_d:.3f}, non-drifted={mean_nd:.3f}, Δ={delta:+.3f}")
+
+    # --- histogram overlay (NEW) ---
+    img_out = Path("artifacts") / "score_hist_drift_overlay_48h.png"
+    try:
+        bins = np.linspace(0.0, 1.0, 21)  # stable bin edges
+
+        plt.figure(figsize=(6.5, 2.6))
+        if non_drifted_scores:
+            plt.hist(non_drifted_scores, bins=bins, alpha=0.85, label="non-drifted")
+        if drifted_scores:
+            plt.hist(drifted_scores,     bins=bins, alpha=0.85, label="drifted")
+
         plt.title("Score distribution (48h)")
         plt.xlabel("score")
         plt.ylabel("count")
+
+        # vertical line at the used threshold
+        try:
+            plt.axvline(float(thr_used), linestyle="--", linewidth=1)
+        except Exception:
+            pass
+
         plt.legend()
         plt.tight_layout()
-        plt.savefig(overlay_path)
+        plt.savefig(img_out)
         plt.close()
 
-        # Inline the image in the summary
-        md.append(f"  \n![]({overlay_path.as_posix()})")
+        # Embed inline
+        md.append(f"  \n![]({img_out.as_posix()})")
     except Exception as e:
-        md.append(f"_⚠️ Histogram render failed: {type(e).__name__}: {e}_")
+        md.append(f"_⚠️ histogram render failed: {type(e).__name__}: {e}_")
