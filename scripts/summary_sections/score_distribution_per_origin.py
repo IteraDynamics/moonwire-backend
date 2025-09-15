@@ -1,235 +1,276 @@
 # scripts/summary_sections/score_distribution_per_origin.py
+"""
+Score Distribution by Origin (48h) with drift overlay.
+
+- Reads recent scores from models/trigger_history.jsonl
+- Splits by origin, then by drifted vs non-drifted
+- Renders overlaid histograms per origin
+- Writes images to artifacts/score_hist_<origin>_overlay.png
+- Embeds image **basenames** in markdown (because demo_summary.md lives in artifacts/)
+- Seeds plausible demo data when logs are sparse
+
+Env knobs:
+- MW_SCORE_WINDOW_H (default 48)
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-import os, json, math, statistics as stats
+import json
+import math
+import random
+import statistics as stats
+from typing import Dict, List, Tuple
 
 import matplotlib
-# CI uses MPLBACKEND=Agg; this is harmless locally too.
-matplotlib.use(os.getenv("MPLBACKEND", "Agg"))
-import matplotlib.pyplot as plt
+# CI sets MPLBACKEND=Agg, but be defensive:
+matplotlib.use("Agg")  # type: ignore
+import matplotlib.pyplot as plt  # noqa: E402
 
-from src.paths import MODELS_DIR
-from scripts.summary_sections.common import is_demo_mode
+from .common import SummaryContext
 
-ART = Path("artifacts"); ART.mkdir(exist_ok=True)
+# ---------- constants ----------
+ART_DIR = Path("artifacts")
+ART_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------- tiny utils ----------
-def _parse_ts_any(v):
-    if v is None:
+DEFAULT_WINDOW_H = int(float(Path.cwd().joinpath(".").exists() and 48 or 48))  # 48h default
+
+
+# ---------- helpers ----------
+def _parse_ts(val) -> datetime | None:
+    if val is None:
         return None
     try:
-        return datetime.fromtimestamp(float(v), tz=timezone.utc)
+        return datetime.fromtimestamp(float(val), tz=timezone.utc)
     except Exception:
         pass
     try:
-        s = str(v)
-        s = s[:-1] + "+00:00" if s.endswith("Z") else s
-        dt = datetime.fromisoformat(s)
-        return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        s = str(val)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
     except Exception:
         return None
 
-def _load_jsonl_safe(p: Path) -> list:
-    if not p.exists():
+
+def _load_jsonl(path: Path) -> List[dict]:
+    if not path.exists():
         return []
     out = []
-    try:
-        for ln in p.read_text(encoding="utf-8").splitlines():
-            ln = ln.strip()
-            if not ln:
-                continue
-            try:
-                out.append(json.loads(ln))
-            except Exception:
-                continue
-    except Exception:
-        return []
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
     return out
 
-def _score_from_row(r: dict) -> float | None:
-    for key in ("adjusted_score", "prob_trigger_next_6h", "score", "p"):
-        if key in r:
+
+def _score_of_row(r: dict) -> float | None:
+    # Prefer adjusted probability-like fields
+    for k in ("adjusted_score", "prob", "prob_trigger_next_6h", "score"):
+        if k in r:
             try:
-                v = float(r[key])
-                if math.isnan(v) or math.isinf(v):
-                    continue
-                # clamp to [0,1] just to be safe for hist scaling
-                return max(0.0, min(1.0, v))
+                v = float(r[k])
+                if math.isfinite(v):
+                    # most of our scores are 0..1; if not, still plot
+                    return v
             except Exception:
-                continue
+                pass
     return None
 
-def _is_drifted_row(r: dict) -> bool:
-    try:
-        if r.get("drift") is True or r.get("drifted") is True:
-            return True
-        df = r.get("drifted_features")
-        if isinstance(df, (list, tuple)) and len(df) > 0:
-            return True
-    except Exception:
-        pass
+
+def _is_drifted(r: dict) -> bool:
+    # Heuristics used elsewhere in the repo
+    if isinstance(r.get("drifted_features"), list) and len(r["drifted_features"]) > 0:
+        return True
+    for k in ("drift", "drifted"):
+        if k in r:
+            try:
+                return bool(r[k])
+            except Exception:
+                pass
     return False
 
-def _slug(s: str) -> str:
-    s = (s or "unknown").lower()
-    return "".join(ch if ch.isalnum() else "_" for ch in s)
 
-def _pctl(vals: list[float], q: float) -> float:
-    if not vals:
-        return 0.0
-    vals_sorted = sorted(vals)
-    idx = max(0, min(len(vals_sorted)-1, int(round(q * (len(vals_sorted)-1)))))
-    return float(vals_sorted[idx])
+def _quantile(xs: List[float], q: float) -> float:
+    if not xs:
+        return float("nan")
+    xs2 = sorted(xs)
+    # simple nearest-rank / linear approach
+    i = q * (len(xs2) - 1)
+    lo = int(math.floor(i))
+    hi = int(math.ceil(i))
+    if lo == hi:
+        return float(xs2[lo])
+    w = i - lo
+    return float(xs2[lo] * (1 - w) + xs2[hi] * w)
 
-def _fmt(v: float | None) -> str:
-    try:
-        return f"{float(v):.3f}"
-    except Exception:
-        return "n/a"
 
-# ---------- core collector ----------
-def _collect_scores_by_origin(models_dir: Path, hours: int) -> dict[str, dict[str, list[float]]]:
+def _safe_name(s: str) -> str:
+    s = s or "unknown"
+    return "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in s)
+
+
+def _seed_demo_for_origin(origin: str, n: int = 40) -> Tuple[List[float], List[float]]:
     """
-    Returns: { origin: {"drifted": [...], "non": [...]} }
+    Create plausible demo distributions:
+      - non-drifted centered ~0.25–0.35
+      - drifted slightly lower mean and broader spread
     """
-    th_path = models_dir / "trigger_history.jsonl"
-    rows = _load_jsonl_safe(th_path)
+    random.seed(hash(origin) % (2**32 - 1))
+    base_mu = random.uniform(0.20, 0.32)
+    base_sigma = random.uniform(0.05, 0.08)
+    drift_mu = max(0.02, base_mu - random.uniform(0.02, 0.08))
+    drift_sigma = base_sigma + random.uniform(0.01, 0.05)
 
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=hours)
+    n_drift = max(8, n // 3)
+    n_nodrift = max(10, n - n_drift)
 
-    out: dict[str, dict[str, list[float]]] = {}
+    def _clip01(v: float) -> float:
+        return max(0.0, min(1.0, v))
+
+    nodrift = [_clip01(random.gauss(base_mu, base_sigma)) for _ in range(n_nodrift)]
+    drifted = [_clip01(random.gauss(drift_mu, drift_sigma)) for _ in range(n_drift)]
+    return nodrift, drifted
+
+
+# ---------- core ----------
+def _load_recent_by_origin(ctx: SummaryContext, window_h: int) -> Dict[str, Dict[str, List[float]]]:
+    """
+    Returns: {origin: {"drifted": [scores], "non_drifted": [scores]}}
+    """
+    cache_key = f"triggers_by_origin_{window_h}h"
+    if cache_key in ctx.caches:
+        return ctx.caches[cache_key]
+
+    hist_path = ctx.models_dir / "trigger_history.jsonl"
+    rows = _load_jsonl(hist_path)
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_h)
+    out: Dict[str, Dict[str, List[float]]] = {}
+
     for r in rows:
-        ts = _parse_ts_any(r.get("timestamp"))
-        if ts is None or ts < cutoff:
+        ts = _parse_ts(r.get("timestamp"))
+        if not ts or ts < cutoff:
             continue
-        origin = str(r.get("origin") or "unknown").lower()
-        sc = _score_from_row(r)
-        if sc is None:
+        origin = r.get("origin") or "unknown"
+        score = _score_of_row(r)
+        if score is None:
             continue
-        drifted = _is_drifted_row(r)
-        bucket = "drifted" if drifted else "non"
-        d = out.setdefault(origin, {"drifted": [], "non": []})
-        d[bucket].append(sc)
+        bucket = "drifted" if _is_drifted(r) else "non_drifted"
+        d = out.setdefault(origin, {"drifted": [], "non_drifted": []})
+        d[bucket].append(float(score))
 
-    # drop origins with no samples
-    out = {o: d for o, d in out.items() if (d["drifted"] or d["non"])}
-
+    ctx.caches[cache_key] = out
     return out
 
-# ---------- demo seeding ----------
-def _demo_seed() -> dict[str, dict[str, list[float]]]:
-    # 3 origins with plausible splits & shapes
-    import random
-    random.seed(7)
-    def gen(n, mu, sigma):
-        xs = []
-        for _ in range(n):
-            v = random.gauss(mu, sigma)
-            xs.append(max(0.0, min(1.0, v)))
-        return xs
 
+def _summarize(xs: List[float]) -> Dict[str, float]:
+    if not xs:
+        return {"n": 0, "mean": float("nan"), "median": float("nan"), "p90": float("nan")}
     return {
-        "twitter":  {"drifted": gen(16, 0.18, 0.07), "non": gen(32, 0.30, 0.08)},
-        "reddit":   {"drifted": gen(12, 0.22, 0.06), "non": gen(28, 0.26, 0.07)},
-        "rss_news": {"drifted": gen(20, 0.14, 0.05), "non": gen(14, 0.20, 0.06)},
+        "n": len(xs),
+        "mean": float(stats.fmean(xs)) if xs else float("nan"),
+        "median": float(stats.median(xs)) if xs else float("nan"),
+        "p90": float(_quantile(xs, 0.90)) if xs else float("nan"),
     }
 
-# ---------- plotting ----------
-def _plot_overlay(hist_drifted: list[float], hist_non: list[float], title: str, out_path: Path):
-    # Single figure per origin; default color cycle; legend via labels.
-    plt.figure(figsize=(5.6, 3.0))
-    bins = 20
-    if hist_non:
-        plt.hist(hist_non, bins=bins, alpha=0.6, label="non-drifted")  # alpha only, no color set
-    if hist_drifted:
-        plt.hist(hist_drifted, bins=bins, alpha=0.6, label="drifted")
-    plt.title(title)
+
+def _render_hist(origin: str, nodrift: List[float], drifted: List[float]) -> str:
+    """
+    Save figure to artifacts/score_hist_<origin>_overlay.png
+    Return the **basename** to be embedded in markdown.
+    """
+    safe = _safe_name(origin)
+    fname = f"score_hist_{safe}_overlay.png"
+    out_path = ART_DIR / fname
+
+    plt.figure(figsize=(6.0, 2.6))
+    bins = 12
+    if nodrift:
+        plt.hist(nodrift, bins=bins, alpha=0.7, label="non-drifted")
+    if drifted:
+        plt.hist(drifted, bins=bins, alpha=0.7, label="drifted")
+    plt.title(f"{origin} scores (48h)")
     plt.xlabel("score")
     plt.ylabel("count")
     plt.legend()
     plt.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path)
     plt.close()
+    return fname  # basename so it renders from inside artifacts/demo_summary.md
 
-# ---------- main entry ----------
-def append(md: list[str], ctx) -> None:
+
+def append(md: List[str], ctx: SummaryContext):
     """
-    Append a per-origin score overlay section to the CI summary.
+    Public entry point used by the orchestrator.
     """
-    hours = 48
     try:
-        hours = int(os.getenv("MW_SCORE_WINDOW_H", "48"))
+        window_h = int(float((__import__("os").getenv("MW_SCORE_WINDOW_H") or DEFAULT_WINDOW_H)))
     except Exception:
-        pass
+        window_h = DEFAULT_WINDOW_H
 
-    # cache key so other sections could reuse if desired
-    cache_key = f"score_by_origin_{hours}h"
-    if cache_key in ctx.caches:
-        by_origin = ctx.caches[cache_key]
-    else:
-        by_origin = _collect_scores_by_origin(ctx.models_dir or MODELS_DIR, hours=hours)
-        if (not by_origin or list(by_origin.keys()) == ["unknown"]) and is_demo_mode():
-            by_origin = _demo_seed()
-            ctx.caches[cache_key] = by_origin
-            seeded = True
-        else:
-            ctx.caches[cache_key] = by_origin
-            seeded = False
+    by_origin = _load_recent_by_origin(ctx, window_h)
 
-    md.append(f"\n### 📐 Score Distribution by Origin ({hours}h)")
+    seeded_demo = False
+    if not by_origin and ctx.is_demo:
+        # Seed 2–3 origins with plausible shapes
+        seeded_demo = True
+        for origin in ("twitter", "reddit", "rss_news"):
+            nd, dr = _seed_demo_for_origin(origin, n=random.randint(28, 52))
+            by_origin[origin] = {"non_drifted": nd, "drifted": dr}
+
+    # Header
+    hdr = f"\n### 📐 Score Distribution by Origin ({window_h}h)"
+    if seeded_demo:
+        hdr += "\n_(demo)_"
+    md.append(hdr)
+
     if not by_origin:
         md.append("_No recent scores available._")
         return
-    if seeded:
-        md.append("_(demo)_")
 
-    # Sort origins by total n desc
-    items = []
-    for origin, parts in by_origin.items():
-        n_d = len(parts.get("drifted", []))
-        n_n = len(parts.get("non", []))
-        n   = n_d + n_n
-        items.append((origin, n))
-    items.sort(key=lambda kv: kv[1], reverse=True)
+    # Stable order: sort by origin name
+    for origin in sorted(by_origin.keys()):
+        nodrift = list(by_origin[origin].get("non_drifted", []))
+        drifted = list(by_origin[origin].get("drifted", []))
+        all_scores = nodrift + drifted
 
-    for origin, _ in items:
-        v_d = list(by_origin[origin].get("drifted", []))
-        v_n = list(by_origin[origin].get("non", []))
-        v_all = v_d + v_n
-        if not v_all:
-            continue
+        # Stats
+        s_all = _summarize(all_scores)
+        s_nd = _summarize(nodrift)
+        s_dr = _summarize(drifted)
 
-        n = len(v_all)
-        mean = sum(v_all) / n
-        med = stats.median(v_all)
-        p90 = _pctl(v_all, 0.90)
-
-        mean_d = (sum(v_d)/len(v_d)) if v_d else None
-        mean_n = (sum(v_n)/len(v_n)) if v_n else None
-        delta = None
-        if (mean_d is not None) and (mean_n is not None):
-            delta = mean_n - mean_d
+        # delta between group means (non-drifted - drifted)
+        delta = float("nan")
+        if s_nd["n"] > 0 and s_dr["n"] > 0 and math.isfinite(s_nd["mean"]) and math.isfinite(s_dr["mean"]):
+            delta = s_nd["mean"] - s_dr["mean"]
 
         # Plot
-        slug = _slug(origin)
-        out_img = ART / f"score_hist_{slug}_overlay.png"
-        _plot_overlay(v_d, v_n, f"{origin}: scores ({hours}h)", out_img)
+        img_name = _render_hist(origin, nodrift, drifted)
 
         # Markdown block for this origin
-        md.append(f"- **{origin}**")
+        md.append(f"\n- **{origin}**")
         md.append(
-            f"  - n={n}, mean={_fmt(mean)}, median={_fmt(med)}, p90={_fmt(p90)}"
+            f"  - n={s_all['n']}, mean={s_all['mean']:.3f}, median={s_all['median']:.3f}, p90={s_all['p90']:.3f}"
         )
         md.append(
-            f"  - split: drifted={len(v_d)} | non-drifted={len(v_n)}"
+            f"  - split: drifted={s_dr['n']} | non-drifted={s_nd['n']}"
         )
-        if (mean_d is not None) or (mean_n is not None):
+        if math.isfinite(delta):
             md.append(
-                f"  - group means: drifted={_fmt(mean_d)}, non-drifted={_fmt(mean_n)}, Δ={_fmt(delta)}"
+                f"  - group means: drifted={s_dr['mean']:.3f}, non-drifted={s_nd['mean']:.3f}, Δ={delta:.3f}"
             )
-        md.append(f"  - ![]({out_img.as_posix()})")
+        else:
+            # one group missing → still print available mean
+            if s_dr["n"] > 0:
+                md.append(f"  - drifted mean={s_dr['mean']:.3f}")
+            if s_nd["n"] > 0:
+                md.append(f"  - non-drifted mean={s_nd['mean']:.3f}")
+
+        # IMPORTANT: embed **basename** so it renders from within artifacts/demo_summary.md
+        md.append(f"  \n![]({img_name})")
