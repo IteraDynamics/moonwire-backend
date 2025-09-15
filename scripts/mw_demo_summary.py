@@ -67,6 +67,7 @@ from scripts.summary_sections import (
     source_precision_recall,
     signal_quality,
     signal_quality_per_origin,
+    score_distribution_per_origin,
 )
 
 # ---- Compatibility re-exports for any tests that import from mw_demo_summary ----
@@ -200,6 +201,7 @@ def main():
     nowcast_attention.append(md, ctx)
     trigger_likelihood_v0.append(md, ctx)
     score_distribution.append(md, ctx)
+    score_distribution_per_origin.append(md, ctx)
     ensemble_v0_4.append(md, ctx)
     dynamic_vs_static_thresholds.append(md, ctx)
     volatility_aware_thresholds.append(md, ctx)
