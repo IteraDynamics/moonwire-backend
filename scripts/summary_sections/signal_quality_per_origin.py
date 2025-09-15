@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Tuple, Any
 import os, json, bisect
 
-from .common import SummaryContext, parse_ts, is_demo_mode
+from .common import SummaryContext, parse_ts, is_demo_mode  # noqa: F401 (is_demo_mode retained for parity)
 
 _EMOJI = {
     "Strong": "✅",
@@ -31,42 +31,60 @@ def _load_jsonl_safe(p: Path) -> List[dict]:
         return []
     return out
 
-def _classify(precision: float | None, min_labels: int) -> Tuple[str, str]:
+def _classify(precision: float | None, min_labels_observed: int) -> Tuple[str, str]:
     """
-    Return (class, emoji). If labels < min_labels, mark as Info/Insufficient.
+    Return (class, emoji).
+    If fewer than 2 matched labels were observed, mark as Insufficient data (Info).
     """
-    if precision is None:
+    if min_labels_observed < 2 or precision is None:
         return ("Info", _EMOJI["Info"])
-    if min_labels > 0:
-        # The caller passes min_labels actually observed; if < 2 we handle outside
-        pass
     if precision >= 0.75:
         return ("Strong", _EMOJI["Strong"])
     if precision >= 0.40:
         return ("Mixed", _EMOJI["Mixed"])
     return ("Weak", _EMOJI["Weak"])
 
-def _nearest_within(ts_list: List[datetime], target: datetime, max_delta_min: int) -> int | None:
+def _nearest_within(ts_list: List[datetime], target: datetime, max_delta_min: int, used: set[int] | None = None) -> int | None:
     """
-    ts_list must be sorted ascending. Return index of a timestamp within ±max_delta_min
-    that is closest to target, preferring nearest. Returns None if none in range.
+    ts_list must be sorted ascending.
+    Return index of the closest UNUSED timestamp within ±max_delta_min of target.
+    Expands outward to next-nearest on both sides until a valid unused candidate is found.
     """
     if not ts_list:
         return None
+    used = used or set()
     pos = bisect.bisect_left(ts_list, target)
-    best_i, best_dt = None, None
-    # check left
-    if pos - 1 >= 0:
-        cand = ts_list[pos - 1]
-        if abs((cand - target).total_seconds()) <= max_delta_min * 60:
-            best_i, best_dt = pos - 1, cand
-    # check right
-    if pos < len(ts_list):
-        cand = ts_list[pos]
-        if abs((cand - target).total_seconds()) <= max_delta_min * 60:
-            if best_dt is None or abs((cand - target).total_seconds()) < abs((best_dt - target).total_seconds()):
-                best_i, best_dt = pos, cand
-    return best_i
+    L = pos - 1
+    R = pos
+    max_delta = max_delta_min * 60.0
+
+    # Expand outward, always picking the nearest unused candidate first
+    while L >= 0 or R < len(ts_list):
+        candL = None
+        candR = None
+
+        if L >= 0 and L not in used:
+            dtL = abs((ts_list[L] - target).total_seconds())
+            if dtL <= max_delta:
+                candL = (dtL, L)
+
+        if R < len(ts_list) and R not in used:
+            dtR = abs((ts_list[R] - target).total_seconds())
+            if dtR <= max_delta:
+                candR = (dtR, R)
+
+        if candL is None and candR is None:
+            # No valid candidate at this expansion width; expand further
+            L -= 1
+            R += 1
+            continue
+
+        # Choose the nearest (ties arbitrary)
+        choices = [c for c in (candL, candR) if c is not None]
+        dt, idx = min(choices, key=lambda t: t[0])
+        return idx
+
+    return None
 
 def _compute(ctx: SummaryContext) -> Dict[str, Any]:
     """
@@ -108,7 +126,6 @@ def _compute(ctx: SummaryContext) -> Dict[str, Any]:
         if not ts or ts < cutoff:
             continue
         origin = str(r.get("origin", "unknown")).lower()
-        # Count only events that were "triggered"
         decision = str(r.get("decision", "")).lower()
         triggered = (decision == "triggered") or (r.get("triggered") is True)
         if not triggered:
@@ -124,7 +141,7 @@ def _compute(ctx: SummaryContext) -> Dict[str, Any]:
         lbl = bool(r.get("label", False))
         labels_by_origin.setdefault(origin, []).append((ts, lbl))
 
-    # Sort time lists
+    # Sort by time
     for o, lst in trig_by_origin.items():
         lst.sort()
     for o, lst in labels_by_origin.items():
@@ -133,35 +150,32 @@ def _compute(ctx: SummaryContext) -> Dict[str, Any]:
     # Per-origin stats
     results = []
     used_labels_idx: Dict[str, set] = {o: set() for o in labels_by_origin.keys()}
+
     for origin, trig_ts_list in trig_by_origin.items():
         total_triggers = len(trig_ts_list)
         lbl_list = labels_by_origin.get(origin, [])
-        lbl_times = [t for (t, v) in lbl_list]
+        lbl_times = [t for (t, _v) in lbl_list]
 
         t_pos = 0
         f_neg = 0
-        matched = 0
 
         if lbl_list:
             for tts in trig_ts_list:
-                i = _nearest_within(lbl_times, tts, join_min)
-                if i is None or i in used_labels_idx[origin]:
+                i = _nearest_within(lbl_times, tts, join_min, used=used_labels_idx.get(origin))
+                if i is None:
                     continue
+                if origin not in used_labels_idx:
+                    used_labels_idx[origin] = set()
                 used_labels_idx[origin].add(i)
-                matched += 1
                 is_true = bool(lbl_list[i][1])
                 if is_true:
                     t_pos += 1
                 else:
                     f_neg += 1
 
-        precision = (t_pos / float(t_pos + f_neg)) if (t_pos + f_neg) > 0 else None
         labels_n = t_pos + f_neg
-
-        if labels_n < 2:
-            klass, emoji = ("Info", _EMOJI["Info"])
-        else:
-            klass, emoji = _classify(precision, labels_n)
+        precision = (t_pos / float(labels_n)) if labels_n > 0 else None
+        klass, emoji = _classify(precision, labels_n)
 
         results.append({
             "origin": origin,
@@ -175,7 +189,7 @@ def _compute(ctx: SummaryContext) -> Dict[str, Any]:
             "demo": False,
         })
 
-    # If empty or all unknown/insufficient and we're in demo -> seed
+    # Demo fallback if empty and in demo mode
     need_demo = (not results) and ctx.is_demo
     if need_demo:
         demo = [
@@ -188,10 +202,7 @@ def _compute(ctx: SummaryContext) -> Dict[str, Any]:
             t_pos, f_neg = row["true"], row["false"]
             labels_n = t_pos + f_neg
             precision = t_pos / float(labels_n) if labels_n > 0 else None
-            if labels_n < 2:
-                klass, emoji = ("Info", _EMOJI["Info"])
-            else:
-                klass, emoji = _classify(precision, labels_n)
+            klass, emoji = _classify(precision, labels_n)
             results.append({
                 "origin": row["origin"],
                 "triggers": row["triggers"],
