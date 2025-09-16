@@ -1,252 +1,347 @@
 # scripts/summary_sections/signal_quality.py
 from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-import os, json, bisect
-from typing import List, Dict, Tuple
+import json, os, math, statistics
 
-from .common import SummaryContext, is_demo_mode, parse_ts
+# Matplotlib headless for CI
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
-def _load_jsonl_safe(p: Path) -> List[dict]:
-    if not p.exists():
+from .common import parse_ts, is_demo_mode
+
+# ------------------------------------------------------------
+# Env helpers
+# ------------------------------------------------------------
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+# ------------------------------------------------------------
+# Data containers
+# ------------------------------------------------------------
+@dataclass
+class Batch:
+    start: datetime
+    end: datetime
+    triggers: int
+    true: int
+    false: int
+    precision: float | None
+    klass: str
+    emoji: str
+    demo: bool = False
+
+# ------------------------------------------------------------
+# Core compute (3h buckets over window; join within ±join_min)
+# ------------------------------------------------------------
+def _load_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
         return []
     out = []
-    try:
-        for ln in p.read_text(encoding="utf-8").splitlines():
-            s = ln.strip()
-            if not s:
-                continue
-            try:
-                out.append(json.loads(s))
-            except Exception:
-                continue
-    except Exception:
-        return []
-    return out
-
-def _bucket_floor(dt: datetime, batch_h: int) -> datetime:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    h = (dt.hour // batch_h) * batch_h
-    return dt.replace(hour=h, minute=0, second=0, microsecond=0)
-
-def _iso_utc(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-def _classify(precision: float | None) -> Tuple[str, str]:
-    # returns (emoji, label)
-    if precision is None:
-        return "⏳", "Unlabeled"
-    if precision >= 0.75:
-        return "✅", "Strong"
-    if precision >= 0.40:
-        return "⚠️", "Mixed"
-    return "❌", "Weak"
-
-def _join_labels(
-    triggers: List[Tuple[datetime, str]],
-    labels_by_origin: Dict[str, List[Tuple[datetime, bool]]],
-    window_min: int,
-) -> Dict[Tuple[datetime, str], bool | None]:
-    """
-    For each (ts, origin) trigger, find the nearest label of same origin
-    within ±window_min minutes. Returns mapping to label True/False or None if no match.
-    Ensures each label row is used at most once.
-    """
-    out: Dict[Tuple[datetime, str], bool | None] = {}
-    used_ix: Dict[str, set[int]] = {o: set() for o in labels_by_origin.keys()}
-    wnd = timedelta(minutes=max(0, int(window_min)))
-    for ts, origin in triggers:
-        arr = labels_by_origin.get(origin, [])
-        if not arr:
-            out[(ts, origin)] = None
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
             continue
-        # binary search by timestamp
-        times = [t for (t, _) in arr]
-        i = bisect.bisect_left(times, ts)
-        candidates = []
-        if i < len(arr): candidates.append(i)
-        if i-1 >= 0: candidates.append(i-1)
-        # Explore a small neighborhood while within window
-        best_ix = None
-        best_dt = None
-        for ix in sorted(set(candidates + list(range(max(0, i-3), min(len(arr), i+4))))):
-            if ix in used_ix[origin]:
-                continue
-            dti, lab = arr[ix]
-            if abs(dti - ts) <= wnd:
-                if best_dt is None or abs(dti - ts) < abs(best_dt - ts):
-                    best_ix, best_dt = ix, dti
-        if best_ix is None:
-            out[(ts, origin)] = None
-        else:
-            used_ix[origin].add(best_ix)
-            out[(ts, origin)] = bool(arr[best_ix][1])
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
     return out
 
-def _persist_json(models_dir: Path, payload: dict):
-    try:
-        models_dir.mkdir(parents=True, exist_ok=True)
-        outp = models_dir / "signal_quality_summary.json"
-        outp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+def _classify(precision: float | None) -> tuple[str, str]:
+    if precision is None:
+        return ("Insufficient", "ℹ️")
+    if precision >= 0.75:
+        return ("Strong", "✅")
+    if precision >= 0.40:
+        return ("Mixed", "⚠️")
+    return ("Weak", "❌")
 
-def _seed_demo(now: datetime, hours: int, batch_h: int) -> List[dict]:
-    # 4 demo buckets: Strong, Mixed, Weak, Mixed
-    starts = [now - timedelta(hours=h) for h in range(hours, 0, -batch_h)]
-    starts = [ _bucket_floor(s, batch_h) for s in starts ][-4:]
-    demo = []
-    patterns = [
-        ("✅","Strong", 8, 7, 1),
-        ("⚠️","Mixed",  6, 3, 3),
-        ("❌","Weak",   5, 1, 4),
-        ("⚠️","Mixed",  7, 4, 3),
-    ]
-    for i, st in enumerate(starts):
-        em, lbl, trig, t, f = patterns[i % len(patterns)]
-        prec = t / float(t + f) if (t + f) > 0 else None
-        demo.append({
-            "start": _iso_utc(st),
-            "end": _iso_utc(st + timedelta(hours=batch_h)),
-            "triggers": trig,
-            "true": t,
-            "false": f,
-            "precision": prec,
-            "class": lbl,
-            "emoji": em,
-            "demo": True,
-        })
-    return demo
-
-def append(md: List[str], ctx: SummaryContext, *_, **__):
+def _compute_batches(models_dir: Path) -> tuple[list[Batch], dict]:
     """
-    Signal Quality Summary (v0.5.5)
-    - Look back last 72h (env: MW_SIGNAL_WINDOW_H)
-    - Group by batch size (env: MW_SIGNAL_BATCH_H)
-    - Join labels within ±5 minutes (env: MW_SIGNAL_JOIN_MIN)
-    - Persist models/signal_quality_summary.json
+    Compute batches over window by joining triggers and labels
+    on origin + nearest timestamp within ±join_min.
+    NOTE: We do NOT require scores here; join is timestamp-based.
     """
-    models_dir = ctx.models_dir
-    window_h = int(os.getenv("MW_SIGNAL_WINDOW_H", "72"))
-    batch_h  = int(os.getenv("MW_SIGNAL_BATCH_H", "3"))
-    join_min = int(os.getenv("MW_SIGNAL_JOIN_MIN", os.getenv("TRAINING_JOIN_WINDOW_MIN", "5")))
+    window_h = _env_int("MW_SIGNAL_WINDOW_H", 72)
+    batch_h  = _env_int("MW_SIGNAL_BATCH_H", 3)
+    join_min = _env_int("MW_SIGNAL_JOIN_MIN", 5)
 
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=window_h)
+    start_window = now - timedelta(hours=window_h)
 
-    trig_path = models_dir / "trigger_history.jsonl"
-    lab_path  = models_dir / "label_feedback.jsonl"
+    # Keep only events inside the window
+    triggers_raw = [r for r in _load_jsonl(models_dir / "trigger_history.jsonl")
+                    if (ts := parse_ts(r.get("timestamp"))) and ts >= start_window]
+    labels_raw   = [r for r in _load_jsonl(models_dir / "label_feedback.jsonl")
+                    if (ts := parse_ts(r.get("timestamp"))) and ts >= start_window]
 
-    T = _load_jsonl_safe(trig_path)
-    L = _load_jsonl_safe(lab_path)
-
-    # Filter & normalize
-    triggers: List[Tuple[datetime, str]] = []
-    for r in T:
-        ts = parse_ts(r.get("timestamp"))
-        if not ts or ts < cutoff:
-            continue
-        origin = str(r.get("origin") or "unknown").lower()
-        decision = str(r.get("decision") or "").lower()
-        if decision == "triggered":  # only count actual triggers
-            triggers.append((ts, origin))
-
-    labels_by_origin: Dict[str, List[Tuple[datetime, bool]]] = {}
-    for r in L:
-        ts = parse_ts(r.get("timestamp"))
-        if not ts or ts < cutoff:
-            continue
-        origin = str(r.get("origin") or "unknown").lower()
-        lab = bool(r.get("label", False))
-        labels_by_origin.setdefault(origin, []).append((ts, lab))
-
-    for arr in labels_by_origin.values():
-        arr.sort(key=lambda t: t[0])
-
-    # Join labels to triggers
-    lab_map = _join_labels(triggers, labels_by_origin, join_min)
-
-    # Aggregate into batches
-    batches: Dict[datetime, dict] = {}
-    for ts, origin in triggers:
-        b = _bucket_floor(ts, batch_h)
-        rec = batches.setdefault(b, {"triggers": 0, "true": 0, "false": 0})
-        rec["triggers"] += 1
-        lab = lab_map.get((ts, origin))
-        if lab is True:
-            rec["true"] += 1
-        elif lab is False:
-            rec["false"] += 1
-        # None → unlabeled; still counted in triggers
-
-    # Demo seeding if sparse
-    seeded = False
-    if not batches and is_demo_mode():
-        seeded = True
-        demo = _seed_demo(now, hours=min(window_h, 24), batch_h=batch_h)
-        # Write markdown and persist directly, then return
-        md.append(f"\n### 🧪 Signal Quality Summary (last {window_h}h, {batch_h}h buckets)")
-        md.append("_(seeded demo data)_")
-        for row in demo:
-            start = datetime.fromisoformat(row["start"].replace("Z", "+00:00"))
-            end   = datetime.fromisoformat(row["end"].replace("Z", "+00:00"))
-            rng = f"[{start.strftime('%H:%M')}–{end.strftime('%H:%M')}]"
-            em, lbl = row["emoji"], row["class"]
-            prec = row["precision"]
-            md.append(f"{rng} → {em} {lbl} (precision={prec:.2f}, n={row['triggers']})")
-        payload = {
+    # Demo seeding if logs are sparse and DEMO_MODE is enabled
+    demo_seeded = False
+    if is_demo_mode() and len(triggers_raw) < 6 and len(labels_raw) < 6:
+        demo_seeded = True
+        base = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=12)
+        seeds = [
+            (0.88, 8),  # strong
+            (0.50, 6),  # mixed
+            (0.20, 5),  # weak
+            (0.57, 7),  # mixed
+        ]
+        batches = []
+        for i, (p, n) in enumerate(seeds):
+            bs = base + timedelta(hours=3*i)
+            be = bs + timedelta(hours=3)
+            tp = max(0, round(p * n))
+            fp = max(0, n - tp)
+            klass, emoji = _classify(p)
+            batches.append(Batch(bs, be, n, tp, fp, p, klass, emoji, demo=True))
+        meta = {
             "window_hours": window_h,
             "batch_hours": batch_h,
-            "generated_at": _iso_utc(now),
-            "batches": demo,
+            "generated_at": now.isoformat().replace("+00:00","Z"),
+            "batches": [
+                {
+                    "start": b.start.isoformat().replace("+00:00","Z"),
+                    "end": b.end.isoformat().replace("+00:00","Z"),
+                    "triggers": b.triggers, "true": b.true, "false": b.false,
+                    "precision": b.precision, "class": b.klass, "emoji": b.emoji, "demo": True,
+                } for b in batches
+            ],
             "demo": True,
         }
-        _persist_json(models_dir, payload)
-        return
+        return batches, meta
 
-    # Build ordered output & payload
-    ordered_keys = sorted(batches.keys())
-    out_rows = []
-    for b in ordered_keys:
-        stats = batches[b]
-        denom = stats["true"] + stats["false"]
-        prec = (stats["true"] / float(denom)) if denom > 0 else None
-        em, lbl = _classify(prec)
-        out_rows.append({
-            "start": _iso_utc(b),
-            "end": _iso_utc(b + timedelta(hours=batch_h)),
-            "triggers": stats["triggers"],
-            "true": stats["true"],
-            "false": stats["false"],
-            "precision": prec,
-            "class": lbl,
-            "emoji": em,
-        })
+    # Build per-origin trigger timestamp index (no score required)
+    trig_by_origin: dict[str, list[datetime]] = {}
+    for r in triggers_raw:
+        o = r.get("origin") or "unknown"
+        ts = parse_ts(r.get("timestamp"))
+        if not ts:
+            continue
+        trig_by_origin.setdefault(o, []).append(ts)
+    for o in trig_by_origin:
+        trig_by_origin[o].sort()
 
-    md.append(f"\n### 🧪 Signal Quality Summary (last {window_h}h, {batch_h}h buckets)")
-    if not out_rows:
-        md.append("_No recent triggers/labels._")
-    else:
-        for row in out_rows:
-            start = datetime.fromisoformat(row["start"].replace("Z", "+00:00"))
-            end   = datetime.fromisoformat(row["end"].replace("Z", "+00:00"))
-            rng = f"[{start.strftime('%H:%M')}–{end.strftime('%H:%M')}]"
-            em, lbl, n = row["emoji"], row["class"], row["triggers"]
-            prec = row["precision"]
-            if prec is None:
-                md.append(f"{rng} → {em} {lbl} (no labels, n={n})")
-            else:
-                md.append(f"{rng} → {em} {lbl} (precision={prec:.2f}, n={n})")
+    # Helper to compute bucket bounds for a timestamp
+    def bucket_bounds(ts: datetime) -> tuple[datetime, datetime]:
+        delta = ts - start_window
+        k = int(delta.total_seconds() // (batch_h * 3600))
+        bs = start_window + timedelta(hours=k * batch_h)
+        be = bs + timedelta(hours=batch_h)
+        return bs, be
 
-    payload = {
+    # Join each label to the nearest trigger in the same origin within tolerance
+    tol = timedelta(minutes=join_min)
+    bucket_map: dict[tuple[datetime, datetime], dict[str, int]] = {}
+
+    for lab in labels_raw:
+        o = lab.get("origin") or "unknown"
+        lt = parse_ts(lab.get("timestamp"))
+        if not lt:
+            continue
+        label_bool = bool(lab.get("label"))
+        times = trig_by_origin.get(o) or []
+        # Nearest by absolute time difference
+        best_t = None
+        best_dt = None
+        for tt in times:
+            dt = abs(tt - lt)
+            if dt <= tol and (best_dt is None or dt < best_dt):
+                best_t = tt
+                best_dt = dt
+        if best_t is None:
+            continue
+        bs, be = bucket_bounds(best_t)
+        d = bucket_map.setdefault((bs, be), {"triggers": 0, "true": 0, "false": 0})
+        d["triggers"] += 1   # count of matched trigger/label pairs in this bucket
+        if label_bool:
+            d["true"] += 1
+        else:
+            d["false"] += 1
+
+    # Materialize batches in time order
+    batches: list[Batch] = []
+    for (bs, be) in sorted(bucket_map.keys()):
+        d = bucket_map[(bs, be)]
+        n_pos = d["true"]
+        n_neg = d["false"]
+        denom = n_pos + n_neg
+        precision = (n_pos / denom) if denom > 0 else None
+        klass, emoji = _classify(precision)
+        batches.append(Batch(bs, be, d["triggers"], n_pos, n_neg, precision, klass, emoji))
+
+    meta = {
         "window_hours": window_h,
         "batch_hours": batch_h,
-        "generated_at": _iso_utc(datetime.now(timezone.utc)),
-        "batches": out_rows,
+        "generated_at": now.isoformat().replace("+00:00","Z"),
+        "batches": [
+            {
+                "start": b.start.isoformat().replace("+00:00","Z"),
+                "end": b.end.isoformat().replace("+00:00","Z"),
+                "triggers": b.triggers, "true": b.true, "false": b.false,
+                "precision": b.precision, "class": b.klass, "emoji": b.emoji, "demo": b.demo,
+            } for b in batches
+        ],
         "demo": False,
     }
-    _persist_json(models_dir, payload)
+    return batches, meta
+
+# ------------------------------------------------------------
+# Trend chart from JSON artifact
+# ------------------------------------------------------------
+def _plot_trend_from_json(meta: dict, out_path: Path) -> bool:
+    """
+    Build a precision-over-time chart using meta['batches'].
+    Returns True if an image was written.
+    """
+    batches = meta.get("batches") or []
+    if not batches:
+        return False
+
+    xs, ys, classes, ns = [], [], [], []
+    any_demo = False
+    for b in batches:
+        st = parse_ts(b.get("start"))
+        en = parse_ts(b.get("end"))
+        pr = b.get("precision", None)
+        if not st or not en or pr is None:
+            continue
+        t = st + (en - st)/2  # midpoint
+        xs.append(t)
+        ys.append(float(pr))
+        classes.append((b.get("class") or "").lower())
+        ns.append(int(b.get("true", 0)) + int(b.get("false", 0)))
+        if b.get("demo"):
+            any_demo = True
+
+    if not xs:
+        return False
+
+    fig, ax = plt.subplots(figsize=(8, 3))
+
+    # Background class bands
+    ax.axhspan(0.75, 1.00, alpha=0.10, color="green")
+    ax.axhspan(0.40, 0.75, alpha=0.10, color="gold")
+    ax.axhspan(0.00, 0.40, alpha=0.10, color="red")
+
+    # Line (solid vs dashed if demo)
+    ls = "--" if any_demo else "-"
+    ax.plot(xs, ys, linewidth=1.2, linestyle=ls)
+
+    # Scatter by class
+    color_by_class = {"strong": "green", "mixed": "gold", "weak": "red"}
+    for t, y, c, n in zip(xs, ys, classes, ns):
+        ax.scatter([t], [y], s=28, zorder=3, color=color_by_class.get(c, "gray"))
+        if n < 3:
+            ax.annotate("n<3", (mdates.date2num(t), y),
+                        xytext=(3, 6), textcoords="offset points", fontsize=7)
+
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel("precision")
+    ax.set_xlabel("time")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    fig.autofmt_xdate()
+
+    title = "Signal Quality Trend (72h)"
+    if any_demo:
+        title += " [demo]"
+    ax.set_title(title, fontsize=10)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return True
+
+# ------------------------------------------------------------
+# Public entry point
+# ------------------------------------------------------------
+def append(md: list[str], ctx, *, write_json: bool = True) -> None:
+    """
+    Appends the textual Signal Quality Summary (as before) and
+    now also renders a trend chart read from the JSON artifact.
+    """
+    models_dir: Path = ctx.models_dir
+    window_h = _env_int("MW_SIGNAL_WINDOW_H", 72)
+    batch_h  = _env_int("MW_SIGNAL_BATCH_H", 3)
+
+    # If the artifact exists, reuse it; otherwise compute from logs (and write).
+    meta_path = models_dir / "signal_quality_summary.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            window_h = int(meta.get("window_hours", window_h))
+            batch_h  = int(meta.get("batch_hours", batch_h))
+        except Exception:
+            meta = None
+    else:
+        meta = None
+
+    batches: list[Batch]
+    if meta is None:
+        batches, meta = _compute_batches(models_dir)
+        if write_json:
+            meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    else:
+        batches = []
+        for b in meta.get("batches", []):
+            st = parse_ts(b.get("start"))
+            en = parse_ts(b.get("end"))
+            if not st or not en:
+                continue
+            pr = b.get("precision", None)
+            klass = b.get("class") or "Insufficient"
+            emoji = b.get("emoji") or "ℹ️"
+            batches.append(Batch(
+                start=st, end=en,
+                triggers=int(b.get("triggers", 0)),
+                true=int(b.get("true", 0)),
+                false=int(b.get("false", 0)),
+                precision=(float(pr) if pr is not None else None),
+                klass=klass, emoji=emoji,
+                demo=bool(b.get("demo", False)),
+            ))
+
+    # ---------- Markdown ----------
+    md.append(f"### 🧪 Signal Quality Summary (last {window_h}h, {batch_h}h buckets)")
+    if meta.get("demo"):
+        md.append("(seeded demo data)")
+
+    if not batches:
+        md.append("_no recent batches_")
+    else:
+        for b in sorted(batches, key=lambda b: b.start):
+            hhmm = lambda dt: dt.strftime("%H:%M")
+            pr_str = "n/a" if b.precision is None else f"{b.precision:.2f}"
+            md.append(f"[{hhmm(b.start)}–{hhmm(b.end)}] → {b.emoji} {b.klass} "
+                      f"(precision={pr_str}, n={b.triggers})")
+
+    # ---------- Trend chart ----------
+    art_dir = Path("artifacts")
+    img_path = art_dir / f"signal_quality_trend_{window_h}h.png"
+    wrote = _plot_trend_from_json(meta, img_path)
+    if wrote:
+        md.append("")
+        md.append(f"![Signal quality trend ({window_h}h)]({img_path.as_posix()})")
+        # If very sparse, print inline values for convenience
+        bs = meta.get("batches") or []
+        vals = [(parse_ts(b.get("end")) or parse_ts(b.get("start")), b.get("precision"))
+                for b in bs if b.get("precision") is not None]
+        vals = [(t, float(p)) for (t, p) in vals if t]
+        if 0 < len(vals) <= 3:
+            vals_sorted = sorted(vals, key=lambda x: x[0])
+            pretty = ", ".join(f"{t.strftime('%m-%d %H:%M')}={p:.2f}" for t, p in vals_sorted)
+            md.append(f"_values_: {pretty}")
