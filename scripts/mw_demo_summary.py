@@ -67,6 +67,7 @@ from scripts.summary_sections import (
     source_precision_recall,
     signal_quality,
     signal_quality_per_origin,
+    signal_quality_per_version,
     score_distribution_per_origin,
     threshold_quality_per_origin,
 )
@@ -212,6 +213,7 @@ def main():
     label_feedback.append(md, ctx)
     signal_quality.append(md, ctx)
     signal_quality_per_origin.append(md, ctx)
+    signal_quality_per_version.append(md, ctx)
     rolling_accuracy_snapshot.append(md, ctx)
     accuracy_by_model_version.append(md, ctx)
     training_data_snapshot.append(md, ctx)
