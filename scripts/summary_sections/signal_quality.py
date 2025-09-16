@@ -45,7 +45,7 @@ class Batch:
     demo: bool = False
 
 # ------------------------------------------------------------
-# Core compute (same behavior as v0.5.5; used if JSON is missing)
+# Core compute (3h buckets over window; join within ±join_min)
 # ------------------------------------------------------------
 def _load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
@@ -72,26 +72,27 @@ def _classify(precision: float | None) -> tuple[str, str]:
 
 def _compute_batches(models_dir: Path) -> tuple[list[Batch], dict]:
     """
-    Compute 3h batches over 72h window (env-tunable) by joining triggers and labels
+    Compute batches over window by joining triggers and labels
     on origin + nearest timestamp within ±join_min.
+    NOTE: We do NOT require scores here; join is timestamp-based.
     """
     window_h = _env_int("MW_SIGNAL_WINDOW_H", 72)
-    batch_h = _env_int("MW_SIGNAL_BATCH_H", 3)
+    batch_h  = _env_int("MW_SIGNAL_BATCH_H", 3)
     join_min = _env_int("MW_SIGNAL_JOIN_MIN", 5)
 
     now = datetime.now(timezone.utc)
     start_window = now - timedelta(hours=window_h)
 
-    triggers = [r for r in _load_jsonl(models_dir / "trigger_history.jsonl")
-                if (ts := parse_ts(r.get("timestamp"))) and ts >= start_window]
-    labels   = [r for r in _load_jsonl(models_dir / "label_feedback.jsonl")
-                if (ts := parse_ts(r.get("timestamp"))) and ts >= start_window]
+    # Keep only events inside the window
+    triggers_raw = [r for r in _load_jsonl(models_dir / "trigger_history.jsonl")
+                    if (ts := parse_ts(r.get("timestamp"))) and ts >= start_window]
+    labels_raw   = [r for r in _load_jsonl(models_dir / "label_feedback.jsonl")
+                    if (ts := parse_ts(r.get("timestamp"))) and ts >= start_window]
 
-    # If sparse and in demo mode, synthesize plausible batches to keep visible
+    # Demo seeding if logs are sparse and DEMO_MODE is enabled
     demo_seeded = False
-    if is_demo_mode() and len(triggers) < 6 and len(labels) < 6:
+    if is_demo_mode() and len(triggers_raw) < 6 and len(labels_raw) < 6:
         demo_seeded = True
-        # Seed four batches with plausible precision
         base = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=12)
         seeds = [
             (0.88, 8),  # strong
@@ -103,11 +104,10 @@ def _compute_batches(models_dir: Path) -> tuple[list[Batch], dict]:
         for i, (p, n) in enumerate(seeds):
             bs = base + timedelta(hours=3*i)
             be = bs + timedelta(hours=3)
-            t = n
             tp = max(0, round(p * n))
             fp = max(0, n - tp)
             klass, emoji = _classify(p)
-            batches.append(Batch(bs, be, t, tp, fp, p, klass, emoji, demo=True))
+            batches.append(Batch(bs, be, n, tp, fp, p, klass, emoji, demo=True))
         meta = {
             "window_hours": window_h,
             "batch_hours": batch_h,
@@ -124,58 +124,49 @@ def _compute_batches(models_dir: Path) -> tuple[list[Batch], dict]:
         }
         return batches, meta
 
-    # Build per-origin trigger index by time for nearest join
-    trig_by_origin: dict[str, list[tuple[datetime, float]]] = {}
-    for r in triggers:
+    # Build per-origin trigger timestamp index (no score required)
+    trig_by_origin: dict[str, list[datetime]] = {}
+    for r in triggers_raw:
         o = r.get("origin") or "unknown"
         ts = parse_ts(r.get("timestamp"))
-        if not ts: 
+        if not ts:
             continue
-        score = r.get("adjusted_score")
-        try:
-            score = float(score)
-        except Exception:
-            score = None
-        if score is None:
-            continue
-        trig_by_origin.setdefault(o, []).append((ts, score))
+        trig_by_origin.setdefault(o, []).append(ts)
     for o in trig_by_origin:
-        trig_by_origin[o].sort(key=lambda x: x[0])
+        trig_by_origin[o].sort()
 
-    # Match labels to nearest trigger within tolerance, bucket by start time
-    bucket_map: dict[tuple[datetime, datetime], dict[str, int]] = {}
-    tol = timedelta(minutes=join_min)
-
+    # Helper to compute bucket bounds for a timestamp
     def bucket_bounds(ts: datetime) -> tuple[datetime, datetime]:
-        # floor to batch_h from start_window
         delta = ts - start_window
         k = int(delta.total_seconds() // (batch_h * 3600))
         bs = start_window + timedelta(hours=k * batch_h)
         be = bs + timedelta(hours=batch_h)
         return bs, be
 
-    for lab in labels:
+    # Join each label to the nearest trigger in the same origin within tolerance
+    tol = timedelta(minutes=join_min)
+    bucket_map: dict[tuple[datetime, datetime], dict[str, int]] = {}
+
+    for lab in labels_raw:
         o = lab.get("origin") or "unknown"
         lt = parse_ts(lab.get("timestamp"))
-        if not lt: 
+        if not lt:
             continue
         label_bool = bool(lab.get("label"))
-        cands = trig_by_origin.get(o) or []
-        # nearest by abs time diff
-        best = None
+        times = trig_by_origin.get(o) or []
+        # Nearest by absolute time difference
+        best_t = None
         best_dt = None
-        for (tt, sc) in cands:
-            dt = abs((tt - lt))
+        for tt in times:
+            dt = abs(tt - lt)
             if dt <= tol and (best_dt is None or dt < best_dt):
-                best = (tt, sc)
+                best_t = tt
                 best_dt = dt
-        if not best:
+        if best_t is None:
             continue
-        tt, sc = best
-        bs, be = bucket_bounds(tt)
-        key = (bs, be)
-        d = bucket_map.setdefault(key, {"triggers": 0, "true": 0, "false": 0})
-        d["triggers"] += 1
+        bs, be = bucket_bounds(best_t)
+        d = bucket_map.setdefault((bs, be), {"triggers": 0, "true": 0, "false": 0})
+        d["triggers"] += 1   # count of matched trigger/label pairs in this bucket
         if label_bool:
             d["true"] += 1
         else:
@@ -204,7 +195,7 @@ def _compute_batches(models_dir: Path) -> tuple[list[Batch], dict]:
                 "precision": b.precision, "class": b.klass, "emoji": b.emoji, "demo": b.demo,
             } for b in batches
         ],
-        "demo": demo_seeded,
+        "demo": False,
     }
     return batches, meta
 
@@ -223,15 +214,10 @@ def _plot_trend_from_json(meta: dict, out_path: Path) -> bool:
     xs, ys, classes, ns = [], [], [], []
     any_demo = False
     for b in batches:
-        try:
-            st = parse_ts(b.get("start"))
-            en = parse_ts(b.get("end"))
-            pr = b.get("precision", None)
-        except Exception:
-            continue
-        if not st or not en:
-            continue
-        if pr is None:
+        st = parse_ts(b.get("start"))
+        en = parse_ts(b.get("end"))
+        pr = b.get("precision", None)
+        if not st or not en or pr is None:
             continue
         t = st + (en - st)/2  # midpoint
         xs.append(t)
@@ -241,13 +227,12 @@ def _plot_trend_from_json(meta: dict, out_path: Path) -> bool:
         if b.get("demo"):
             any_demo = True
 
-    if len(xs) == 0:
+    if not xs:
         return False
 
     fig, ax = plt.subplots(figsize=(8, 3))
 
     # Background class bands
-    xmin = min(xs); xmax = max(xs)
     ax.axhspan(0.75, 1.00, alpha=0.10, color="green")
     ax.axhspan(0.40, 0.75, alpha=0.10, color="gold")
     ax.axhspan(0.00, 0.40, alpha=0.10, color="red")
@@ -270,7 +255,7 @@ def _plot_trend_from_json(meta: dict, out_path: Path) -> bool:
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
     fig.autofmt_xdate()
 
-    title = "Signal Quality Trend (72h)"  # label; window displayed in markdown too
+    title = "Signal Quality Trend (72h)"
     if any_demo:
         title += " [demo]"
     ax.set_title(title, fontsize=10)
@@ -298,7 +283,6 @@ def append(md: list[str], ctx, *, write_json: bool = True) -> None:
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            # best-effort sanity: enforce window/bucket in header
             window_h = int(meta.get("window_hours", window_h))
             batch_h  = int(meta.get("batch_hours", batch_h))
         except Exception:
@@ -331,7 +315,7 @@ def append(md: list[str], ctx, *, write_json: bool = True) -> None:
                 demo=bool(b.get("demo", False)),
             ))
 
-    # ---------- Markdown (text list, unchanged style) ----------
+    # ---------- Markdown ----------
     md.append(f"### 🧪 Signal Quality Summary (last {window_h}h, {batch_h}h buckets)")
     if meta.get("demo"):
         md.append("(seeded demo data)")
@@ -339,32 +323,25 @@ def append(md: list[str], ctx, *, write_json: bool = True) -> None:
     if not batches:
         md.append("_no recent batches_")
     else:
-        # Sort by start time
-        batches_sorted = sorted(batches, key=lambda b: b.start)
-        for b in batches_sorted:
+        for b in sorted(batches, key=lambda b: b.start):
             hhmm = lambda dt: dt.strftime("%H:%M")
             pr_str = "n/a" if b.precision is None else f"{b.precision:.2f}"
             md.append(f"[{hhmm(b.start)}–{hhmm(b.end)}] → {b.emoji} {b.klass} "
                       f"(precision={pr_str}, n={b.triggers})")
 
     # ---------- Trend chart ----------
-    # Always try to render from JSON (so tests can drop in a mocked file)
-    meta_for_plot = meta
     art_dir = Path("artifacts")
     img_path = art_dir / f"signal_quality_trend_{window_h}h.png"
-    wrote = _plot_trend_from_json(meta_for_plot, img_path)
-
-    # Append markdown reference if we wrote an image
+    wrote = _plot_trend_from_json(meta, img_path)
     if wrote:
         md.append("")
         md.append(f"![Signal quality trend ({window_h}h)]({img_path.as_posix()})")
-
-        # If very few points, print inline values too
-        bs = meta_for_plot.get("batches") or []
+        # If very sparse, print inline values for convenience
+        bs = meta.get("batches") or []
         vals = [(parse_ts(b.get("end")) or parse_ts(b.get("start")), b.get("precision"))
                 for b in bs if b.get("precision") is not None]
         vals = [(t, float(p)) for (t, p) in vals if t]
-        if len(vals) > 0 and len(vals) <= 3:
+        if 0 < len(vals) <= 3:
             vals_sorted = sorted(vals, key=lambda x: x[0])
             pretty = ", ".join(f"{t.strftime('%m-%d %H:%M')}={p:.2f}" for t, p in vals_sorted)
             md.append(f"_values_: {pretty}")
