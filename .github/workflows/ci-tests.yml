@@ -99,7 +99,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # --- Prepare & build CI demo summary ---
+      # --- Prep & build CI demo summary ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
@@ -118,12 +118,8 @@ jobs:
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
-          # --- optional: window for accuracy-by-version snapshot (default 72h) ---
+          # window for accuracy-by-version snapshot (default 72h)
           MW_ACCURACY_WINDOW_H: "72"
-          # --- Signal Quality section knobs ---
-          MW_SIGNAL_WINDOW_H: "72"
-          MW_SIGNAL_BATCH_H: "3"
-          MW_SIGNAL_JOIN_MIN: "5"
         run: python scripts/mw_demo_summary.py
 
       # --- Upload accuracy-by-version snapshot JSON ---
@@ -136,25 +132,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- Upload Signal Quality summary JSON ---
+      # --- Upload signal quality summary JSON (batches) ---
       - name: Upload signal-quality summary
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: signal-quality-summary
           path: models/signal_quality_summary.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
-
-      - name: Upload per-origin signal quality artifact
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: signal-quality-per-origin
-          path: models/signal_quality_per_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
 
       - name: Show artifacts (debug)
         if: ${{ success() }}
@@ -163,7 +149,7 @@ jobs:
           ls -lah
           echo "Artifacts in ./artifacts:"
           ls -lah artifacts || true
-          echo "Models dir:"
+          echo "Models dir listing:"
           ls -lah models || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
 
@@ -175,12 +161,14 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           cat artifacts/demo_summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      # --- Upload the rendered summary as an artifact too ---
+      # --- Upload the rendered summary + selected model JSONs as a single artifact ---
       - name: Upload demo-summary artifact
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: moonwire-demo
-          path: artifacts/*
+          path: |
+            artifacts/*
+            models/signal_quality_per_version.json
           if-no-files-found: error
           retention-days: 14
