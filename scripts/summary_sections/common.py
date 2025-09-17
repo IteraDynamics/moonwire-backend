@@ -1,10 +1,8 @@
 # scripts/summary_sections/common.py
-from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import os, json, hashlib, random, uuid
-from typing import Dict, List, Any, Optional
 
 # ---- Context passed to every section ----
 @dataclass
@@ -17,54 +15,89 @@ class SummaryContext:
     candidates: list[str] = field(default_factory=list)
     caches: dict = field(default_factory=dict)   # sections may reuse/store computed data
 
-# ---- Generic helpers ----
+
+# ---- Generic helpers (moved out of mw_demo_summary) ----
 def is_demo_mode() -> bool:
     return os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
+
 
 def red(s: str) -> str:
     return "000000" if not s else hashlib.sha1(s.encode()).hexdigest()[:6]
 
+
 def band_weight_from_score(score):
-    if score is None: return 1.0
-    if score >= 0.75: return 1.25
-    if score >= 0.50: return 1.0
+    if score is None:
+        return 1.0
+    if score >= 0.75:
+        return 1.25
+    if score >= 0.50:
+        return 1.0
     return 0.75
 
+
 def weight_to_label(w: float) -> str:
-    if w >= 1.20: return "High"
-    if w >= 0.90: return "Med"
+    if w >= 1.20:
+        return "High"
+    if w >= 0.90:
+        return "Med"
     return "Low"
 
-def parse_ts(val):
-    if val is None: return None
-    try:
-        ts = float(val); return datetime.fromtimestamp(ts, tz=timezone.utc)
-    except Exception: pass
-    try:
-        s = str(val);  s = s[:-1] + "+00:00" if s.endswith("Z") else s
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception: return None
 
-def pick_candidate_origins(origins_rows, yield_data=None, top=3, default=("twitter","reddit","rss_news")):
+def parse_ts(val):
+    if val is None:
+        return None
+    try:
+        ts = float(val)
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except Exception:
+        pass
+    try:
+        s = str(val)
+        s = s[:-1] + "+00:00" if s.endswith("Z") else s
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _iso(dt: datetime) -> str:
+    """UTC ISO-8601 with 'Z' and no microseconds, e.g. 2025-09-16T12:34:56Z."""
+    return (
+        dt.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def pick_candidate_origins(
+    origins_rows, yield_data=None, top=3, default=("twitter", "reddit", "rss_news")
+):
     seen, out = set(), []
     if yield_data:
         for item in yield_data.get("budget_plan", []) or []:
             o = item.get("origin")
             if o and o != "unknown" and o not in seen:
-                out.append(o); seen.add(o)
-                if len(out) >= top: return out
+                out.append(o)
+                seen.add(o)
+                if len(out) >= top:
+                    return out
     for row in origins_rows or []:
         o = row.get("origin")
         if o and o != "unknown" and o not in seen:
-            out.append(o); seen.add(o)
-            if len(out) >= top: return out
+            out.append(o)
+            seen.add(o)
+            if len(out) >= top:
+                return out
     for o in default:
         if o not in seen:
-            out.append(o); seen.add(o)
-            if len(out) >= top: break
+            out.append(o)
+            seen.add(o)
+            if len(out) >= top:
+                break
     return out[:top]
 
-# --- DEMO seeders ---
+
+# --- DEMO seeders used by a few sections ---
 def generate_demo_data_if_needed(reviewers, flag_times=None):
     flag_times = flag_times or []
     if not is_demo_mode() or reviewers:
@@ -82,95 +115,116 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
         flag_times.append(ts)
     return display, seeded
 
-def generate_demo_origins_if_needed(origins_rows):
-    if not is_demo_mode():
-        return origins_rows
-    if not origins_rows or all((r.get("origin") == "unknown") for r in origins_rows):
-        demo_sources = ["twitter", "reddit", "rss_news"]
-        counts = [random.randint(1, 5) for _ in demo_sources]
-        total = max(1, sum(counts))
-        return [
-            {"origin": src, "count": c, "percent": round(c/total*100, 1)}
-            for src, c in zip(demo_sources, counts)
-        ]
-    return origins_rows
 
-def generate_demo_yield_plan_if_needed(yield_data):
+def generate_demo_yield_plan_if_needed(yield_data: dict | None, origins_rows=None) -> dict | None:
     """
-    If DEMO_MODE=true and yield_data is empty or has only 'unknown',
-    seed a plan so the section is populated.
+    Provide a synthetic yield plan when running in DEMO_MODE and no real plan exists.
+    Structure expected by source_yield_plan.py:
+      {
+        "budget_plan": [{"origin":"twitter","percent":47.4}, ...],
+        "raw_stats": [{"origin":"twitter","flags":10,"triggers":3,"score":0.30}, ...],
+        "demo": True
+      }
     """
     if not is_demo_mode():
-        return yield_data or {}
+        return yield_data
 
-    yd = yield_data or {}
-    origins = yd.get("origins") or []
-    has_budget = bool(yd.get("budget_plan"))
-    has_known = any(o.get("origin") != "unknown" for o in origins)
+    if isinstance(yield_data, dict) and isinstance(yield_data.get("budget_plan"), list) and yield_data["budget_plan"]:
+        return yield_data
 
-    if has_budget and has_known:
-        return yd
+    # Derive candidate origins from recent rows if available; otherwise default.
+    origins = []
+    if origins_rows:
+        seen = set()
+        for r in origins_rows:
+            o = r.get("origin")
+            if o and o not in seen and o != "unknown":
+                origins.append(o)
+                seen.add(o)
+                if len(origins) >= 3:
+                    break
+    if not origins:
+        origins = ["twitter", "reddit", "rss_news"]
 
-    demo_origins = ["twitter", "reddit", "rss_news"]
-    demo_flags = [random.randint(5, 15) for _ in demo_origins]
-    demo_triggers = [random.randint(1, 4) for _ in demo_origins]
-    total_flags = max(1, sum(demo_flags))
-    alpha = 0.7
+    # Random but plausible percentages summing ~100
+    weights = [random.uniform(0.2, 1.0) for _ in origins]
+    total = sum(weights) or 1.0
+    percents = [round(100.0 * w / total, 1) for w in weights]
 
-    origins_out = []
-    for origin, flags, triggers in zip(demo_origins, demo_flags, demo_triggers):
-        trigger_rate = triggers / max(flags, 1)
-        volume_share = flags / total_flags
-        yield_score = round(alpha * trigger_rate + (1 - alpha) * volume_share, 3)
-        origins_out.append({
-            "origin": origin,
+    budget_plan = [{"origin": o, "percent": p} for o, p in zip(origins, percents)]
+
+    # Raw stats: flags & triggers with a rough score ratio
+    raw_stats = []
+    for o in origins:
+        flags = random.randint(5, 15)
+        triggers = max(0, min(flags, int(round(flags * random.uniform(0.05, 0.35)))))
+        score = round((triggers / flags) if flags else 0.0, 3)
+        raw_stats.append({
+            "origin": o,
             "flags": flags,
             "triggers": triggers,
-            "trigger_rate": round(trigger_rate, 3),
-            "yield_score": yield_score,
-            "eligible": True,
+            "score": score,
         })
 
-    total_yield = sum(o["yield_score"] for o in origins_out) or 1.0
-    budget_plan = [
-        {"origin": o["origin"], "pct": round(100 * o["yield_score"] / total_yield, 1)}
-        for o in sorted(origins_out, key=lambda o: o["yield_score"], reverse=True)
-    ]
-
     return {
-        "window_days": 7,
-        "totals": {"flags": sum(demo_flags), "triggers": sum(demo_triggers)},
-        "origins": origins_out,
         "budget_plan": budget_plan,
-        "notes": ["_demo mode: yield plan seeded_"],
+        "raw_stats": raw_stats,
+        "demo": True,
     }
 
-def generate_demo_origin_trends_if_needed(trends, days=7, interval="day"):
-    if not is_demo_mode():
-        return trends or {}
-    origins = (trends or {}).get("origins") or []
-    if any(o.get("origin") != "unknown" for o in origins):
-        return trends
-    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
-    def _daily(n):
-        out = []
-        for i in range(n):
-            ts = (now - timedelta(days=(n - 1 - i))).replace(hour=0)
-            out.append({
-                "timestamp_bucket": ts.isoformat(),
-                "flags_count": random.randint(0, 8),
-                "triggers_count": random.randint(0, 4),
-            })
-        return out
+def generate_demo_origins_if_needed(rows: list | None) -> list:
+    """
+    Provide a minimal synthetic 'origin breakdown' when in DEMO_MODE and rows are empty.
+    Returns a list of dict rows with at least origin + counts that downstream users can read.
+    """
+    if not is_demo_mode() or (rows and len(rows) > 0):
+        return rows or []
+    origins = ["twitter", "reddit", "rss_news"]
+    out = []
+    for o in origins:
+        flags = random.randint(1, 5)
+        triggers = random.randint(0, flags)
+        out.append({"origin": o, "flags": flags, "triggers": triggers})
+    return out
 
-    origins_out = []
-    for o in ["reddit", "rss_news", "twitter"]:
-        origins_out.append({"origin": o, "buckets": _daily(days)})
 
-    return {
-        "window_days": days,
-        "interval": interval,
-        "origins": origins_out,
-        "notes": ["demo trends seeded"],
-    }
+def generate_demo_origin_trends_if_needed(trend_rows: list | None, days: int = 7) -> list:
+    """
+    Provide synthetic per-day trend rows for each origin when in DEMO_MODE and no real rows.
+    Expected by origin_trends.py as a flat list of rows:
+      {"origin":"reddit","date":"YYYY-MM-DD","flags":N,"triggers":M}
+    """
+    if not is_demo_mode() or (trend_rows and len(trend_rows) > 0):
+        return trend_rows or []
+
+    origins = ["reddit", "rss_news", "twitter"]
+    today = datetime.now(timezone.utc).date()
+    dates = [(today - timedelta(days=i)).isoformat() for i in range(days, 0, -1)]
+
+    out = []
+    for o in origins:
+        base = random.randint(2, 8)
+        for d in dates:
+            # Make it vaguely wavy
+            flags = max(0, int(round(base + random.uniform(-2, 4))))
+            triggers = max(0, int(round(flags * random.uniform(0.0, 0.6))))
+            out.append({"origin": o, "date": d, "flags": flags, "triggers": triggers})
+    return out
+
+
+# Optional explicit export list (helps tests that import specific names)
+__all__ = [
+    "SummaryContext",
+    "is_demo_mode",
+    "red",
+    "band_weight_from_score",
+    "weight_to_label",
+    "parse_ts",
+    "_iso",
+    "pick_candidate_origins",
+    "generate_demo_data_if_needed",
+    "generate_demo_yield_plan_if_needed",
+    "generate_demo_origins_if_needed",
+    "generate_demo_origin_trends_if_needed",
+]
