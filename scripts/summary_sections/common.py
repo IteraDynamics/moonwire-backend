@@ -97,7 +97,7 @@ def pick_candidate_origins(
     return out[:top]
 
 
-# --- DEMO seeders used by a few sections (unchanged behavior) ---
+# --- DEMO seeders used by a few sections ---
 def generate_demo_data_if_needed(reviewers, flag_times=None):
     flag_times = flag_times or []
     if not is_demo_mode() or reviewers:
@@ -116,6 +116,69 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
     return display, seeded
 
 
+def generate_demo_yield_plan_if_needed(yield_data: dict | None, origins_rows=None) -> dict | None:
+    """
+    Provide a synthetic yield plan when running in DEMO_MODE and no real plan exists.
+    Expected structure (used by source_yield_plan.py):
+
+      {
+        "budget_plan": [{"origin":"twitter","percent":47.4}, ...],
+        "raw_stats": [
+          {"origin":"twitter","flags":10,"triggers":3,"score":0.30},
+          ...
+        ]
+      }
+
+    If not in demo mode or an existing plan already looks valid, returns it unchanged.
+    """
+    if not is_demo_mode():
+        return yield_data
+
+    # If caller already provided a reasonable plan, keep it.
+    if isinstance(yield_data, dict) and isinstance(yield_data.get("budget_plan"), list) and yield_data["budget_plan"]:
+        return yield_data
+
+    # Derive candidate origins from recent rows if available; otherwise default.
+    origins = []
+    if origins_rows:
+        seen = set()
+        for r in origins_rows:
+            o = r.get("origin")
+            if o and o not in seen and o != "unknown":
+                origins.append(o)
+                seen.add(o)
+                if len(origins) >= 3:
+                    break
+    if not origins:
+        origins = ["twitter", "reddit", "rss_news"]
+
+    # Random but plausible percentages summing ~100
+    weights = [random.uniform(0.2, 1.0) for _ in origins]
+    total = sum(weights) or 1.0
+    percents = [round(100.0 * w / total, 1) for w in weights]
+
+    budget_plan = [{"origin": o, "percent": p} for o, p in zip(origins, percents)]
+
+    # Raw stats: flags & triggers with a rough score ratio
+    raw_stats = []
+    for o in origins:
+        flags = random.randint(5, 15)
+        triggers = max(0, min(flags, int(round(flags * random.uniform(0.05, 0.35)))))
+        score = round((triggers / flags) if flags else 0.0, 3)
+        raw_stats.append({
+            "origin": o,
+            "flags": flags,
+            "triggers": triggers,
+            "score": score,
+        })
+
+    return {
+        "budget_plan": budget_plan,
+        "raw_stats": raw_stats,
+        "demo": True,
+    }
+
+
 # Optional explicit export list (helps tests that import specific names)
 __all__ = [
     "SummaryContext",
@@ -127,4 +190,5 @@ __all__ = [
     "_iso",
     "pick_candidate_origins",
     "generate_demo_data_if_needed",
+    "generate_demo_yield_plan_if_needed",
 ]
