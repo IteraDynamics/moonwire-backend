@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import os
 import json
-from dataclasses import dataclass
 from typing import Dict, List, Tuple
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-from .common import SummaryContext, parse_ts, _iso
+from .common import SummaryContext, parse_ts  # removed _iso import
+
+# ----------------------------- small local utils -----------------------------
+
+def _iso(dt: datetime) -> str:
+    """UTC ISO-8601 with 'Z' and no microseconds, e.g., 2025-09-16T12:34:56Z."""
+    return (
+        dt.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 # ----------------------------- helpers -----------------------------
 
@@ -30,21 +40,17 @@ def _load_jsonl(p: Path) -> List[dict]:
 
 def _scan_candidate_times(logs_dir: Path, t_cut: datetime) -> Dict[str, List[datetime]]:
     """
-    Scan logs/ for recent candidate events. We accept any *.jsonl row that has:
+    Scan logs/ for recent candidate events. Accept any *.jsonl row that has:
       - origin
       - timestamp
-      - and a 'burst_z' field (typical for candidate/event stats)
+      - and a 'candidate-ish' field like 'burst_z' (or count_1h/score) to avoid
+        picking up unrelated logs.
     """
     out: Dict[str, List[datetime]] = {}
     if not logs_dir.exists():
         return out
 
     for p in logs_dir.glob("*.jsonl"):
-        # Be a little selective, but flexible
-        if "candidate" not in p.name and "event" not in p.name and "stats" not in p.name:
-            # still allow, we’ll filter by presence of keys
-            pass
-
         for r in _load_jsonl(p):
             ts = parse_ts(r.get("timestamp"))
             if not ts or ts < t_cut:
@@ -52,12 +58,10 @@ def _scan_candidate_times(logs_dir: Path, t_cut: datetime) -> Dict[str, List[dat
             origin = r.get("origin")
             if not origin:
                 continue
-            # require a candidate-ish feature to avoid pulling label/other logs
             if "burst_z" not in r and "count_1h" not in r and "score" not in r:
                 continue
             out.setdefault(origin, []).append(ts)
 
-    # sort times per origin for matching
     for k in out:
         out[k].sort()
     return out
@@ -107,7 +111,6 @@ def _count_triggers_matched_to_candidates(
         t = trig_times[j]
         if abs(c - t) <= tol:
             matched += 1
-            # advance both to avoid double-matching
             i += 1
             j += 1
         elif c < t - tol:
@@ -123,9 +126,7 @@ def _classify(rate: float, candidates: int) -> Tuple[str, str]:
       - High (>= 0.15)
       - Medium (>= 0.05)
       - Low (< 0.05)
-      - Insufficient (if very sparse candidate data)
-    NOTE: We treat *candidate* sparsity as the Insufficient trigger (not low trigger counts),
-    to align with prior examples (e.g., 1/72 => Low, not Insufficient).
+      - Insufficient if candidates < 3
     """
     if candidates < 3:
         return "Insufficient", "ℹ️"
@@ -174,7 +175,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
             "demo": False,
         })
 
-    # Demo seeding if empty or extremely sparse
+    # Demo seeding if empty and DEMO_MODE is on
     demo_used = False
     if not per_origin and ctx.is_demo:
         per_origin = [
@@ -184,7 +185,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
         ]
         demo_used = True
 
-    # Sort by class priority then by rate desc
+    # Sort by class → rate desc → origin
     order = {"High":0, "Medium":1, "Low":2, "Insufficient":3}
     per_origin.sort(key=lambda r: (order.get(r["class"], 9), -r["trigger_rate"], r["origin"]))
 
