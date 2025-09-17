@@ -99,7 +99,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # --- Prep & build CI demo summary ---
+      # --- Prepare & build CI demo summary ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
@@ -118,11 +118,11 @@ jobs:
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
-          # window for accuracy-by-version snapshot (default 72h)
+          # --- optional: window for accuracy-by-version snapshot (default 72h) ---
           MW_ACCURACY_WINDOW_H: "72"
         run: python scripts/mw_demo_summary.py
 
-      # --- Upload accuracy-by-version snapshot JSON ---
+      # --- Upload JSON artifacts produced by summary sections ---
       - name: Upload accuracy-by-version snapshot
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -132,16 +132,52 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- Upload signal quality summary JSON (batches) ---
-      - name: Upload signal-quality summary
+      - name: Upload signal quality summary
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: signal-quality-summary
           path: models/signal_quality_summary.json
-          if-no-files-found: warn
+          if-no-files-found: ignore
           retention-days: 14
 
+      - name: Upload per-origin signal quality
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-quality-per-origin
+          path: models/signal_quality_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload per-version signal quality
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-quality-per-version
+          path: models/signal_quality_per_version.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload trigger coverage per origin
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigger-coverage-per-origin
+          path: models/trigger_coverage_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload trigger precision by origin
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trigger-precision-by-origin
+          path: models/trigger_precision_by_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- Show artifacts & publish summary ---
       - name: Show artifacts (debug)
         if: ${{ success() }}
         run: |
@@ -149,11 +185,8 @@ jobs:
           ls -lah
           echo "Artifacts in ./artifacts:"
           ls -lah artifacts || true
-          echo "Models dir listing:"
-          ls -lah models || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
 
-      # --- Publish CI summary to the job view ---
       - name: Publish CI summary
         if: ${{ success() }}
         run: |
@@ -161,14 +194,11 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           cat artifacts/demo_summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      # --- Upload the rendered summary + selected model JSONs as a single artifact ---
       - name: Upload demo-summary artifact
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: moonwire-demo
-          path: |
-            artifacts/*
-            models/signal_quality_per_version.json
+          path: artifacts/*
           if-no-files-found: error
           retention-days: 14
