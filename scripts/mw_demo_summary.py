@@ -68,6 +68,7 @@ from scripts.summary_sections import (
     signal_quality,
     signal_quality_per_origin,
     signal_quality_per_version,
+    trigger_coverage_summary,
     score_distribution_per_origin,
     threshold_quality_per_origin,
 )
@@ -214,6 +215,7 @@ def main():
     signal_quality.append(md, ctx)
     signal_quality_per_origin.append(md, ctx)
     signal_quality_per_version.append(md, ctx)
+    trigger_coverage_summary.append(md, ctx)
     rolling_accuracy_snapshot.append(md, ctx)
     accuracy_by_model_version.append(md, ctx)
     training_data_snapshot.append(md, ctx)
