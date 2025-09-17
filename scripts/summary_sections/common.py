@@ -119,22 +119,16 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
 def generate_demo_yield_plan_if_needed(yield_data: dict | None, origins_rows=None) -> dict | None:
     """
     Provide a synthetic yield plan when running in DEMO_MODE and no real plan exists.
-    Expected structure (used by source_yield_plan.py):
-
+    Structure expected by source_yield_plan.py:
       {
         "budget_plan": [{"origin":"twitter","percent":47.4}, ...],
-        "raw_stats": [
-          {"origin":"twitter","flags":10,"triggers":3,"score":0.30},
-          ...
-        ]
+        "raw_stats": [{"origin":"twitter","flags":10,"triggers":3,"score":0.30}, ...],
+        "demo": True
       }
-
-    If not in demo mode or an existing plan already looks valid, returns it unchanged.
     """
     if not is_demo_mode():
         return yield_data
 
-    # If caller already provided a reasonable plan, keep it.
     if isinstance(yield_data, dict) and isinstance(yield_data.get("budget_plan"), list) and yield_data["budget_plan"]:
         return yield_data
 
@@ -179,6 +173,46 @@ def generate_demo_yield_plan_if_needed(yield_data: dict | None, origins_rows=Non
     }
 
 
+def generate_demo_origins_if_needed(rows: list | None) -> list:
+    """
+    Provide a minimal synthetic 'origin breakdown' when in DEMO_MODE and rows are empty.
+    Returns a list of dict rows with at least origin + counts that downstream users can read.
+    """
+    if not is_demo_mode() or (rows and len(rows) > 0):
+        return rows or []
+    origins = ["twitter", "reddit", "rss_news"]
+    out = []
+    for o in origins:
+        flags = random.randint(1, 5)
+        triggers = random.randint(0, flags)
+        out.append({"origin": o, "flags": flags, "triggers": triggers})
+    return out
+
+
+def generate_demo_origin_trends_if_needed(trend_rows: list | None, days: int = 7) -> list:
+    """
+    Provide synthetic per-day trend rows for each origin when in DEMO_MODE and no real rows.
+    Expected by origin_trends.py as a flat list of rows:
+      {"origin":"reddit","date":"YYYY-MM-DD","flags":N,"triggers":M}
+    """
+    if not is_demo_mode() or (trend_rows and len(trend_rows) > 0):
+        return trend_rows or []
+
+    origins = ["reddit", "rss_news", "twitter"]
+    today = datetime.now(timezone.utc).date()
+    dates = [(today - timedelta(days=i)).isoformat() for i in range(days, 0, -1)]
+
+    out = []
+    for o in origins:
+        base = random.randint(2, 8)
+        for d in dates:
+            # Make it vaguely wavy
+            flags = max(0, int(round(base + random.uniform(-2, 4))))
+            triggers = max(0, int(round(flags * random.uniform(0.0, 0.6))))
+            out.append({"origin": o, "date": d, "flags": flags, "triggers": triggers})
+    return out
+
+
 # Optional explicit export list (helps tests that import specific names)
 __all__ = [
     "SummaryContext",
@@ -191,4 +225,6 @@ __all__ = [
     "pick_candidate_origins",
     "generate_demo_data_if_needed",
     "generate_demo_yield_plan_if_needed",
+    "generate_demo_origins_if_needed",
+    "generate_demo_origin_trends_if_needed",
 ]
