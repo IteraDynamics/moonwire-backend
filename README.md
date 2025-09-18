@@ -1,105 +1,117 @@
 # MoonWire Signal Engine – Backend
 
-This is the backend engine for **MoonWire** — a real-time crypto signal platform that blends social sentiment, news narratives, and market behavior into actionable indicators.
+This is the backend engine for **MoonWire** — a real-time crypto signal intelligence platform that blends social sentiment, news narratives, and market behavior into **actionable indicators**.
 
-The current backend supports both **live market discovery** and **mock-mode sentiment APIs** as we prepare for model-based scoring and signal blending.
-
----
-
-## Overview
-
-MoonWire's backend is designed to ingest, analyze, and return signal-ready data for frontend display and future ML training. This includes:
-
-- Real-time sleeper signal scanning (market-based)
-- Twitter + news sentiment APIs (mock or cached)
-- Autonomous scoring loop (10-minute interval)
-- API endpoints used by the MoonWire frontend
-- Internal-only experimental modules for scoring logic
+The backend now powers:
+- **Trigger detection & scoring** (statistical + ML ensemble)
+- **Feedback-driven retraining** (continuous learning loop)
+- **Per-origin / per-version analytics** (precision, recall, F1)
+- **Threshold optimization & backtesting**
+- **Automated CI summaries with charts, metrics, and recommendations**
 
 ---
 
-## Key Features
+## 🚀 Overview
 
-- **FastAPI server** — lightweight, async, auto-launch on deploy
-- **Live CoinGecko ingestion** — top 250 coins pulled for signal analysis
-- **Sleeper detection engine** — identifies unexpected price/volume anomalies
-- **Mock sentiment endpoints** — support frontend beta with fallback data
-- **Auto-loop analysis engine** — ingestion → analysis → dispatch every 10 minutes
-- **Lightweight local cache** — Redis simulated via in-memory storage
-- **Modular design** — core logic isolated in `src/` for easy upgrades
+MoonWire’s backend ingests candidate events (Twitter, Reddit, news, market feeds), scores them through ML models, and produces **signal triggers** with rich provenance. Every inference, label, retrain, and threshold decision is logged, versioned, and surfaced in CI.
 
----
-
-## Tech Stack
-
-- **Python + FastAPI** — modern async API framework
-- **Uvicorn** — ASGI production-ready server
-- **Requests** — live market data ingestion
-- **Render** — serverless backend hosting
-- **GitHub** — version control + CI/CD triggers
+The system is fully modular:
+- Each diagnostic (accuracy, drift, coverage, suppression, precision, etc.) lives in its own section.
+- CI runs assemble these into a **demo summary report** with charts and artifacts.
+- Demo mode seeds synthetic rows for visibility even when logs are sparse.
 
 ---
 
-## Core Modules
+## ✨ Key Features
+
+- **FastAPI server** — lightweight async API for scoring and feedback
+- **Trigger + label logs** — append-only JSONL for complete provenance
+- **On-demand retraining** — Logistic, RF, and GB ensembles retrain from feedback logs
+- **Training metadata ledger** — every retrain is logged with metrics, features, and version
+- **Per-origin & per-version analytics** — precision/recall/F1, score distributions, drift splits
+- **Threshold engine** — per-origin thresholds, recommendations, and backtests
+- **Coverage & suppression metrics** — track firing rates vs. held-back signals
+- **Automated CI summaries** — rich markdown + charts + artifacts on every run
+- **Demo mode** — seeded plausible data for visibility in early or sparse runs
+
+---
+
+## 🛠 Tech Stack
+
+- **Python 3.10+**
+- **FastAPI + Uvicorn** — async inference + feedback endpoints
+- **scikit-learn** — ML models (logistic, RF, gradient boosting)
+- **matplotlib** — CI-safe chart rendering (Agg backend)
+- **pytest** — full test suite with green CI gating
+- **GitHub Actions** — CI/CD, artifact publishing, job summaries
+
+---
+
+## 📂 Core Modules
 
 | Module | Purpose |
 |--------|---------|
-| `main.py` | FastAPI app entrypoint, includes sentiment/news routers |
-| `src/auto_loop.py` | Background thread running signal scan every 10 minutes |
-| `src/ingest_discovery.py` | Pulls top 250 assets from CoinGecko |
-| `src/signal_generator.py` | Detects sleeper signals via price/volume anomalies |
-| `src/news_router.py` | News sentiment score API (mock or cached) |
-| `src/sentiment_news.py` | Sentiment analysis logic for headlines |
-| `src/cache.py` | Lightweight dict-based cache (MVP-safe) |
-| `src/logger.py` | Structured log entries for tracking system activity |
+| `main.py` | FastAPI app entrypoint, mounts inference + feedback routes |
+| `src/infer.py` | Ensemble inference, now logs `model_version` on every trigger |
+| `src/retrain_from_log.py` | Retrains models from `training_data.jsonl`, saves versioned artifacts |
+| `src/training_metadata.py` | Appends structured metadata ledger for every training run |
+| `src/ml/metrics.py` | Accuracy, precision/recall/F1 (per-version, per-origin) |
+| `scripts/mw_demo_summary.py` | Orchestrator: calls modular sections to build CI markdown |
+| `scripts/summary_sections/*` | Modular summary blocks (accuracy, thresholds, drift, coverage, suppression, precision, etc.) |
+| `src/paths.py` | Robust path/env handling for logs, models, and artifacts |
 
 ---
 
-## API Endpoints
+## 🌐 API Endpoints
 
 | Route | Purpose |
 |-------|---------|
-| `/sentiment/twitter` | Returns mock sentiment data for selected asset |
-| `/news-sentiment` | Returns mock or cached news sentiment scores |
-| `/signals/sleepers` | Internal route (future public dashboard feed) |
+| `/internal/trigger-likelihood/score?use=ensemble` | Run inference on candidate features |
+| `/internal/trigger-likelihood/feedback` | Submit label feedback for a scored trigger (auto-tags version) |
+| (more internal routes exist for retraining, testing, and CI hooks) |
 
 ---
 
-## How It Works
+## 📊 CI Summary (Artifacts)
 
-1. Server boots via Render → launches FastAPI app
-2. Background loop runs every 10 minutes:
-   - Pulls top assets from CoinGecko
-   - Evaluates for price/volume spikes
-   - Logs matched signals
-3. Frontend queries mock API endpoints for now
-4. Ready for swap to real scoring model as backend evolves
+Every CI run produces:
+- **Markdown job summary** — readable report with metrics, tables, and charts
+- **Artifacts/** — PNG trend charts (score distributions, signal quality, coverage, suppression, etc.)
+- **Models/** — versioned models, training metadata, accuracy snapshots, threshold recommendations, backtests
 
----
-
-## Deployment Notes
-
-- Hosted on **Render.com** with auto-loop enabled
-- No DB or Redis required — runs on local memory and simple caching
-- Rate-limit aware — all ingestion paced for free API tiers
-- Logs print to console for early-stage monitoring
+Examples:
+- Signal Quality (per-origin, per-version, and trend charts)
+- Score Distributions with drift overlays
+- Threshold Quality + Recommendations + Backtest uplift report
+- Trigger Coverage + Suppression metrics and trends
 
 ---
 
-## In Progress
+## ⚙️ How It Works
 
-- Model-based sentiment scoring (social + news)
-- Composite signal engine (score, label, drivers, trend)
-- Event tracking and confidence metadata
-- Feedback and training data export
-- Private signal testing dashboard
+1. **Inference**  
+   Candidates (from logs or live sources) → ensemble models → trigger scores.  
+   Every prediction logged with model version.
+
+2. **Feedback**  
+   Human (or simulated) labels posted via API.  
+   Joined to triggers → written to `label_feedback.jsonl`.
+
+3. **Training Data Log**  
+   Continuous join of triggers + labels → `training_data.jsonl`.
+
+4. **Retraining**  
+   Retrains models on demand or in CI.  
+   Saves versioned artifacts and appends metadata to `training_runs.jsonl`.
+
+5. **CI Summary**  
+   Orchestrator assembles modular diagnostics into a full report.  
+   Artifacts (charts, JSON) uploaded for visibility and reproducibility.
 
 ---
 
-## Mission
+## 🧪 Development & Testing
 
-> **Move faster than the crowd. Catch what others miss.  
-> MoonWire.  
-> Built for signal hunters.**
-
----
+- **Run tests:**  
+  ```bash
+  pytest -q
