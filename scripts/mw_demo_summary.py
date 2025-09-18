@@ -71,6 +71,7 @@ from scripts.summary_sections import (
     signal_quality_per_version,       # (v0.5.10) + trend
     threshold_quality_per_origin,     # (v0.5.8)
     threshold_recommendations,
+    threshold_backtest,
     trigger_coverage_summary,         # (v0.5.12)
     trigger_precision_by_origin,      # (v0.5.13)
     suppression_rate_by_origin,       # (v0.5.15)
@@ -223,6 +224,7 @@ def main():
     per_origin_thresholds.append(md, ctx)
     threshold_quality_per_origin.append(md, ctx)
     threshold_recommendations.append(md, ctx)
+    threshold_backtest.append(md, ctx)
     trigger_explainability.append(md, ctx)
 
     # 4) Decisions & labels (what actually happened)
