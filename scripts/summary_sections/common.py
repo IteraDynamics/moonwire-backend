@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import random
 
-
 # -----------------------------------------------------------------------------
 # Context
 # -----------------------------------------------------------------------------
@@ -22,7 +21,6 @@ class SummaryContext:
     yield_data: Optional[Dict[str, Any]]  # optional precomputed source yield
     candidates: List[Dict[str, Any]]  # optional preloaded candidates
     caches: Dict[str, Any]            # scratchpad for sections to share
-
 
 # -----------------------------------------------------------------------------
 # Time helpers
@@ -46,13 +44,11 @@ def parse_ts(s: Optional[str]) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def _iso(dt: datetime) -> str:
     """Format a UTC-aware datetime as ISO 8601 with trailing 'Z'."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
 
 # -----------------------------------------------------------------------------
 # Filesystem helpers
@@ -60,7 +56,6 @@ def _iso(dt: datetime) -> str:
 def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
-
 
 def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
     """Read a JSONL file into a list of dicts; returns [] if missing."""
@@ -78,20 +73,38 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
                 continue
     return rows
 
-
 def _write_jsonl(path: Path, rows: Iterable[Dict[str, Any]], mode: str = "w") -> None:
     ensure_dir(path.parent)
     with path.open(mode, encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-
 # -----------------------------------------------------------------------------
-# Math helpers
+# Math / band helpers
 # -----------------------------------------------------------------------------
 def _safe_div(num: float, den: float) -> float:
     return num / den if den else 0.0
 
+def band_weight_from_score(score: Optional[float]) -> Tuple[str, float]:
+    """
+    Map a probability/score to a qualitative band + numeric weight used in
+    consensus math. Keeps behavior simple and stable for CI/demo.
+
+    Returns:
+      ("Low"|"Med"|"High", weight: float)
+    """
+    if score is None:
+        return "Low", 0.5
+    try:
+        s = float(score)
+    except Exception:
+        return "Low", 0.5
+
+    if s >= 0.66:
+        return "High", 1.5
+    if s >= 0.33:
+        return "Med", 1.0
+    return "Low", 0.5
 
 # -----------------------------------------------------------------------------
 # Config / Demo helpers
@@ -102,7 +115,6 @@ def is_demo_mode() -> bool:
     Prefer ctx.is_demo in new code, but some sections import this symbol.
     """
     return os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes", "y", "on")
-
 
 # -----------------------------------------------------------------------------
 # Demo seed helpers (used by multiple sections)
@@ -122,7 +134,6 @@ def generate_demo_yield_plan_if_needed(
         "plan": plan,
         "demo": True,
     }
-
 
 def generate_demo_origin_trends_if_needed(
     ctx: SummaryContext,
@@ -168,7 +179,6 @@ def generate_demo_origin_trends_if_needed(
         "series": series,
         "demo": True,
     }
-
 
 def generate_demo_data_if_needed(
     ctx: SummaryContext,
