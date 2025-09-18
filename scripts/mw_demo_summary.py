@@ -74,6 +74,7 @@ from scripts.summary_sections import (
     trigger_precision_by_origin,      # (v0.5.13)
     suppression_rate_by_origin,       # (v0.5.15)
     trigger_coverage_trend,           # (v0.5.14) trend chart
+     trigger_suppression_trend,
 )
 
 # ---- Compatibility re-exports for any tests that import from mw_demo_summary ----
@@ -233,6 +234,7 @@ def main():
     suppression_rate_by_origin.append(md, ctx)   # sits right next to coverage
     trigger_precision_by_origin.append(md, ctx)
     trigger_coverage_trend.append(md, ctx)       # chart after the summaries it visualizes
+    trigger_suppression_trend.append(md, ctx)
 
     # 6) Performance snapshots
     rolling_accuracy_snapshot.append(md, ctx)
