@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import random
+from collections import Counter
 
 # -----------------------------------------------------------------------------
 # Context
@@ -119,18 +120,10 @@ def weight_to_label(w: Optional[float]) -> str:
 # -----------------------------------------------------------------------------
 # Markdown/format helpers (compat stubs used by mw_demo_summary and others)
 # -----------------------------------------------------------------------------
-def red(s: str) -> str:
-    # Keep simple — no ANSI; callers just want a marker-able transform.
-    return s
-
-def yellow(s: str) -> str:
-    return s
-
-def green(s: str) -> str:
-    return s
-
-def gray(s: str) -> str:
-    return s
+def red(s: str) -> str:    return s
+def yellow(s: str) -> str: return s
+def green(s: str) -> str:  return s
+def gray(s: str) -> str:   return s
 
 def fmt_pct(x: float, digits: int = 1) -> str:
     try:
@@ -172,9 +165,7 @@ def generate_demo_origin_trends_if_needed(
     window_hours: int = 168,
     interval: str = "hour",  # accept (and mostly ignore) interval to match caller signature
 ) -> Dict[str, Any]:
-    """
-    Seed a plausible origin-trend structure so the section always renders in demo.
-    """
+    """Seed a plausible origin-trend structure so the section always renders in demo."""
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
     hours = min(max(int(window_hours), 6), 7 * 24)
@@ -211,8 +202,7 @@ def generate_demo_data_if_needed(
       - logs/candidates.jsonl
       - models/trigger_history.jsonl
       - models/label_feedback.jsonl
-
-    This is intentionally lightweight: only writes when files are missing or tiny.
+    Only writes when files are missing or tiny and DEMO is enabled.
     """
     demo = ctx.is_demo or is_demo_mode()
     now = datetime.now(timezone.utc)
@@ -221,7 +211,7 @@ def generate_demo_data_if_needed(
     ensure_dir(ctx.logs_dir)
     ensure_dir(ctx.models_dir)
 
-    # --- Candidates (logs/candidates.jsonl) ---
+    # --- Candidates ---
     cand_path = ctx.logs_dir / "candidates.jsonl"
     cands = _load_jsonl(cand_path)
     if len(cands) < 10 and demo:
@@ -239,7 +229,7 @@ def generate_demo_data_if_needed(
         _write_jsonl(cand_path, seeded, mode="w")
         cands = seeded
 
-    # --- Triggers (models/trigger_history.jsonl) ---
+    # --- Triggers ---
     trig_path = ctx.models_dir / "trigger_history.jsonl"
     trigs = _load_jsonl(trig_path)
     if len(trigs) < 6 and demo:
@@ -270,18 +260,17 @@ def generate_demo_data_if_needed(
         _write_jsonl(trig_path, seeded_t, mode="w")
         trigs = seeded_t
 
-    # --- Label feedback (models/label_feedback.jsonl) ---
+    # --- Label feedback ---
     lab_path = ctx.models_dir / "label_feedback.jsonl"
     labs = _load_jsonl(lab_path)
     if len(labs) < 6 and demo:
         seeded_l: List[Dict[str, Any]] = []
-        # label ~70% of triggers; 70% true for twitter, 50% reddit, 35% rss
-        priors = {"twitter": 0.70, "reddit": 0.50, "rss_news": 0.35}
+        priors = {"twitter": 0.70, "reddit": 0.50, "rss_news": 0.35}  # P(true|trigger)
         for t in trigs:
             ts = parse_ts(t.get("timestamp"))
             if not ts:
                 continue
-            if random.random() < 0.70:
+            if random.random() < 0.70:  # ~70% of triggers get labeled
                 o = t.get("origin", "unknown")
                 prob_true = priors.get(o, 0.5)
                 seeded_l.append({
@@ -290,8 +279,8 @@ def generate_demo_data_if_needed(
                     "label": bool(random.random() < prob_true),
                     "model_version": t.get("model_version", "v.test"),
                 })
-        # ensure at least a couple labels exist
         if not seeded_l and trigs:
+            # ensure at least one label
             t = trigs[0]
             ts = parse_ts(t.get("timestamp")) or now
             seeded_l.append({
@@ -319,3 +308,44 @@ def generate_demo_data_if_needed(
         },
         "demo": demo,
     }
+
+# -----------------------------------------------------------------------------
+# Origin picking helper (requested by mw_demo_summary)
+# -----------------------------------------------------------------------------
+def pick_candidate_origins(
+    ctx: SummaryContext,
+    fallback: Optional[List[str]] = None,
+    top_k: int = 3,
+    window_hours: int = 72,
+) -> List[str]:
+    """
+    Choose up to `top_k` origins that appear most frequently in recent candidates.
+    Falls back to common defaults if none found.
+    """
+    defaults = fallback or ["twitter", "reddit", "rss_news"]
+
+    # Use cache if available
+    cache_key = f"candidate_origins_{window_hours}"
+    if cache_key in ctx.caches:
+        vals = ctx.caches[cache_key]
+        return vals[:top_k] if isinstance(vals, list) and vals else defaults[:top_k]
+
+    # Load candidates
+    cand_path = ctx.logs_dir / "candidates.jsonl"
+    rows = ctx.candidates if ctx.candidates else _load_jsonl(cand_path)
+
+    t_cut = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    ctr = Counter()
+    for r in rows:
+        o = r.get("origin")
+        ts = parse_ts(r.get("timestamp"))
+        if not o or not ts:
+            continue
+        if ts >= t_cut:
+            ctr[o] += 1
+
+    ordered = [o for o, _ in ctr.most_common() if o and o != "unknown"]
+    if not ordered:
+        ordered = defaults[:]
+    ctx.caches[cache_key] = ordered
+    return ordered[:top_k]
