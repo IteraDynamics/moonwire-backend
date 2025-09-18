@@ -1,25 +1,37 @@
 # scripts/summary_sections/signal_quality_per_version.py
 from __future__ import annotations
 
-import json
 import os
+import json
+from typing import List, Dict, Any, Tuple, Optional
 from collections import defaultdict
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone, timedelta
 
+# matplotlib headless
 import matplotlib
-matplotlib.use("Agg")  # headless
-import matplotlib.pyplot as plt
+matplotlib.use("Agg")  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
 
-from .common import SummaryContext, parse_ts, _iso, _load_jsonl, ensure_dir, _safe_div
+from .common import SummaryContext, parse_ts, _iso
+
+# ---------------------------- small helpers ----------------------------
+
+def _safe_div(num: float, den: float) -> float:
+    try:
+        return float(num) / float(den) if den else 0.0
+    except Exception:
+        return 0.0
 
 
-# --------------------------------------------------------------------------
-# Classification helper
-# --------------------------------------------------------------------------
 def _class_from_f1(f1: float, n_labels: int) -> Tuple[str, str]:
+    """
+    Buckets:
+      - ✅ Strong (F1 ≥ 0.75)
+      - ⚠️ Mixed (0.40 ≤ F1 < 0.75)
+      - ❌ Weak  (F1 < 0.40)
+      - ℹ️ Insufficient (labels < 2)
+    """
     if n_labels < 2:
         return ("Insufficient", "ℹ️")
     if f1 >= 0.75:
@@ -29,146 +41,107 @@ def _class_from_f1(f1: float, n_labels: int) -> Tuple[str, str]:
     return ("Weak", "❌")
 
 
-# --------------------------------------------------------------------------
-# Nearest join (label ↔ trigger) within ±join_min minutes, same origin
-# --------------------------------------------------------------------------
+def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                # Skip malformed lines
+                continue
+    return out
+
+
 def _nearest_join(
     labels: List[Dict[str, Any]],
     triggers: List[Dict[str, Any]],
     join_min: int,
 ) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
-    by_origin_trig: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    """
+    For each label, find the nearest trigger on the same origin within ±join_min minutes.
+    Returns list of (label_row, trigger_row_or_None).
+    """
+    # Group triggers by origin and sort by time
+    by_origin: Dict[str, List[Tuple[datetime, Dict[str, Any]]]] = defaultdict(list)
     for t in triggers:
-        o = (t.get("origin") or "").strip().lower()
-        if not o:
-            continue
+        o = t.get("origin") or "unknown"
         ts = parse_ts(t.get("timestamp"))
-        if ts:
-            t["_ts"] = ts
-            by_origin_trig[o].append(t)
-    for lst in by_origin_trig.values():
-        lst.sort(key=lambda r: r["_ts"])
-
-    out: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = []
-    max_delta = timedelta(minutes=join_min)
-
-    for lab in labels:
-        o = (lab.get("origin") or "").strip().lower()
-        if not o:
-            continue
-        ts = parse_ts(lab.get("timestamp"))
         if not ts:
             continue
-        lab["_ts"] = ts
+        by_origin[o].append((ts, t))
+    for o in by_origin:
+        by_origin[o].sort(key=lambda x: x[0])
 
-        candidates = by_origin_trig.get(o, [])
-        if not candidates:
+    out: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = []
+    window = timedelta(minutes=join_min)
+
+    for lab in labels:
+        o = lab.get("origin") or "unknown"
+        lts = parse_ts(lab.get("timestamp"))
+        if not lts:
             out.append((lab, None))
             continue
 
-        # binary search-ish nearest
-        lo, hi = 0, len(candidates) - 1
-        best_i, best_dt = None, timedelta.max
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            dt = abs(candidates[mid]["_ts"] - ts)
-            if dt < best_dt:
-                best_dt, best_i = dt, mid
-            if candidates[mid]["_ts"] < ts:
-                lo = mid + 1
-            else:
-                hi = mid - 1
-
-        trig_match = candidates[best_i] if (best_i is not None and best_dt <= max_delta) else None
-        out.append((lab, trig_match))
+        best: Optional[Dict[str, Any]] = None
+        best_dt = None
+        rows = by_origin.get(o, [])
+        # Two-pointer / binary search could be used; linear scan is fine for small CI logs.
+        for tts, row in rows:
+            dt = abs(tts - lts)
+            if dt <= window and (best_dt is None or dt < best_dt):
+                best_dt = dt
+                best = row
+        out.append((lab, best))
 
     return out
 
 
-# --------------------------------------------------------------------------
-# Demo series seeding (for chart) when data is sparse
-# --------------------------------------------------------------------------
 def _maybe_seed_series_if_demo(
     series: List[Dict[str, Any]] | None,
     per_version: List[Dict[str, Any]],
     now: datetime,
     is_demo: bool,
 ) -> List[Dict[str, Any]]:
-    series = series or []
-    if series or not is_demo or not per_version:
+    if not is_demo:
+        return series or []
+    if series:
         return series
 
-    # Build a tiny 3-point trend for up to 2 versions so CI has something to draw.
-    kept = per_version[:2]
-    seeded: List[Dict[str, Any]] = []
-    for i, pv in enumerate(kept):
-        v = pv.get("version", f"v{i+1}")
-        base = float(pv.get("precision", 0.6))
+    # synthesize small time series for visible chart
+    versions = [r.get("version") for r in (per_version or []) if r.get("version")]
+    if not versions:
+        versions = ["v0.5.9", "v0.5.8"]
+
+    seeds: List[Dict[str, Any]] = []
+    for v in versions[:3]:
         pts = [
-            {"version": v, "t": _iso(now - timedelta(hours=6)), "precision": max(0.0, min(1.0, base - 0.05))},
-            {"version": v, "t": _iso(now - timedelta(hours=3)), "precision": max(0.0, min(1.0, base - 0.01))},
-            {"version": v, "t": _iso(now),                     "precision": max(0.0, min(1.0, base))},
+            (now - timedelta(hours=6), 0.62),
+            (now - timedelta(hours=3), 0.69),
+            (now,                     0.74),
         ]
-        seeded.extend(pts)
-    return seeded
+        for t, p in pts:
+            seeds.append({"version": v, "t": _iso(t), "precision": round(p, 2)})
+    return seeds
 
 
-# --------------------------------------------------------------------------
-# Chart
-# --------------------------------------------------------------------------
-def _plot_version_trend(series: List[Dict[str, Any]], window_h: int, demo: bool) -> Path | None:
-    if not series:
-        return None
+# ---------------------------- main entrypoint ----------------------------
 
-    # Group by version
-    by_v: Dict[str, List[Tuple[datetime, float]]] = defaultdict(list)
-    for row in series:
-        v = str(row.get("version", "unknown"))
-        ts = parse_ts(row.get("t"))
-        pr = row.get("precision")
-        if ts is None or pr is None:
-            continue
-        by_v[v].append((ts, float(pr)))
-
-    for lst in by_v.values():
-        lst.sort(key=lambda x: x[0])
-
-    if not by_v:
-        return None
-
-    ensure_dir(Path("artifacts"))
-    out_path = Path("artifacts") / f"signal_quality_by_version_{window_h}h.png"
-
-    # Draw
-    plt.figure(figsize=(8, 4.5))
-    # Shaded zones for class bands
-    plt.axhspan(0.75, 1.0, alpha=0.08)  # strong
-    plt.axhspan(0.40, 0.75, alpha=0.06)  # mixed
-    plt.axhspan(0.00, 0.40, alpha=0.05)  # weak
-
-    for v, pts in by_v.items():
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        plt.plot(xs, ys, marker="o", label=v)
-
-    title = f"Per-Version Precision Trend ({window_h}h)" + (" — demo" if demo else "")
-    plt.title(title)
-    plt.xlabel("time")
-    plt.ylabel("precision")
-    plt.ylim(0, 1.0)
-    plt.grid(True, alpha=0.2)
-    plt.legend(loc="best")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=120)
-    plt.close()
-
-    return out_path
-
-
-# --------------------------------------------------------------------------
-# Main entry
-# --------------------------------------------------------------------------
 def append(md: List[str], ctx: SummaryContext) -> None:
+    """
+    Renders:
+      - Snapshot table for per-version signal quality (F1/P/R)
+      - Precision trend chart across time per version (if series available)
+
+    Reads/writes:
+      - models/signal_quality_per_version.json
+      - artifacts/signal_quality_by_version_{window}h.png
+    """
     models_dir = ctx.models_dir
     window_h = int(os.getenv("MW_SIGNAL_WINDOW_H", "72"))
     join_min = int(os.getenv("MW_SIGNAL_JOIN_MIN", "5"))
@@ -177,7 +150,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     out_json = models_dir / "signal_quality_per_version.json"
     now = datetime.now(timezone.utc)
 
-    # Try to load an existing snapshot; if not present, compute from raw logs
+    # Try to load an existing artifact; if missing or incomplete, compute snapshot from raw logs
     data: Dict[str, Any] = {}
     if out_json.exists():
         try:
@@ -189,9 +162,9 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     series = data.get("series")
 
     if not isinstance(per_version, list):
-        # Compute a snapshot from raw logs
+        # Compute snapshot from logs with nearest-join (labels -> triggers)
         trig_rows = _load_jsonl(models_dir / "trigger_history.jsonl")
-        lab_rows  = _load_jsonl(models_dir / "label_feedback.jsonl")
+        lab_rows = _load_jsonl(models_dir / "label_feedback.jsonl")
 
         cutoff = now - timedelta(hours=window_h)
         trig_rows = [r for r in trig_rows if (parse_ts(r.get("timestamp")) or now) >= cutoff]
@@ -199,10 +172,8 @@ def append(md: List[str], ctx: SummaryContext) -> None:
 
         joined = _nearest_join(lab_rows, trig_rows, join_min)
 
-        # per-version counting
         counts = defaultdict(lambda: {"true": 0, "false": 0, "labels": 0, "triggers": 0})
         for lab, trig in joined:
-            # prefer label.model_version > trigger.model_version > "unknown"
             version = lab.get("model_version") or (trig or {}).get("model_version") or "unknown"
             if trig is not None:
                 counts[version]["triggers"] += 1
@@ -217,7 +188,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
         for v, c in counts.items():
             tp = int(c["true"])
             fp = int(c["false"])
-            fn = 0  # without unmatched positives we keep fn=0 for consistency here
+            fn = 0  # we keep fn=0 here (only matched labels considered in this summary)
             P = _safe_div(tp, tp + fp)
             R = _safe_div(tp, tp + fn)
             F1 = _safe_div(2 * P * R, (P + R)) if (P + R) else 0.0
@@ -236,11 +207,11 @@ def append(md: List[str], ctx: SummaryContext) -> None:
                 "demo": False,
             })
 
-        # Order: Strong → Mixed → Weak → Insufficient
+        # Sort Strong → Mixed → Weak → Insufficient
         order = {"Strong": 0, "Mixed": 1, "Weak": 2, "Insufficient": 3}
         per_version.sort(key=lambda r: (order.get(r["class"], 9), -r["f1"], r["version"]))
 
-        # Demo fallback if totally empty
+        # If empty and demo mode, seed a plausible snapshot
         if not per_version and ctx.is_demo:
             per_version = [
                 {"version": "v0.5.9", "triggers": 8,  "true": 6, "false": 2, "labels": 8,
@@ -258,43 +229,99 @@ def append(md: List[str], ctx: SummaryContext) -> None:
             "demo": ctx.is_demo,
         }
 
-    # Ensure each per_version row has emoji/class (in case a prior artifact was minimal)
-    for r in data.get("per_version", []):
-        if "emoji" not in r or "class" not in r:
-            f1 = float(r.get("f1", 0.0))
-            labels = int(r.get("labels", 0))
-            klass, emoji = _class_from_f1(f1, labels)
+    # -------- normalize per_version rows (fixes KeyError in tests) --------
+    pv_list = data.get("per_version", []) or []
+    for r in pv_list:
+        # Defaults
+        P = float(r.get("precision", 0.0) or 0.0)
+        R = float(r.get("recall", P))  # if recall missing, assume recall≈precision
+        if r.get("f1") is None:
+            F1 = (2 * P * R / (P + R)) if (P + R) else P
+        else:
+            F1 = float(r.get("f1", 0.0) or 0.0)
+
+        r["precision"] = round(P, 2)
+        r["recall"]    = round(R, 2)
+        r["f1"]        = round(F1, 2)
+
+        labels = int(r.get("labels", 0) or 0)
+        if "class" not in r or "emoji" not in r:
+            klass, emoji = _class_from_f1(r["f1"], labels)
             r.setdefault("class", klass)
             r.setdefault("emoji", emoji)
+    data["per_version"] = pv_list
 
-    # Seed series in demo if empty so the chart shows
+    # -------- ensure / maybe seed series for chart --------
     if not isinstance(data.get("series"), list):
         data["series"] = []
-    data["series"] = _maybe_seed_series_if_demo(data["series"], data.get("per_version") or [], now, data.get("demo", False))
+    data["series"] = _maybe_seed_series_if_demo(
+        data.get("series"), data.get("per_version") or [], now, data.get("demo", False)
+    )
 
-    # Persist snapshot (so the chart test can read the same)
+    # Persist JSON so both summary and tests read the same normalized artifact
     out_json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    # -------- markdown --------
+    # ---------------------------- markdown ----------------------------
     md.append(f"### 🧪 Per-Version Signal Quality ({window_h}h){' (demo)' if data.get('demo') else ''}")
     pv = data.get("per_version") or []
     if pv:
         for r in pv:
             md.append(
-                f"- `{r['version']}` → {r['emoji']} {r['class']} "
-                f"(F1={float(r['f1']):.2f}, P={float(r['precision']):.2f}, R={float(r['recall']):.2f}, n={int(r['labels'])})"
+                f"- `{r.get('version','unknown')}` → {r.get('emoji','ℹ️')} {r.get('class','Insufficient')} "
+                f"(F1={float(r.get('f1',0.0)):.2f}, P={float(r.get('precision',0.0)):.2f}, "
+                f"R={float(r.get('recall',0.0)):.2f}, n={int(r.get('labels',0))})"
             )
     else:
         md.append("_no per-version summary available_")
 
-    # -------- chart --------
-    img_written = False
-    rel = f"artifacts/signal_quality_by_version_{window_h}h.png"
+    # ---------------------------- chart ----------------------------
+    chart_note = "no time series available"
     if want_chart:
-        img_path = _plot_version_trend(data.get("series", []), window_h, data.get("demo", False))
-        img_written = bool(img_path and img_path.exists())
+        series = data.get("series") or []
+        if series:
+            # Prepare data by version
+            by_v: Dict[str, List[Tuple[datetime, float]]] = defaultdict(list)
+            for row in series:
+                v = row.get("version") or "unknown"
+                t = parse_ts(row.get("t"))
+                p = row.get("precision")
+                if t is None or p is None:
+                    continue
+                by_v[v].append((t, float(p)))
+            # sort each series by time
+            for v in by_v:
+                by_v[v].sort(key=lambda x: x[0])
 
-    if img_written:
-        md.append(f"\n📈 Per-Version Precision Trend: {rel}")
-    else:
-        md.append("\n📈 Per-Version Precision Trend: _no time series available_ (enable DEMO_MODE or accumulate runs)")
+            # plot
+            plt.figure(figsize=(8, 3.5), dpi=150)
+            # Bands: weak <0.4, mixed 0.4–0.75, strong ≥0.75
+            ax = plt.gca()
+            ax.axhspan(0.0, 0.40, alpha=0.10)
+            ax.axhspan(0.40, 0.75, alpha=0.07)
+            ax.axhspan(0.75, 1.00, alpha=0.10)
+
+            for v, pts in by_v.items():
+                xs = [t for (t, _) in pts]
+                ys = [p for (_, p) in pts]
+                if not xs:
+                    continue
+                plt.plot(xs, ys, marker="o", linewidth=1.5, label=v)
+
+            plt.ylim(0.0, 1.0)
+            plt.ylabel("Precision")
+            plt.title(f"Per-Version Precision Trend ({window_h}h){' • demo' if data.get('demo') else ''}")
+            plt.legend(loc="lower right", fontsize=8)
+            plt.tight_layout()
+
+            # Save relative to repo root artifacts/
+            artifacts_dir = Path("artifacts")
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            img_path = artifacts_dir / f"signal_quality_by_version_{window_h}h.png"
+            plt.savefig(img_path)
+            plt.close()
+
+            chart_note = str(img_path)
+        else:
+            chart_note = "no time series available (enable DEMO_MODE or accumulate runs)"
+
+    md.append(f"\n📈 Per-Version Precision Trend: {chart_note}")
