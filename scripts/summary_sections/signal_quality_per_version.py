@@ -53,7 +53,6 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
             try:
                 out.append(json.loads(line))
             except Exception:
-                # Skip malformed lines
                 continue
     return out
 
@@ -67,7 +66,6 @@ def _nearest_join(
     For each label, find the nearest trigger on the same origin within ±join_min minutes.
     Returns list of (label_row, trigger_row_or_None).
     """
-    # Group triggers by origin and sort by time
     by_origin: Dict[str, List[Tuple[datetime, Dict[str, Any]]]] = defaultdict(list)
     for t in triggers:
         o = t.get("origin") or "unknown"
@@ -91,7 +89,6 @@ def _nearest_join(
         best: Optional[Dict[str, Any]] = None
         best_dt = None
         rows = by_origin.get(o, [])
-        # Two-pointer / binary search could be used; linear scan is fine for small CI logs.
         for tts, row in rows:
             dt = abs(tts - lts)
             if dt <= window and (best_dt is None or dt < best_dt):
@@ -113,7 +110,6 @@ def _maybe_seed_series_if_demo(
     if series:
         return series
 
-    # synthesize small time series for visible chart
     versions = [r.get("version") for r in (per_version or []) if r.get("version")]
     if not versions:
         versions = ["v0.5.9", "v0.5.8"]
@@ -162,7 +158,6 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     series = data.get("series")
 
     if not isinstance(per_version, list):
-        # Compute snapshot from logs with nearest-join (labels -> triggers)
         trig_rows = _load_jsonl(models_dir / "trigger_history.jsonl")
         lab_rows = _load_jsonl(models_dir / "label_feedback.jsonl")
 
@@ -188,7 +183,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
         for v, c in counts.items():
             tp = int(c["true"])
             fp = int(c["false"])
-            fn = 0  # we keep fn=0 here (only matched labels considered in this summary)
+            fn = 0  # keep fn=0 here (only matched labels considered)
             P = _safe_div(tp, tp + fp)
             R = _safe_div(tp, tp + fn)
             F1 = _safe_div(2 * P * R, (P + R)) if (P + R) else 0.0
@@ -207,11 +202,9 @@ def append(md: List[str], ctx: SummaryContext) -> None:
                 "demo": False,
             })
 
-        # Sort Strong → Mixed → Weak → Insufficient
         order = {"Strong": 0, "Mixed": 1, "Weak": 2, "Insufficient": 3}
         per_version.sort(key=lambda r: (order.get(r["class"], 9), -r["f1"], r["version"]))
 
-        # If empty and demo mode, seed a plausible snapshot
         if not per_version and ctx.is_demo:
             per_version = [
                 {"version": "v0.5.9", "triggers": 8,  "true": 6, "false": 2, "labels": 8,
@@ -232,14 +225,11 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     # -------- normalize per_version rows (fixes KeyError in tests) --------
     pv_list = data.get("per_version", []) or []
     for r in pv_list:
-        # Defaults
         P = float(r.get("precision", 0.0) or 0.0)
-        R = float(r.get("recall", P))  # if recall missing, assume recall≈precision
-        if r.get("f1") is None:
+        R = float(r.get("recall", P))
+        F1 = float(r.get("f1", 0.0) or 0.0)
+        if F1 == 0.0 and (P or R):
             F1 = (2 * P * R / (P + R)) if (P + R) else P
-        else:
-            F1 = float(r.get("f1", 0.0) or 0.0)
-
         r["precision"] = round(P, 2)
         r["recall"]    = round(R, 2)
         r["f1"]        = round(F1, 2)
@@ -279,7 +269,6 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     if want_chart:
         series = data.get("series") or []
         if series:
-            # Prepare data by version
             by_v: Dict[str, List[Tuple[datetime, float]]] = defaultdict(list)
             for row in series:
                 v = row.get("version") or "unknown"
@@ -288,13 +277,10 @@ def append(md: List[str], ctx: SummaryContext) -> None:
                 if t is None or p is None:
                     continue
                 by_v[v].append((t, float(p)))
-            # sort each series by time
             for v in by_v:
                 by_v[v].sort(key=lambda x: x[0])
 
-            # plot
             plt.figure(figsize=(8, 3.5), dpi=150)
-            # Bands: weak <0.4, mixed 0.4–0.75, strong ≥0.75
             ax = plt.gca()
             ax.axhspan(0.0, 0.40, alpha=0.10)
             ax.axhspan(0.40, 0.75, alpha=0.07)
@@ -313,8 +299,10 @@ def append(md: List[str], ctx: SummaryContext) -> None:
             plt.legend(loc="lower right", fontsize=8)
             plt.tight_layout()
 
-            # Save relative to repo root artifacts/
-            artifacts_dir = Path("artifacts")
+            # Save in the repo run’s artifacts directory (matches tests):
+            # tests create tmp_path/artifacts and expect the file to land there.
+            run_root = models_dir.resolve().parent
+            artifacts_dir = run_root / "artifacts"
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             img_path = artifacts_dir / f"signal_quality_by_version_{window_h}h.png"
             plt.savefig(img_path)
