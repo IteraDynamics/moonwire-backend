@@ -88,10 +88,8 @@ def _safe_div(num: float, den: float) -> float:
 def band_weight_from_score(score: Optional[float]) -> Tuple[str, float]:
     """
     Map a probability/score to a qualitative band + numeric weight used in
-    consensus math. Keeps behavior simple and stable for CI/demo.
-
-    Returns:
-      ("Low"|"Med"|"High", weight: float)
+    consensus math.
+    Returns: ("Low"|"Med"|"High", weight: float)
     """
     if score is None:
         return "Low", 0.5
@@ -107,10 +105,7 @@ def band_weight_from_score(score: Optional[float]) -> Tuple[str, float]:
     return "Low", 0.5
 
 def weight_to_label(w: Optional[float]) -> str:
-    """
-    Convert a numeric weight back to a band label. Thresholds are chosen to
-    map our canonical weights (0.5, 1.0, 1.5) to Low/Med/High.
-    """
+    """Convert a numeric weight back to a band label."""
     try:
         v = float(w)
     except Exception:
@@ -120,6 +115,28 @@ def weight_to_label(w: Optional[float]) -> str:
     if v >= 0.75:
         return "Med"
     return "Low"
+
+# -----------------------------------------------------------------------------
+# Markdown/format helpers (compat stubs used by mw_demo_summary and others)
+# -----------------------------------------------------------------------------
+def red(s: str) -> str:
+    # Keep simple — no ANSI; callers just want a marker-able transform.
+    return s
+
+def yellow(s: str) -> str:
+    return s
+
+def green(s: str) -> str:
+    return s
+
+def gray(s: str) -> str:
+    return s
+
+def fmt_pct(x: float, digits: int = 1) -> str:
+    try:
+        return f"{round(float(x)*100.0, digits)}%"
+    except Exception:
+        return "0%"
 
 # -----------------------------------------------------------------------------
 # Config / Demo helpers
@@ -157,17 +174,6 @@ def generate_demo_origin_trends_if_needed(
 ) -> Dict[str, Any]:
     """
     Seed a plausible origin-trend structure so the section always renders in demo.
-
-    Returns:
-      {
-        "window_hours": int,
-        "interval": "hour" | "3h",
-        "series": [
-          {"origin":"twitter","t": "<iso>", "flags": int, "triggers": int},
-          ...
-        ],
-        "demo": True
-      }
     """
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
@@ -210,7 +216,6 @@ def generate_demo_data_if_needed(
     """
     demo = ctx.is_demo or is_demo_mode()
     now = datetime.now(timezone.utc)
-    t_cut = now - timedelta(hours=window_hours)
 
     # Ensure dirs
     ensure_dir(ctx.logs_dir)
@@ -224,14 +229,13 @@ def generate_demo_data_if_needed(
         seeded: List[Dict[str, Any]] = []
         # ~50–60 rows across last 6 hours
         for o, n in zip(origins, (50, 42, 60)):
-            for i in range(n):
+            for _ in range(n):
                 ts = now - timedelta(minutes=random.randint(0, 6 * 60))
                 seeded.append({
                     "timestamp": _iso(ts),
                     "origin": o,
                     "burst_z": round(random.uniform(0.0, 4.0), 2),
                 })
-        # write fresh
         _write_jsonl(cand_path, seeded, mode="w")
         cands = seeded
 
@@ -240,13 +244,14 @@ def generate_demo_data_if_needed(
     trigs = _load_jsonl(trig_path)
     if len(trigs) < 6 and demo:
         seeded_t: List[Dict[str, Any]] = []
-        # pick a subset of candidates as triggers
         for row in cands[:]:
-            if parse_ts(row.get("timestamp")) and row.get("origin") in ("twitter", "reddit", "rss_news"):
-                if random.random() < {"twitter": 0.18, "reddit": 0.07, "rss_news": 0.02}.get(row["origin"], 0.05):
+            ts = parse_ts(row.get("timestamp"))
+            o = row.get("origin")
+            if ts and o in ("twitter", "reddit", "rss_news"):
+                if random.random() < {"twitter": 0.18, "reddit": 0.07, "rss_news": 0.02}.get(o, 0.05):
                     seeded_t.append({
                         "timestamp": row["timestamp"],
-                        "origin": row["origin"],
+                        "origin": o,
                         "adjusted_score": round(random.uniform(0.05, 0.95), 2),
                         "decision": "triggered",
                         "model_version": "v.test",
