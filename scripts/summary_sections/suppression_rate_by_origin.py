@@ -1,59 +1,21 @@
 # scripts/summary_sections/suppression_rate_by_origin.py
 from __future__ import annotations
 
-import json
-import os
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Iterable, Tuple
+from bisect import bisect_left
+import os, json
 
-# Headless plotting not needed here (no chart), so no matplotlib import.
-from .common import SummaryContext, parse_ts
+from .common import SummaryContext, parse_ts, _iso
 
+# ---- config knobs (env) ----
+_DEF_WINDOW_H = 48
+_DEF_JOIN_MIN = 5
 
-def _iso(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _load_jsonl(p: Path) -> List[Dict[str, Any]]:
-    if not p.exists():
-        return []
-    rows: List[Dict[str, Any]] = []
-    with p.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    rows.append(obj)
-            except Exception:
-                continue
-    return rows
-
-
-def _load_candidates_from_logs(logs_dir: Path) -> List[Dict[str, Any]]:
-    """
-    Primary source: logs/candidates.jsonl (used by tests).
-    Fallback: any *.jsonl in logs/ with 'timestamp' and 'origin'.
-    """
-    primary = logs_dir / "candidates.jsonl"
-    rows = _load_jsonl(primary)
-    if rows:
-        return rows
-
-    # fallback: union of any jsonl files with timestamp+origin
-    all_rows: List[Dict[str, Any]] = []
-    if logs_dir.exists():
-        for p in logs_dir.glob("*.jsonl"):
-            all_rows.extend(_load_jsonl(p))
-    # filter to those that look like candidate events
-    return [r for r in all_rows if r.get("timestamp") and r.get("origin")]
-
+# ---- simple helpers ----
+def _safe_div(a: float, b: float) -> float:
+    return float(a) / float(b) if b else 0.0
 
 def _classify(rate: float, candidates: int) -> Tuple[str, str]:
     """
@@ -64,175 +26,215 @@ def _classify(rate: float, candidates: int) -> Tuple[str, str]:
       ℹ️ Insufficient if candidates < 3
     """
     if candidates < 3:
-        return ("Insufficient", "ℹ️")
+        return "Insufficient", "ℹ️"
     if rate >= 0.80:
-        return ("High", "❌")
+        return "High", "❌"
     if rate >= 0.50:
-        return ("Medium", "⚠️")
-    return ("Low", "✅")
+        return "Medium", "⚠️"
+    return "Low", "✅"
 
+def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
+    return out
 
-def _pair_counts_within_delta(
-    candidate_times: List[datetime],
-    trigger_times: List[datetime],
-    delta_minutes: int,
-) -> int:
+def _candidate_files(logs_dir: Path) -> List[Path]:
     """
-    Greedy one-to-one matching of triggers to candidates within ±delta.
-    Returns the number of matched triggers (each trigger counted at most once).
+    Heuristic file discovery for candidate event streams.
+    Looks for common names used in MoonWire tests/CI.
     """
-    if not candidate_times or not trigger_times:
-        return 0
-    delta = timedelta(minutes=delta_minutes)
+    names = [
+        "candidates.jsonl",
+        "candidate_events.jsonl",
+        "events.jsonl",
+    ]
+    explicit = [logs_dir / n for n in names if (logs_dir / n).exists()]
+    if explicit:
+        return explicit
 
-    cts = sorted(candidate_times)
-    tts = sorted(trigger_times)
+    # Fallback: any *.jsonl that hints 'cand'
+    found = []
+    for p in logs_dir.glob("*.jsonl"):
+        n = p.name.lower()
+        if "candidate" in n or "candidates" in n or n.startswith("cand"):
+            found.append(p)
+    return found
 
-    i = j = 0
-    matched = 0
-    while i < len(cts) and j < len(tts):
-        c, t = cts[i], tts[j]
-        if c < t - delta:
-            i += 1
-        elif c > t + delta:
-            j += 1
-        else:
-            # within window → match them and advance both
-            matched += 1
-            i += 1
-            j += 1
-    return matched
+def _to_epoch_sec(dt: datetime) -> float:
+    return dt.timestamp()
 
+def _nearest_match_exists(sorted_epoch_list: List[float], ts_sec: float, tol_sec: float) -> bool:
+    """
+    Given a sorted list of epoch seconds, check if any entry is within ±tol_sec of ts_sec.
+    Uses bisect to find nearest index.
+    """
+    if not sorted_epoch_list:
+        return False
+    i = bisect_left(sorted_epoch_list, ts_sec)
+    # check left neighbor
+    if i > 0 and abs(sorted_epoch_list[i - 1] - ts_sec) <= tol_sec:
+        return True
+    # check at i
+    if i < len(sorted_epoch_list) and abs(sorted_epoch_list[i] - ts_sec) <= tol_sec:
+        return True
+    return False
+
+def _collect_candidates_by_origin(logs_dir: Path, t_cut: datetime) -> Dict[str, List[float]]:
+    """
+    Return {origin -> sorted list of candidate timestamps (epoch seconds)} filtered by t_cut.
+    """
+    out: Dict[str, List[float]] = {}
+    for path in _candidate_files(logs_dir):
+        for r in _load_jsonl(path):
+            ori = (r.get("origin") or "").strip()
+            if not ori or ori == "unknown":
+                continue
+            ts = parse_ts(r.get("timestamp"))
+            if not ts:
+                continue
+            if ts < t_cut:
+                continue
+            out.setdefault(ori, []).append(_to_epoch_sec(ts))
+    # sort each origin list
+    for ori, arr in out.items():
+        arr.sort()
+    return out
+
+def _collect_triggers(models_dir: Path, t_cut: datetime) -> List[Dict[str, Any]]:
+    rows = _load_jsonl(models_dir / "trigger_history.jsonl")
+    out = []
+    for r in rows:
+        ori = (r.get("origin") or "").strip()
+        if not ori or ori == "unknown":
+            continue
+        ts = parse_ts(r.get("timestamp"))
+        if not ts or ts < t_cut:
+            continue
+        out.append({"origin": ori, "ts_sec": _to_epoch_sec(ts)})
+    return out
 
 def append(md: List[str], ctx: SummaryContext) -> None:
     """
-    Build "Suppression Rate by Origin (48h)" section
-    and persist models/suppression_rate_per_origin.json.
+    📉 Suppression Rate by Origin (48h)
+      - reddit → ⚠️ Medium (suppression = 68.8%, 11/16)
+    Writes models/suppression_rate_per_origin.json
     """
-    models_dir = ctx.models_dir
-    logs_dir = ctx.logs_dir
-
-    window_h = int(os.getenv("MW_SUPPRESSION_WINDOW_H", "48"))
-    join_min = int(os.getenv("MW_TRIGGER_JOIN_MIN", "5"))
+    window_h = int(os.getenv("MW_SUPPRESSION_WINDOW_H", str(_DEF_WINDOW_H)))
+    join_min = int(os.getenv("MW_TRIGGER_JOIN_MIN", str(_DEF_JOIN_MIN)))
+    tol_sec = float(join_min) * 60.0
 
     now = datetime.now(timezone.utc)
     t_cut = now - timedelta(hours=window_h)
 
-    # Load inputs
-    cand_rows = _load_candidates_from_logs(logs_dir)
-    trig_rows = _load_jsonl(models_dir / "trigger_history.jsonl")
+    # ---- load candidates & triggers
+    cand_by_origin = _collect_candidates_by_origin(ctx.logs_dir, t_cut)
+    trig_rows = _collect_triggers(ctx.models_dir, t_cut)
 
-    # Filter to window and keep minimal fields
-    def _norm_rows(rows: Iterable[Dict[str, Any]]) -> List[Tuple[str, datetime]]:
-        out: List[Tuple[str, datetime]] = []
-        for r in rows:
-            origin = r.get("origin") or "unknown"
-            ts = parse_ts(r.get("timestamp"))
-            if origin and ts and ts >= t_cut:
-                out.append((origin, ts))
-        return out
+    # Count candidates per origin
+    candidates_count: Dict[str, int] = {ori: len(ts_list) for ori, ts_list in cand_by_origin.items()}
 
-    c_pairs = _norm_rows(cand_rows)
-    t_pairs = _norm_rows(trig_rows)
-
-    # Group times by origin
-    cand_by_o: Dict[str, List[datetime]] = defaultdict(list)
-    trig_by_o: Dict[str, List[datetime]] = defaultdict(list)
-    for o, ts in c_pairs:
-        cand_by_o[o].append(ts)
-    for o, ts in t_pairs:
-        trig_by_o[o].append(ts)
-
-    # Compute per origin
-    per_origin: List[Dict[str, Any]] = []
-    all_origins = sorted(set(cand_by_o.keys()) | set(trig_by_o.keys()))
-    for origin in all_origins:
-        if origin == "unknown":
+    # For each trigger, count it only if there exists a candidate within ±join_min
+    triggers_count: Dict[str, int] = {}
+    for r in trig_rows:
+        ori = r["origin"]
+        ts_sec = r["ts_sec"]
+        if ori not in cand_by_origin:
+            # If we never saw candidates for this origin in the window, skip (can't credit a matched trigger)
             continue
+        if _nearest_match_exists(cand_by_origin[ori], ts_sec, tol_sec):
+            triggers_count[ori] = triggers_count.get(ori, 0) + 1
 
-        c_times = cand_by_o.get(origin, [])
-        t_times = trig_by_o.get(origin, [])
+    # Build rows
+    rows: List[Dict[str, Any]] = []
+    # Evaluate over the union of origins we've seen candidates for (ignore pure-trigger-only origins; no denominator)
+    for ori in sorted(cand_by_origin.keys()):
+        c = int(candidates_count.get(ori, 0))
+        t = int(triggers_count.get(ori, 0))
+        s = max(c - t, 0)
+        rate = _safe_div(s, c)
+        klass, emoji = _classify(rate, c)
+        rows.append({
+            "origin": ori,
+            "candidates": c,
+            "triggers": t,
+            "suppressed": s,
+            "suppression_rate": round(rate, 3),
+            "class": klass,
+            "emoji": emoji,
+            "demo": False,
+        })
 
-        candidates = len(c_times)
-        matched_triggers = _pair_counts_within_delta(c_times, t_times, join_min)
-        suppressed = max(0, candidates - matched_triggers)
-        rate = suppressed / max(candidates, 1)
-
-        klass, emoji = _classify(rate, candidates)
-        per_origin.append(
-            {
-                "origin": origin,
-                "candidates": candidates,
-                "triggers": matched_triggers,
-                "suppressed": suppressed,
-                "suppression_rate": round(rate, 3),
-                "class": klass,
-                "emoji": emoji,
-                "demo": False,
-            }
-        )
-
-    # If empty and demo enabled, synthesize plausible rows
-    demo_used = False
-    if not per_origin and ctx.is_demo:
-        demo_used = True
-        per_origin = [
+    # ---- DEMO fallback: if the window is effectively empty, seed plausible origins
+    total_candidates = sum(r["candidates"] for r in rows)
+    demo_flag = False
+    if total_candidates < 3 and ctx.is_demo:
+        demo_flag = True
+        rows = [
+            # twitter: Medium (≈0.62)
             {
                 "origin": "twitter",
-                "candidates": 55,
-                "triggers": 10,
-                "suppressed": 45,
-                "suppression_rate": round(45 / 55, 3),
-                "class": "High",
-                "emoji": "❌",
-                "demo": True,
-            },
-            {
-                "origin": "reddit",
-                "candidates": 42,
-                "triggers": 3,
-                "suppressed": 39,
-                "suppression_rate": round(39 / 42, 3),
-                "class": "High",
-                "emoji": "❌",
-                "demo": True,
-            },
-            {
-                "origin": "rss_news",
-                "candidates": 72,
-                "triggers": 36,
-                "suppressed": 36,
-                "suppression_rate": round(36 / 72, 3),
+                "candidates": 50,
+                "triggers": 19,
+                "suppressed": 31,
+                "suppression_rate": round(31 / 50, 3),
                 "class": "Medium",
                 "emoji": "⚠️",
                 "demo": True,
             },
+            # reddit: High (≈0.867)
+            {
+                "origin": "reddit",
+                "candidates": 45,
+                "triggers": 6,
+                "suppressed": 39,
+                "suppression_rate": round(39 / 45, 3),
+                "class": "High",
+                "emoji": "❌",
+                "demo": True,
+            },
+            # rss_news: Low (≈0.317)
+            {
+                "origin": "rss_news",
+                "candidates": 60,
+                "triggers": 41,
+                "suppressed": 19,
+                "suppression_rate": round(19 / 60, 3),
+                "class": "Low",
+                "emoji": "✅",
+                "demo": True,
+            },
         ]
 
-    # Sort: High → Medium → Low → Insufficient, then by rate desc
-    order = {"High": 0, "Medium": 1, "Low": 2, "Insufficient": 3}
-    per_origin.sort(key=lambda r: (order.get(r["class"], 9), -r["suppression_rate"], r["origin"]))
+    # Sort by suppression_rate desc so the noisiest suppression is most visible
+    rows.sort(key=lambda r: r["suppression_rate"], reverse=True)
 
-    # Persist artifact
-    out_json = models_dir / "suppression_rate_per_origin.json"
-    out = {
+    # ---- write artifact
+    out_json = ctx.models_dir / "suppression_rate_per_origin.json"
+    payload = {
         "window_hours": window_h,
         "join_minutes": join_min,
         "generated_at": _iso(now),
-        "per_origin": per_origin,
-        "demo": demo_used,
+        "per_origin": rows,
+        "demo": demo_flag,
     }
-    out_json.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # Markdown
-    md.append(f"### 📉 Suppression Rate by Origin ({window_h}h){' (demo)' if demo_used else ''}")
-    if not per_origin:
-        md.append("_no suppression data_")
+    # ---- markdown
+    md.append(f"### 📉 Suppression Rate by Origin ({window_h}h){' (demo)' if demo_flag else ''}")
+    if not rows:
+        md.append("_no candidate activity in window_")
         return
 
-    for r in per_origin:
-        pct = round(r["suppression_rate"] * 100, 1)
-        md.append(
-            f"- `{r['origin']}` → {r['emoji']} {r['class']} "
-            f"(suppression = {pct}%, {r['suppressed']}/{r['candidates']})"
-        )
+    for r in rows:
+        pct = round(r["suppression_rate"] * 100.0, 1)
+        ori = r["origin"]
+        md.append(f"- `{ori}` → {r['emoji']} {r['class']} (suppression = {pct}%, {r['suppressed']}/{r['candidates']})")
