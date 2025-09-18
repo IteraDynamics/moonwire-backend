@@ -1,315 +1,3 @@
-# scripts/summary_sections/common.py
-from __future__ import annotations
-
-import json
-import os
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-import random
-from collections import Counter
-
-# -----------------------------------------------------------------------------
-# Context
-# -----------------------------------------------------------------------------
-@dataclass
-class SummaryContext:
-    logs_dir: Path
-    models_dir: Path
-    is_demo: bool
-    origins_rows: List[Dict[str, Any]]  # optional preloaded origin rows
-    yield_data: Optional[Dict[str, Any]]  # optional precomputed source yield
-    candidates: List[Dict[str, Any]]  # optional preloaded candidates
-    caches: Dict[str, Any]            # scratchpad for sections to share
-
-# -----------------------------------------------------------------------------
-# Time helpers
-# -----------------------------------------------------------------------------
-_ISO_FMT = "%Y-%m-%dT%H:%M:%S.%fZ"
-
-def parse_ts(s: Optional[str]) -> Optional[datetime]:
-    """Parse an ISO 8601 string to a UTC-aware datetime; returns None on failure."""
-    if not s:
-        return None
-    try:
-        if s.endswith("Z"):
-            try:
-                return datetime.strptime(s, _ISO_FMT).replace(tzinfo=timezone.utc)
-            except ValueError:
-                return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
-
-def _iso(dt: datetime) -> str:
-    """Format a UTC-aware datetime as ISO 8601 with trailing 'Z'."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-# -----------------------------------------------------------------------------
-# Filesystem helpers
-# -----------------------------------------------------------------------------
-def ensure_dir(p: Path) -> Path:
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
-    """Read a JSONL file into a list of dicts; returns [] if missing."""
-    rows: List[Dict[str, Any]] = []
-    if not path.exists():
-        return rows
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except Exception:
-                continue
-    return rows
-
-def _write_jsonl(path: Path, rows: Iterable[Dict[str, Any]], mode: str = "w") -> None:
-    ensure_dir(path.parent)
-    with path.open(mode, encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-# -----------------------------------------------------------------------------
-# Math / band helpers
-# -----------------------------------------------------------------------------
-def _safe_div(num: float, den: float) -> float:
-    return num / den if den else 0.0
-
-def band_weight_from_score(score: Optional[float]) -> Tuple[str, float]:
-    """
-    Map a probability/score to a qualitative band + numeric weight used in
-    consensus math.
-    Returns: ("Low"|"Med"|"High", weight: float)
-    """
-    if score is None:
-        return "Low", 0.5
-    try:
-        s = float(score)
-    except Exception:
-        return "Low", 0.5
-
-    if s >= 0.66:
-        return "High", 1.5
-    if s >= 0.33:
-        return "Med", 1.0
-    return "Low", 0.5
-
-def weight_to_label(w: Optional[float]) -> str:
-    """Convert a numeric weight back to a band label."""
-    try:
-        v = float(w)
-    except Exception:
-        return "Low"
-    if v >= 1.25:
-        return "High"
-    if v >= 0.75:
-        return "Med"
-    return "Low"
-
-# -----------------------------------------------------------------------------
-# Markdown/format helpers (compat stubs used by mw_demo_summary and others)
-# -----------------------------------------------------------------------------
-def red(s: str) -> str:    return s
-def yellow(s: str) -> str: return s
-def green(s: str) -> str:  return s
-def gray(s: str) -> str:   return s
-
-def fmt_pct(x: float, digits: int = 1) -> str:
-    try:
-        return f"{round(float(x)*100.0, digits)}%"
-    except Exception:
-        return "0%"
-
-# -----------------------------------------------------------------------------
-# Config / Demo helpers
-# -----------------------------------------------------------------------------
-def is_demo_mode() -> bool:
-    """
-    Back-compat helper: read DEMO_MODE from env.
-    Prefer ctx.is_demo in new code, but some sections import this symbol.
-    """
-    return os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes", "y", "on")
-
-# -----------------------------------------------------------------------------
-# Demo seed helpers (used by multiple sections)
-# -----------------------------------------------------------------------------
-def generate_demo_yield_plan_if_needed(
-    ctx: SummaryContext,
-    window_hours: int = 168,
-) -> Dict[str, Any]:
-    """Produce a plausible rate-limit budget plan so the Source Yield section always renders in demo."""
-    plan = [
-        {"origin": "twitter",  "pct": 0.40},
-        {"origin": "reddit",   "pct": 0.35},
-        {"origin": "rss_news", "pct": 0.25},
-    ]
-    return {
-        "window_hours": window_hours,
-        "plan": plan,
-        "demo": True,
-    }
-
-def generate_demo_origin_trends_if_needed(
-    ctx: SummaryContext,
-    window_hours: int = 168,
-    interval: str = "hour",  # accept (and mostly ignore) interval to match caller signature
-) -> Dict[str, Any]:
-    """Seed a plausible origin-trend structure so the section always renders in demo."""
-    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-
-    hours = min(max(int(window_hours), 6), 7 * 24)
-    step_h = 1 if interval == "hour" else 3
-    points = max(6, min(hours // step_h, 24))
-
-    origins = ["twitter", "reddit", "rss_news"]
-    base_flags = {"twitter": 32, "reddit": 20, "rss_news": 14}
-    conv = {"twitter": 0.18, "reddit": 0.10, "rss_news": 0.06}
-
-    series: List[Dict[str, Any]] = []
-    for o in origins:
-        for i in range(points):
-            t = now - timedelta(hours=(points - i) * step_h)
-            jitter = (i % 3) - 1  # -1,0,1 pattern
-            flags = max(0, base_flags.get(o, 10) + jitter)
-            triggers = max(0, int(flags * conv.get(o, 0.08)))
-            series.append({"origin": o, "t": _iso(t), "flags": flags, "triggers": triggers})
-
-    return {
-        "window_hours": hours,
-        "interval": interval,
-        "series": series,
-        "demo": True,
-    }
-
-# --- New-style seeder: accepts SummaryContext and returns a dict ----------------
-def _seed_demo_files_with_ctx(
-    ctx: SummaryContext,
-    window_hours: int = 72,
-    join_minutes: int = 5,
-) -> Dict[str, Any]:
-    """
-    Seed minimal-but-plausible demo data files used across sections:
-      - logs/candidates.jsonl
-      - models/trigger_history.jsonl
-      - models/label_feedback.jsonl
-    Only writes when files are missing or tiny and DEMO is enabled.
-    """
-    demo = ctx.is_demo or is_demo_mode()
-    now = datetime.now(timezone.utc)
-
-    # Ensure dirs
-    ensure_dir(ctx.logs_dir)
-    ensure_dir(ctx.models_dir)
-
-    # --- Candidates ---
-    cand_path = ctx.logs_dir / "candidates.jsonl"
-    cands = _load_jsonl(cand_path)
-    if len(cands) < 10 and demo:
-        origins = ["twitter", "reddit", "rss_news"]
-        seeded: List[Dict[str, Any]] = []
-        # ~50–60 rows across last 6 hours
-        for o, n in zip(origins, (50, 42, 60)):
-            for _ in range(n):
-                ts = now - timedelta(minutes=random.randint(0, 6 * 60))
-                seeded.append({
-                    "timestamp": _iso(ts),
-                    "origin": o,
-                    "burst_z": round(random.uniform(0.0, 4.0), 2),
-                })
-        _write_jsonl(cand_path, seeded, mode="w")
-        cands = seeded
-
-    # --- Triggers ---
-    trig_path = ctx.models_dir / "trigger_history.jsonl"
-    trigs = _load_jsonl(trig_path)
-    if len(trigs) < 6 and demo:
-        seeded_t: List[Dict[str, Any]] = []
-        for row in cands[:]:
-            ts = parse_ts(row.get("timestamp"))
-            o = row.get("origin")
-            if ts and o in ("twitter", "reddit", "rss_news"):
-                if random.random() < {"twitter": 0.18, "reddit": 0.07, "rss_news": 0.02}.get(o, 0.05):
-                    seeded_t.append({
-                        "timestamp": row["timestamp"],
-                        "origin": o,
-                        "adjusted_score": round(random.uniform(0.05, 0.95), 2),
-                        "decision": "triggered",
-                        "model_version": "v.test",
-                    })
-        if not seeded_t:
-            # ensure at least a handful exist
-            for o in ("twitter", "reddit", "rss_news"):
-                ts = now - timedelta(minutes=random.randint(0, 120))
-                seeded_t.append({
-                    "timestamp": _iso(ts),
-                    "origin": o,
-                    "adjusted_score": round(random.uniform(0.3, 0.9), 2),
-                    "decision": "triggered",
-                    "model_version": "v.test",
-                })
-        _write_jsonl(trig_path, seeded_t, mode="w")
-        trigs = seeded_t
-
-    # --- Label feedback ---
-    lab_path = ctx.models_dir / "label_feedback.jsonl"
-    labs = _load_jsonl(lab_path)
-    if len(labs) < 6 and demo:
-        seeded_l: List[Dict[str, Any]] = []
-        priors = {"twitter": 0.70, "reddit": 0.50, "rss_news": 0.35}  # P(true|trigger)
-        for t in trigs:
-            ts = parse_ts(t.get("timestamp"))
-            if not ts:
-                continue
-            if random.random() < 0.70:  # ~70% of triggers get labeled
-                o = t.get("origin", "unknown")
-                prob_true = priors.get(o, 0.5)
-                seeded_l.append({
-                    "timestamp": _iso(ts + timedelta(minutes=random.randint(-join_minutes, join_minutes))),
-                    "origin": o,
-                    "label": bool(random.random() < prob_true),
-                    "model_version": t.get("model_version", "v.test"),
-                })
-        if not seeded_l and trigs:
-            # ensure at least one label
-            t = trigs[0]
-            ts = parse_ts(t.get("timestamp")) or now
-            seeded_l.append({
-                "timestamp": _iso(ts),
-                "origin": t.get("origin", "twitter"),
-                "label": True,
-                "model_version": t.get("model_version", "v.test"),
-            })
-        _write_jsonl(lab_path, seeded_l, mode="w")
-        labs = seeded_l
-
-    return {
-        "window_hours": window_hours,
-        "join_minutes": join_minutes,
-        "generated_at": _iso(now),
-        "counts": {
-            "candidates": len(cands),
-            "triggers": len(trigs),
-            "labels": len(labs),
-        },
-        "paths": {
-            "candidates": str(cand_path),
-            "trigger_history": str(trig_path),
-            "label_feedback": str(lab_path),
-        },
-        "demo": demo,
-    }
-
 # --- Legacy-compatible facade: supports old tuple API and new dict API --------
 def generate_demo_data_if_needed(ctx_or_reviewers, window_hours: int = 72, join_minutes: int = 5):
     """
@@ -318,17 +6,20 @@ def generate_demo_data_if_needed(ctx_or_reviewers, window_hours: int = 72, join_
       * If passed a list of reviewers -> returns (reviewers, events)    [legacy]
         - With DEMO_MODE=false -> returns ([], [])
         - With DEMO_MODE=true  -> returns (seeded_reviewers, seeded_events)
+          where len(events) == len(reviewers) to satisfy legacy tests.
     """
     # New-style call
     if isinstance(ctx_or_reviewers, SummaryContext):
-        return _seed_demo_files_with_ctx(ctx_or_reviewers, window_hours=window_hours, join_minutes=join_minutes)
+        return _seed_demo_files_with_ctx(
+            ctx_or_reviewers, window_hours=window_hours, join_minutes=join_minutes
+        )
 
     # Legacy call: arg is reviewers list (or anything else)
     reviewers_in = list(ctx_or_reviewers) if isinstance(ctx_or_reviewers, (list, tuple)) else []
     if not is_demo_mode():
         return [], []
 
-    # Minimal plausible reviewers + events for legacy tests
+    # Seed reviewers if none provided (3–5 typical in tests; we use 5 stable ids)
     reviewers_out = reviewers_in or [
         {"id": "96e748", "weight": "Med"},
         {"id": "f066e4", "weight": "Low"},
@@ -336,48 +27,19 @@ def generate_demo_data_if_needed(ctx_or_reviewers, window_hours: int = 72, join_
         {"id": "ecf7f6", "weight": "High"},
         {"id": "aecb8d", "weight": "Low"},
     ]
-    events = [
-        {"signal": "demo", "score": 0.68, "timestamp": _iso(datetime.now(timezone.utc))},
-    ]
+
+    # Build one event per reviewer (legacy test expects len(events) == len(reviewers))
+    now = datetime.now(timezone.utc)
+    events: List[Dict[str, Any]] = []
+    for i, r in enumerate(reviewers_out):
+        rid = r["id"] if isinstance(r, dict) and "id" in r else f"demo_{i:02d}"
+        weight = (r.get("weight") if isinstance(r, dict) else "Med") or "Med"
+        base = {"Low": 0.58, "Med": 0.68, "High": 0.82}.get(weight, 0.68)
+        jitter = random.uniform(-0.05, 0.05)
+        events.append({
+            "signal": rid,
+            "score": round(max(0.0, min(1.0, base + jitter)), 2),
+            "timestamp": _iso(now),
+        })
+
     return reviewers_out, events
-
-# -----------------------------------------------------------------------------
-# Origin picking helper (requested by mw_demo_summary)
-# -----------------------------------------------------------------------------
-def pick_candidate_origins(
-    ctx: SummaryContext,
-    fallback: Optional[List[str]] = None,
-    top_k: int = 3,
-    window_hours: int = 72,
-) -> List[str]:
-    """
-    Choose up to `top_k` origins that appear most frequently in recent candidates.
-    Falls back to common defaults if none found.
-    """
-    defaults = fallback or ["twitter", "reddit", "rss_news"]
-
-    # Use cache if available
-    cache_key = f"candidate_origins_{window_hours}"
-    if cache_key in ctx.caches:
-        vals = ctx.caches[cache_key]
-        return vals[:top_k] if isinstance(vals, list) and vals else defaults[:top_k]
-
-    # Load candidates
-    cand_path = ctx.logs_dir / "candidates.jsonl"
-    rows = ctx.candidates if ctx.candidates else _load_jsonl(cand_path)
-
-    t_cut = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    ctr = Counter()
-    for r in rows:
-        o = r.get("origin")
-        ts = parse_ts(r.get("timestamp"))
-        if not o or not ts:
-            continue
-        if ts >= t_cut:
-            ctr[o] += 1
-
-    ordered = [o for o, _ in ctr.most_common() if o and o != "unknown"]
-    if not ordered:
-        ordered = defaults[:]
-    ctx.caches[cache_key] = ordered
-    return ordered[:top_k]
