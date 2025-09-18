@@ -48,7 +48,8 @@ from scripts.summary_sections import (
     trigger_likelihood_v0,
     ensemble_v0_4,
     dynamic_vs_static_thresholds,
-    score_distribution,
+    score_distribution,               # global 48h
+    score_distribution_per_origin,    # per-origin 48h with drift overlay
     volatility_aware_thresholds,
     trigger_explainability,
     trigger_history,
@@ -65,15 +66,14 @@ from scripts.summary_sections import (
     live_backtest,
     burst_detection,
     source_precision_recall,
-    signal_quality,
-    signal_quality_per_origin,
-    signal_quality_per_version,
-    trigger_coverage_summary,
-    trigger_coverage_trend,
-    trigger_precision_by_origin,
-    score_distribution_per_origin,
-    threshold_quality_per_origin,
-    suppression_rate_by_origin,
+    signal_quality,                   # (v0.5.5) batches over time
+    signal_quality_per_origin,        # (v0.5.6)
+    signal_quality_per_version,       # (v0.5.10) + trend
+    threshold_quality_per_origin,     # (v0.5.8)
+    trigger_coverage_summary,         # (v0.5.12)
+    trigger_precision_by_origin,      # (v0.5.13)
+    suppression_rate_by_origin,       # (v0.5.15)
+    trigger_coverage_trend,           # (v0.5.14) trend chart
 )
 
 # ---- Compatibility re-exports for any tests that import from mw_demo_summary ----
@@ -199,41 +199,54 @@ def main():
     # ---------- call sections in the same order as the last green CI ----------
     header_overview.append(md, ctx, reviewers=reviewers, threshold=DEFAULT_THRESHOLD,
                            sig_id=sig_id, triggered_log=triggered_log)
-    source_yield_plan.append(md, ctx)                      # may set ctx.yield_data
+    # 1) Supply & stream activity (sets context like ctx.yield_data, trends)
+    source_yield_plan.append(md, ctx)
     origin_trends.append(md, ctx)
+    burst_detection.append(md, ctx)              # move earlier: belongs with “activity”
     cross_origin_correlations.append(md, ctx)
     lead_lag.append(md, ctx)
     volatility_regimes.append(md, ctx)
     nowcast_attention.append(md, ctx)
+
+    # 2) Scoring & score shapes
     trigger_likelihood_v0.append(md, ctx)
+    ensemble_v0_4.append(md, ctx)
     score_distribution.append(md, ctx)
     score_distribution_per_origin.append(md, ctx)
-    threshold_quality_per_origin.append(md, ctx)
-    ensemble_v0_4.append(md, ctx)
+
+    # 3) Thresholds & explainability (what would/wouldn’t fire, and why)
     dynamic_vs_static_thresholds.append(md, ctx)
     volatility_aware_thresholds.append(md, ctx)
+    per_origin_thresholds.append(md, ctx)
+    threshold_quality_per_origin.append(md, ctx)
     trigger_explainability.append(md, ctx)
+
+    # 4) Decisions & labels (what actually happened)
     trigger_history.append(md, ctx)
     label_feedback.append(md, ctx)
+
+    # 5) Quality & coverage (readability: coverage → suppression → precision → trend)
     signal_quality.append(md, ctx)
     signal_quality_per_origin.append(md, ctx)
     signal_quality_per_version.append(md, ctx)
     trigger_coverage_summary.append(md, ctx)
-    trigger_coverage_trend.append(md, ctx)
+    suppression_rate_by_origin.append(md, ctx)   # sits right next to coverage
     trigger_precision_by_origin.append(md, ctx)
+    trigger_coverage_trend.append(md, ctx)       # chart after the summaries it visualizes
+
+    # 6) Performance snapshots
     rolling_accuracy_snapshot.append(md, ctx)
     accuracy_by_model_version.append(md, ctx)
+    source_precision_recall.append(md, ctx)
+    calibration.append(md, ctx)
+
+    # 7) Training & drift (pipeline artifacts & health checks)
     training_data_snapshot.append(md, ctx)
     retrain_summary.append(md, ctx)
     latest_training_metadata.append(md, ctx)
-    calibration.append(md, ctx)
-    per_origin_thresholds.append(md, ctx)
-    drift_aware_inference.append(md, ctx)
     drift_check.append(md, ctx)
+    drift_aware_inference.append(md, ctx)
     live_backtest.append(md, ctx)
-    burst_detection.append(md, ctx)
-    source_precision_recall.append(md, ctx)
-    suppression_rate_by_origin.append(md, ctx)
 
     # ---------- write once ----------
     out = ART / "demo_summary.md"

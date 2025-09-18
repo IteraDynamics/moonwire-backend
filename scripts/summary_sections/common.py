@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from typing import Any
 import os, json, hashlib, random, uuid
 
 # ---- Context passed to every section ----
@@ -23,6 +24,13 @@ def is_demo_mode() -> bool:
 
 def red(s: str) -> str:
     return "000000" if not s else hashlib.sha1(s.encode()).hexdigest()[:6]
+
+# Added for modules that import these color helpers; no-ops for plaintext CI.
+def green(s: str) -> str:  # NEW
+    return s
+
+def yellow(s: str) -> str:  # NEW
+    return s
 
 
 def band_weight_from_score(score):
@@ -67,6 +75,13 @@ def _iso(dt: datetime) -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+# Small math helper some sections import.
+def _safe_div(n: float, d: float) -> float:  # NEW
+    try:
+        return float(n) / float(d) if d else 0.0
+    except Exception:
+        return 0.0
 
 
 def pick_candidate_origins(
@@ -116,7 +131,7 @@ def generate_demo_data_if_needed(reviewers, flag_times=None):
     return display, seeded
 
 
-def generate_demo_yield_plan_if_needed(yield_data: dict | None, origins_rows=None) -> dict | None:
+def generate_demo_yield_plan_if_needed(yield_data: dict | None, origins_rows=None, **_: Any) -> dict | None:
     """
     Provide a synthetic yield plan when running in DEMO_MODE and no real plan exists.
     Structure expected by source_yield_plan.py:
@@ -189,7 +204,7 @@ def generate_demo_origins_if_needed(rows: list | None) -> list:
     return out
 
 
-def generate_demo_origin_trends_if_needed(trend_rows: list | None, days: int = 7) -> list:
+def generate_demo_origin_trends_if_needed(trend_rows: list | None, days: int = 7, **_: Any) -> list:
     """
     Provide synthetic per-day trend rows for each origin when in DEMO_MODE and no real rows.
     Expected by origin_trends.py as a flat list of rows:
@@ -213,15 +228,75 @@ def generate_demo_origin_trends_if_needed(trend_rows: list | None, days: int = 7
     return out
 
 
+# ---- Light I/O helpers some newer sections import ----
+def ensure_dir(p: Path) -> Path:  # NEW
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _load_jsonl(path: Path) -> list[dict]:  # NEW
+    rows: list[dict] = []
+    if not path.exists():
+        return rows
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        rows.append(obj)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return rows
+
+
+def _write_json(path: Path, data: dict) -> None:  # NEW
+    ensure_dir(path.parent)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _append_jsonl(path: Path, rows: list[dict]) -> None:  # NEW
+    ensure_dir(path.parent)
+    with path.open("a", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def _load_candidates_from_logs(logs_dir: Path) -> list[dict]:  # NEW
+    """
+    Read any *.jsonl in logs_dir; keep dict rows that have origin+timestamp.
+    Tests typically write logs/candidates.jsonl.
+    """
+    out: list[dict] = []
+    if not logs_dir.exists():
+        return out
+    for p in sorted(logs_dir.glob("*.jsonl")):
+        for r in _load_jsonl(p):
+            if isinstance(r, dict) and "origin" in r and "timestamp" in r:
+                out.append(r)
+    return out
+
+
 # Optional explicit export list (helps tests that import specific names)
 __all__ = [
     "SummaryContext",
     "is_demo_mode",
-    "red",
+    "red", "green", "yellow",
     "band_weight_from_score",
     "weight_to_label",
     "parse_ts",
     "_iso",
+    "_safe_div",
+    "ensure_dir",
+    "_load_jsonl",
+    "_write_json",
+    "_append_jsonl",
+    "_load_candidates_from_logs",
     "pick_candidate_origins",
     "generate_demo_data_if_needed",
     "generate_demo_yield_plan_if_needed",
