@@ -90,17 +90,24 @@ def _safe_div(num: float, den: float) -> float:
 
 
 # -----------------------------------------------------------------------------
+# Config / Demo helpers
+# -----------------------------------------------------------------------------
+def is_demo_mode() -> bool:
+    """
+    Back-compat helper: read DEMO_MODE from env.
+    Many sections now use ctx.is_demo, but some still import this symbol.
+    """
+    return os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes", "y", "on")
+
+
+# -----------------------------------------------------------------------------
 # Demo seed helpers (used by multiple sections)
 # -----------------------------------------------------------------------------
 def generate_demo_yield_plan_if_needed(
     ctx: SummaryContext,
     window_hours: int = 168,
 ) -> Dict[str, Any]:
-    """
-    Produce a plausible rate-limit budget plan so the Source Yield section always renders in demo.
-    Schema kept intentionally light to avoid coupling to any single section's internals.
-    """
-    # Simple balanced split with a small lean to twitter
+    """Produce a plausible rate-limit budget plan so the Source Yield section always renders in demo."""
     plan = [
         {"origin": "twitter",  "pct": 0.40},
         {"origin": "reddit",   "pct": 0.35},
