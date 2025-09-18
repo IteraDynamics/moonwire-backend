@@ -192,7 +192,8 @@ def generate_demo_origin_trends_if_needed(
         "demo": True,
     }
 
-def generate_demo_data_if_needed(
+# --- New-style seeder: accepts SummaryContext and returns a dict ----------------
+def _seed_demo_files_with_ctx(
     ctx: SummaryContext,
     window_hours: int = 72,
     join_minutes: int = 5,
@@ -308,6 +309,37 @@ def generate_demo_data_if_needed(
         },
         "demo": demo,
     }
+
+# --- Legacy-compatible facade: supports old tuple API and new dict API --------
+def generate_demo_data_if_needed(ctx_or_reviewers, window_hours: int = 72, join_minutes: int = 5):
+    """
+    Back-compat wrapper:
+      * If passed a SummaryContext -> returns a dict (and seeds files)  [new API]
+      * If passed a list of reviewers -> returns (reviewers, events)    [legacy]
+        - With DEMO_MODE=false -> returns ([], [])
+        - With DEMO_MODE=true  -> returns (seeded_reviewers, seeded_events)
+    """
+    # New-style call
+    if isinstance(ctx_or_reviewers, SummaryContext):
+        return _seed_demo_files_with_ctx(ctx_or_reviewers, window_hours=window_hours, join_minutes=join_minutes)
+
+    # Legacy call: arg is reviewers list (or anything else)
+    reviewers_in = list(ctx_or_reviewers) if isinstance(ctx_or_reviewers, (list, tuple)) else []
+    if not is_demo_mode():
+        return [], []
+
+    # Minimal plausible reviewers + events for legacy tests
+    reviewers_out = reviewers_in or [
+        {"id": "96e748", "weight": "Med"},
+        {"id": "f066e4", "weight": "Low"},
+        {"id": "d09589", "weight": "Low"},
+        {"id": "ecf7f6", "weight": "High"},
+        {"id": "aecb8d", "weight": "Low"},
+    ]
+    events = [
+        {"signal": "demo", "score": 0.68, "timestamp": _iso(datetime.now(timezone.utc))},
+    ]
+    return reviewers_out, events
 
 # -----------------------------------------------------------------------------
 # Origin picking helper (requested by mw_demo_summary)
