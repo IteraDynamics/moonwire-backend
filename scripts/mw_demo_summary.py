@@ -73,6 +73,7 @@ from scripts.summary_sections import (
     trigger_precision_by_origin,
     score_distribution_per_origin,
     threshold_quality_per_origin,
+    suppression_rate_by_origin,
 )
 
 # ---- Compatibility re-exports for any tests that import from mw_demo_summary ----
@@ -232,6 +233,7 @@ def main():
     live_backtest.append(md, ctx)
     burst_detection.append(md, ctx)
     source_precision_recall.append(md, ctx)
+    suppression_rate_by_origin.append(md, ctx)
 
     # ---------- write once ----------
     out = ART / "demo_summary.md"
