@@ -76,8 +76,26 @@ def is_demo_mode() -> bool:
 
 
 # -----------------------
+# Math helpers
+# -----------------------
+
+def _safe_div(n: float, d: float) -> float:
+    """Return n/d with divide-by-zero protection (0.0 when d==0)."""
+    try:
+        return float(n) / float(d) if d else 0.0
+    except Exception:
+        return 0.0
+
+
+# -----------------------
 # IO helpers
 # -----------------------
+
+def ensure_dir(p: Path) -> Path:
+    """mkdir -p for a directory path; return the path."""
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
 
 def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
@@ -101,12 +119,12 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
 
 
 def _write_json(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(path.parent)
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
 def _append_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(path.parent)
     with path.open("a", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -248,8 +266,8 @@ def _seed_demo_files_with_ctx(
     triggers_path   = ctx.models_dir / "trigger_history.jsonl"
     feedback_path   = ctx.models_dir / "label_feedback.jsonl"
 
-    ctx.logs_dir.mkdir(parents=True, exist_ok=True)
-    ctx.models_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(ctx.logs_dir)
+    ensure_dir(ctx.models_dir)
 
     def _needs_seed(p: Path, min_lines: int = 1) -> bool:
         if not p.exists():
@@ -350,6 +368,8 @@ __all__ = [
     "SummaryContext",
     "parse_ts", "_iso", "utc_now",
     "is_demo_mode",
+    "_safe_div",
+    "ensure_dir",
     "_load_jsonl", "_write_json", "_append_jsonl", "_load_candidates_from_logs",
     "red", "green", "yellow",
     "band_weight_from_score", "weight_to_label",
