@@ -106,6 +106,21 @@ def band_weight_from_score(score: Optional[float]) -> Tuple[str, float]:
         return "Med", 1.0
     return "Low", 0.5
 
+def weight_to_label(w: Optional[float]) -> str:
+    """
+    Convert a numeric weight back to a band label. Thresholds are chosen to
+    map our canonical weights (0.5, 1.0, 1.5) to Low/Med/High.
+    """
+    try:
+        v = float(w)
+    except Exception:
+        return "Low"
+    if v >= 1.25:
+        return "High"
+    if v >= 0.75:
+        return "Med"
+    return "Low"
+
 # -----------------------------------------------------------------------------
 # Config / Demo helpers
 # -----------------------------------------------------------------------------
