@@ -70,11 +70,13 @@ from scripts.summary_sections import (
     signal_quality_per_origin,        # (v0.5.6)
     signal_quality_per_version,       # (v0.5.10) + trend
     threshold_quality_per_origin,     # (v0.5.8)
+    threshold_recommendations,
     trigger_coverage_summary,         # (v0.5.12)
     trigger_precision_by_origin,      # (v0.5.13)
     suppression_rate_by_origin,       # (v0.5.15)
     trigger_coverage_trend,           # (v0.5.14) trend chart
-     trigger_suppression_trend,
+    trigger_suppression_trend,
+    
 )
 
 # ---- Compatibility re-exports for any tests that import from mw_demo_summary ----
@@ -220,6 +222,7 @@ def main():
     volatility_aware_thresholds.append(md, ctx)
     per_origin_thresholds.append(md, ctx)
     threshold_quality_per_origin.append(md, ctx)
+    threshold_recommendations.append(md, ctx)
     trigger_explainability.append(md, ctx)
 
     # 4) Decisions & labels (what actually happened)
