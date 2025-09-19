@@ -177,6 +177,52 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- NEW uploads from recent tasks ---
+      - name: Upload suppression rate per origin
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: suppression-rate-per-origin
+          path: models/suppression_rate_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload threshold quality per origin
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: threshold-quality-per-origin
+          path: models/threshold_quality_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload threshold recommendations
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: threshold-recommendations
+          path: models/threshold_recommendations.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload threshold backtest
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: threshold-backtest
+          path: models/threshold_backtest.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload threshold auto-apply audit
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: threshold-auto-apply
+          path: models/threshold_auto_apply.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       # --- Show artifacts & publish summary ---
       - name: Show artifacts (debug)
         if: ${{ success() }}
