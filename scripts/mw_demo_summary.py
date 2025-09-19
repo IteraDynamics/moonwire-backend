@@ -72,6 +72,7 @@ from scripts.summary_sections import (
     threshold_quality_per_origin,     # (v0.5.8)
     threshold_recommendations,
     threshold_backtest,
+    threshold_auto_apply,  # v0.6.2
     trigger_coverage_summary,         # (v0.5.12)
     trigger_precision_by_origin,      # (v0.5.13)
     suppression_rate_by_origin,       # (v0.5.15)
@@ -224,7 +225,8 @@ def main():
     per_origin_thresholds.append(md, ctx)
     threshold_quality_per_origin.append(md, ctx)
     threshold_recommendations.append(md, ctx)
-    threshold_backtest.append(md, ctx)
+    threshold_backtest.append(md, ctx) # v 0.6.1
+    threshold_auto_apply.append(md, ctx) # v0.6.2
     trigger_explainability.append(md, ctx)
 
     # 4) Decisions & labels (what actually happened)
