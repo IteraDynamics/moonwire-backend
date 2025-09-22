@@ -118,20 +118,34 @@ def _parse_ts_any(val):
     Accept ISO8601, epoch seconds, or epoch milliseconds.
     Uses common.parse_ts for ISO and normal seconds; falls back to ms detection.
     """
-    # First try your common.parse_ts (handles ISO + probably seconds)
     ts = common.parse_ts(val)
     if ts:
         return ts
-
-    # If parse failed, handle numerics ourselves (e.g., epoch ms)
     try:
         num = float(val)
-        # Heuristic: if it's bigger than 1e12, treat as milliseconds
+        # If it's bigger than 1e12, treat it as milliseconds since epoch
         if num > 1_000_000_000_000:
             num = num / 1000.0
         return datetime.fromtimestamp(num, tz=timezone.utc)
     except Exception:
         return None
+
+
+def _resolve_artifacts_dir(ctx) -> Path:
+    """
+    Pick artifacts dir the same way CI expects:
+    1) ARTIFACTS_DIR env
+    2) ctx.artifacts_dir (if orchestrator provides it)
+    3) <repo_root>/artifacts where repo_root is models_dir.parent
+    """
+    env_dir = os.getenv("ARTIFACTS_DIR")
+    if env_dir:
+        return common.ensure_dir(Path(env_dir))
+    # Some orchestrators stash this on the context
+    if hasattr(ctx, "artifacts_dir") and getattr(ctx, "artifacts_dir"):
+        return common.ensure_dir(Path(getattr(ctx, "artifacts_dir")))
+    # Fallback: sibling to models/
+    return common.ensure_dir(Path(ctx.models_dir).parent / "artifacts")
 
 
 def _window_rows(
@@ -195,8 +209,7 @@ def append(md: list[str], ctx: common.SummaryContext) -> None:
     """
     hours = int(os.getenv("MW_CAL_WINDOW_H", "72"))
 
-    artifacts_dir = (ctx.models_dir.parent / "artifacts")
-    common.ensure_dir(artifacts_dir)
+    artifacts_dir = _resolve_artifacts_dir(ctx)
 
     triggers, labels = _read_trigger_and_labels(ctx.logs_dir)
     rows = _window_rows(triggers, labels, now_utc=datetime.now(timezone.utc), hours=hours)
@@ -275,3 +288,10 @@ def append(md: list[str], ctx: common.SummaryContext) -> None:
         md.append(
             f" • {r['origin']:<7} → ECE={r['ece']:.2f} | Brier={r['brier']:.2f} | n={r['n']}{suffix}"
         )
+
+    # Helpful: list artifact paths in the summary (eases CI upload debugging)
+    if results:
+        md.append("<details><summary>Per-origin calibration artifacts</summary>")
+        for r in results:
+            md.append(f" • {r['artifact_png']}")
+        md.append("</details>")
