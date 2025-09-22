@@ -69,6 +69,7 @@ from scripts.summary_sections import (
     signal_quality,                   # (v0.5.5) batches over time
     signal_quality_per_origin,        # (v0.5.6)
     signal_quality_per_version,       # (v0.5.10) + trend
+    calibration_reliability,
     threshold_quality_per_origin,     # (v0.5.8)
     threshold_recommendations,
     threshold_backtest,
@@ -218,6 +219,7 @@ def main():
     ensemble_v0_4.append(md, ctx)
     score_distribution.append(md, ctx)
     score_distribution_per_origin.append(md, ctx)
+    calibration_reliability.append(md, ctx)
 
     # 3) Thresholds & explainability (what would/wouldn’t fire, and why)
     dynamic_vs_static_thresholds.append(md, ctx)
