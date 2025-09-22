@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -114,6 +113,27 @@ def _read_trigger_and_labels(logs_dir: Path) -> tuple[list[dict], list[dict]]:
     return triggers, labels
 
 
+def _parse_ts_any(val):
+    """
+    Accept ISO8601, epoch seconds, or epoch milliseconds.
+    Uses common.parse_ts for ISO and normal seconds; falls back to ms detection.
+    """
+    # First try your common.parse_ts (handles ISO + probably seconds)
+    ts = common.parse_ts(val)
+    if ts:
+        return ts
+
+    # If parse failed, handle numerics ourselves (e.g., epoch ms)
+    try:
+        num = float(val)
+        # Heuristic: if it's bigger than 1e12, treat as milliseconds
+        if num > 1_000_000_000_000:
+            num = num / 1000.0
+        return datetime.fromtimestamp(num, tz=timezone.utc)
+    except Exception:
+        return None
+
+
 def _window_rows(
     triggers: list[dict],
     labels: list[dict],
@@ -136,7 +156,7 @@ def _window_rows(
         rid = r.get("id")
         if not rid or rid not in label_by_id:
             continue
-        ts = common.parse_ts(r.get("ts") or r.get("timestamp"))
+        ts = _parse_ts_any(r.get("ts") or r.get("timestamp"))
         if not ts or ts < start or ts > now_utc:
             continue
         p = r.get("score")
@@ -179,7 +199,7 @@ def append(md: list[str], ctx: common.SummaryContext) -> None:
     common.ensure_dir(artifacts_dir)
 
     triggers, labels = _read_trigger_and_labels(ctx.logs_dir)
-    rows = _window_rows(triggers, labels, now_utc=(datetime.now(timezone.utc)), hours=hours)
+    rows = _window_rows(triggers, labels, now_utc=datetime.now(timezone.utc), hours=hours)
 
     demo_used = False
     if len(rows) < _LOW_N and ctx.is_demo:
