@@ -1,26 +1,27 @@
 # scripts/summary_sections/calibration_reliability.py
 from __future__ import annotations
 
-from typing import List, Dict, Any, Tuple, DefaultDict
-from dataclasses import dataclass
+import os, json, math, statistics
 from pathlib import Path
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
-import os, json, math
 
 import matplotlib
-matplotlib.use("Agg")  # headless for CI
-import matplotlib.pyplot as plt  # noqa: E402
+matplotlib.use("Agg")  # headless
+import matplotlib.pyplot as plt
 
-from .common import SummaryContext, parse_ts, _iso
+from .common import SummaryContext, parse_ts, _iso, is_demo_mode
 
 
-# ---------- tiny io helpers (local; avoid coupling) ----------
-def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
+# ---------- helpers ----------
+
+def _load_jsonl(p: Path) -> List[dict]:
+    if not p.exists():
         return []
-    out: List[Dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
+    out = []
+    with p.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -32,309 +33,242 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     return out
 
 
-def _ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
+def _safe_div(a: float, b: float) -> float:
+    if not b:
+        return 0.0
+    return a / b
 
 
-# ---------- joins & math ----------
-def _nearest_join_labels_to_triggers(
-    labels: List[Dict[str, Any]],
-    triggers: List[Dict[str, Any]],
+def _nearest_join(
+    labels: List[dict],
+    triggers: List[dict],
     join_minutes: int,
-) -> List[Tuple[Dict[str, Any], Dict[str, Any] | None]]:
+) -> List[Tuple[dict, Optional[dict]]]:
     """
-    For each label row, find the nearest trigger in the same origin within ±join_minutes.
-    Return list of (label_row, trigger_row or None).
+    For each label row, find the nearest trigger of the same origin within ±join_minutes.
+    Returns pairs (label_row, trigger_row_or_None).
     """
-    by_origin: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
+    by_origin: Dict[str, List[dict]] = defaultdict(list)
     for t in triggers:
-        o = t.get("origin") or "unknown"
+        o = t.get("origin")
         ts = parse_ts(t.get("timestamp"))
-        if ts is None:
+        if not o or ts is None:
             continue
         t["_ts"] = ts
         by_origin[o].append(t)
     for o in by_origin:
         by_origin[o].sort(key=lambda r: r["_ts"])
 
-    out: List[Tuple[Dict[str, Any], Dict[str, Any] | None]] = []
+    out: List[Tuple[dict, Optional[dict]]] = []
     max_delta = timedelta(minutes=join_minutes)
-
     for lab in labels:
-        o = lab.get("origin") or "unknown"
-        lts = parse_ts(lab.get("timestamp"))
-        if lts is None:
+        o = lab.get("origin")
+        if not o:
             out.append((lab, None))
             continue
-        lab["_ts"] = lts
-
-        cand = by_origin.get(o) or []
-        # binary search for insertion point
-        lo, hi = 0, len(cand)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if cand[mid]["_ts"] < lts:
-                lo = mid + 1
-            else:
-                hi = mid
-        # neighbors at lo-1 and lo
-        best = None
-        best_dt = None
-        for idx in (lo - 1, lo):
-            if 0 <= idx < len(cand):
-                dt = abs(cand[idx]["_ts"] - lts)
-                if best_dt is None or dt < best_dt:
-                    best_dt = dt
-                    best = cand[idx]
-        if best is not None and best_dt is not None and best_dt <= max_delta:
-            out.append((lab, best))
-        else:
+        Lts = parse_ts(lab.get("timestamp"))
+        if Lts is None:
             out.append((lab, None))
+            continue
+        # binary-ish search over sorted list
+        cand = None
+        best = None
+        rows = by_origin.get(o) or []
+        # small list sizes in CI; linear scan is fine and robust
+        for tr in rows:
+            d = abs(tr["_ts"] - Lts)
+            if d <= max_delta and (best is None or d < best):
+                best = d
+                cand = tr
+        out.append((lab, cand))
     return out
 
 
-def _clip01(x: float | None) -> float | None:
-    if x is None:
-        return None
-    try:
-        return max(0.0, min(1.0, float(x)))
-    except Exception:
-        return None
-
-
-def _ece_and_bins(y_prob: List[float], y_true: List[int], bins: int) -> Tuple[float, List[Dict[str, Any]]]:
+def _ece_and_bins(y_prob: List[float], y_true: List[int], bins: int) -> Tuple[float, List[dict]]:
     """
-    Equal-width bins on [0,1]. Returns (ECE, bins_summary).
-    bins_summary: list of {"p_hat":mean_prob,"emp":mean_true,"n":count}
+    Equal-width bins over [0,1]. Returns (ECE, bins_list).
+    bins_list entries: {"p_hat": mean_prob, "emp": mean_true, "n": count, "lo": lo, "hi": hi}
     """
-    n = len(y_prob)
-    if n == 0:
+    if not y_prob:
         return 0.0, []
 
-    # Pre-allocate containers
-    sums_prob = [0.0] * bins
-    sums_true = [0.0] * bins
-    counts = [0] * bins
+    # Clamp to [0,1] defensively
+    probs = [min(1.0, max(0.0, float(p))) for p in y_prob]
+    trues = [1 if t else 0 for t in y_true]
+    N = len(probs)
 
-    for p, y in zip(y_prob, y_true):
-        # Map 1.0 to last bin
-        idx = min(bins - 1, int(p * bins))
-        sums_prob[idx] += p
-        sums_true[idx] += y
-        counts[idx] += 1
+    edges = [i / bins for i in range(bins + 1)]
+    per_bin_idx: List[List[int]] = [[] for _ in range(bins)]
+    for i, p in enumerate(probs):
+        # Put p==1.0 into last bin
+        b = min(int(p * bins), bins - 1)
+        per_bin_idx[b].append(i)
 
-    out_bins: List[Dict[str, Any]] = []
+    out_bins = []
     ece = 0.0
-    for i in range(bins):
-        if counts[i] > 0:
-            mean_p = sums_prob[i] / counts[i]
-            emp = sums_true[i] / counts[i]
-            out_bins.append({"p_hat": round(mean_p, 4), "emp": round(emp, 4), "n": int(counts[i])})
-            ece += (counts[i] / n) * abs(emp - mean_p)
-        else:
-            # Represent empty bins so curves look continuous if needed (optional to include)
-            out_bins.append({"p_hat": round((i + 0.5) / bins, 4), "emp": None, "n": 0})
+    for b in range(bins):
+        idxs = per_bin_idx[b]
+        lo, hi = edges[b], edges[b + 1]
+        if not idxs:
+            out_bins.append({"p_hat": 0.0, "emp": 0.0, "n": 0, "lo": lo, "hi": hi})
+            continue
+        p_mean = statistics.fmean(probs[i] for i in idxs)
+        t_mean = statistics.fmean(trues[i] for i in idxs)
+        n_b = len(idxs)
+        out_bins.append({"p_hat": p_mean, "emp": t_mean, "n": n_b, "lo": lo, "hi": hi})
+        ece += (n_b / N) * abs(t_mean - p_mean)
+
     return float(ece), out_bins
 
 
 def _brier(y_prob: List[float], y_true: List[int]) -> float:
-    n = len(y_prob)
-    if n == 0:
+    if not y_prob:
         return 0.0
-    s = 0.0
-    for p, y in zip(y_prob, y_true):
-        d = (p - y)
-        s += d * d
-    return float(s / n)
+    probs = [min(1.0, max(0.0, float(p))) for p in y_prob]
+    trues = [1 if t else 0 for t in y_true]
+    return float(statistics.fmean((p - t) ** 2 for p, t in zip(probs, trues)))
 
 
-def _classify_alerts(ece: float, n: int, min_labels: int, max_ece: float) -> List[str]:
-    alerts: List[str] = []
-    if n < min_labels:
-        alerts.append("low_n")
-    elif ece > max_ece:
-        alerts.append("high_ece")
-    else:
-        alerts.append("ok")
-    return alerts
+def _sanitize_version(s: str) -> str:
+    if not s:
+        return "unknown"
+    return "".join(ch if ch.isalnum() or ch in ("_", ".", "-") else "_" for ch in s)
 
 
-# ---------- plotting ----------
-def _plot_reliability(version: str, bins_data: List[Dict[str, Any]], ece: float, n: int, out_path: Path, is_demo: bool) -> None:
-    xs, ys, ws = [], [], []
-    for b in bins_data:
-        ph = b.get("p_hat")
-        emp = b.get("emp")
-        if emp is None:
-            continue
-        xs.append(ph)
-        ys.append(emp)
-        ws.append(b.get("n", 0))
+# ---------- main section ----------
 
-    _ensure_dir(out_path.parent)
-    plt.figure(figsize=(6.4, 3.6), dpi=140)
-    # diagonal
-    plt.plot([0, 1], [0, 1], linestyle="--", linewidth=1)
-    # curve
-    if xs:
-        plt.plot(xs, ys, marker="o")
-    plt.xlabel("predicted probability (p̂)")
-    plt.ylabel("empirical positive rate")
-    title = f"Reliability — {version} (ECE={ece:.3f}, n={n})"
-    if is_demo:
-        title += " [demo]"
-    plt.title(title)
-    plt.xlim(0.0, 1.0)
-    plt.ylim(0.0, 1.0)
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
-
-
-# ---------- main entry ----------
 def append(md: List[str], ctx: SummaryContext) -> None:
-    """
-    Build per-version calibration metrics & reliability curves.
-    Writes:
-      - models/calibration_reliability.json
-      - artifacts/cal_reliability_<version>.png (one per version)
-    Appends markdown summary lines.
-    """
     models_dir = ctx.models_dir
-    logs_dir = ctx.logs_dir  # not used here, but ctx is consistent
     window_h = int(os.getenv("MW_CAL_WINDOW_H", "72"))
     join_min = int(os.getenv("MW_THRESHOLD_JOIN_MIN", "5"))
-    n_bins = int(os.getenv("MW_CAL_BINS", "10"))
+    bins = int(os.getenv("MW_CAL_BINS", "10"))
     min_labels = int(os.getenv("MW_CAL_MIN_LABELS", "50"))
     max_ece = float(os.getenv("MW_CAL_MAX_ECE", "0.06"))
-    per_origin_toggle = os.getenv("MW_CAL_PER_ORIGIN", "false").lower() in ("1", "true", "yes")
-
-    artifacts_dir = Path("artifacts")
-    _ensure_dir(artifacts_dir)
+    # per_origin toggle reserved for later polish; compute top-level per-version for now
+    # per_origin = os.getenv("MW_CAL_PER_ORIGIN", "false").lower() in ("1","true","yes")
 
     now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(hours=window_h)
+    t_cut = now - timedelta(hours=window_h)
 
-    # load logs
-    trig = _read_jsonl(models_dir / "trigger_history.jsonl")
-    lab = _read_jsonl(models_dir / "label_feedback.jsonl")
-    trig = [t for t in trig if (parse_ts(t.get("timestamp")) or now) >= cutoff]
-    lab = [l for l in lab if (parse_ts(l.get("timestamp")) or now) >= cutoff]
+    # Load data
+    trig_rows = _load_jsonl(models_dir / "trigger_history.jsonl")
+    lab_rows = _load_jsonl(models_dir / "label_feedback.jsonl")
 
-    # join
-    joined = _nearest_join_labels_to_triggers(lab, trig, join_min)
+    # Filter by window and minimally valid fields
+    trig_rows = [
+        r for r in trig_rows
+        if parse_ts(r.get("timestamp")) and parse_ts(r.get("timestamp")) >= t_cut
+           and r.get("origin") and r.get("adjusted_score") is not None
+    ]
+    lab_rows = [
+        r for r in lab_rows
+        if parse_ts(r.get("timestamp")) and parse_ts(r.get("timestamp")) >= t_cut
+           and r.get("origin") and (r.get("label") is True or r.get("label") is False)
+    ]
 
-    # per-version collect (prob,label) and optional per-origin
-    per_version_probs: DefaultDict[str, List[float]] = defaultdict(list)
-    per_version_true: DefaultDict[str, List[int]] = defaultdict(list)
-    per_version_origin: DefaultDict[str, DefaultDict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
-    per_version_origin_prob: DefaultDict[str, DefaultDict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    # Join
+    joined = _nearest_join(lab_rows, trig_rows, join_min)
 
-    for l, t in joined:
-        if t is None:
-            continue  # can't evaluate calibration without a matched score
-        prob = _clip01(t.get("adjusted_score"))
-        if prob is None:
+    # Group by model_version (prefer label.model_version else trigger.model_version)
+    by_ver: Dict[str, Dict[str, List[Any]]] = defaultdict(lambda: {"y_prob": [], "y_true": []})
+    for lab, trig in joined:
+        ver = lab.get("model_version") or (trig or {}).get("model_version") or "unknown"
+        if not trig:
+            # if no matched trigger, we cannot assign a probability reliably
             continue
-        y = l.get("label")
-        if y is True:
-            yv = 1
-        elif y is False:
-            yv = 0
+        p = float(trig.get("adjusted_score", 0.0))
+        y = 1 if lab.get("label") is True else 0
+        by_ver[ver]["y_prob"].append(p)
+        by_ver[ver]["y_true"].append(y)
+
+    # Demo seed if empty and demo mode
+    demo_seeded = False
+    if not by_ver and (ctx.is_demo or is_demo_mode()):
+        demo_seeded = True
+        # Seed two versions with plausible shapes
+        # v_good: probs ~ [0.1]*m + [0.8]*m, labels aligned
+        vg_prob = [0.1] * 12 + [0.8] * 12
+        vg_true = [0] * 12 + [1] * 12
+        by_ver["v_good"] = {"y_prob": vg_prob, "y_true": vg_true}
+        # v_bad: probs ~0.9 but ~50% positives
+        vb_prob = [0.9] * 24
+        vb_true = [1 if i % 2 == 0 else 0 for i in range(24)]
+        by_ver["v_bad"] = {"y_prob": vb_prob, "y_true": vb_true}
+
+    # Compute metrics and plots
+    per_version_rows: List[Dict[str, Any]] = []
+    artifacts_dir = ctx.logs_dir.parent / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    for ver, d in by_ver.items():
+        y_prob = d["y_prob"]
+        y_true = d["y_true"]
+        n = len(y_prob)
+
+        ece, bins_list = _ece_and_bins(y_prob, y_true, bins)
+        brier = _brier(y_prob, y_true)
+
+        alerts: List[str] = []
+        if n < min_labels:
+            alerts.append("low_n")
+        elif ece > max_ece:
+            alerts.append("high_ece")
         else:
-            continue
+            alerts.append("ok")
 
-        ver = l.get("model_version") or t.get("model_version") or "unknown"
-        org = (l.get("origin") or t.get("origin") or "unknown")
-
-        per_version_probs[ver].append(prob)
-        per_version_true[ver].append(yv)
-        if per_origin_toggle:
-            per_version_origin[ver][org].append(yv)
-            per_version_origin_prob[ver][org].append(prob)
-
-    # compute metrics
-    per_version_out: List[Dict[str, Any]] = []
-    for ver in sorted(per_version_probs.keys()):
-        probs = per_version_probs[ver]
-        trues = per_version_true[ver]
-        n = len(probs)
-
-        ece, bins_data = _ece_and_bins(probs, trues, n_bins)
-        brier = _brier(probs, trues)
-        alerts = _classify_alerts(ece, n, min_labels, max_ece)
-
-        # optional per-origin worst ECEs
-        worst_origins: List[Tuple[str, float, int]] = []
-        if per_origin_toggle:
-            for org, ys in per_version_origin[ver].items():
-                ps = per_version_origin_prob[ver][org]
-                e_org, _ = _ece_and_bins(ps, ys, n_bins)
-                worst_origins.append((org, e_org, len(ps)))
-            worst_origins.sort(key=lambda x: x[1], reverse=True)
-            worst_origins = worst_origins[:3]
-
-        # plot per version
-        png_path = artifacts_dir / f"cal_reliability_{ver}.png"
-        _plot_reliability(ver, bins_data, ece, n, png_path, ctx.is_demo)
-
-        row: Dict[str, Any] = {
+        per_version_rows.append({
             "version": ver,
-            "ece": round(float(ece), 6),
-            "brier": round(float(brier), 6),
+            "ece": round(ece, 6),
+            "brier": round(brier, 6),
             "n": int(n),
-            "bins": bins_data,
+            "bins": [{"p_hat": round(b["p_hat"], 6), "emp": round(b["emp"], 6), "n": b["n"]} for b in bins_list],
             "alerts": alerts,
-            "demo": False,
-        }
-        if per_origin_toggle:
-            row["worst_origins"] = [
-                {"origin": o, "ece": round(e, 6), "n": int(nn)} for (o, e, nn) in worst_origins
-            ]
-        per_version_out.append(row)
+            "demo": bool(demo_seeded),
+        })
 
-    # demo seed if empty
-    if not per_version_out and ctx.is_demo:
-        # synthesize two plausible versions
-        demo_versions = [
-            ("v0.6.2", 0.04, 0.16, 120),
-            ("v0.6.1", 0.09, 0.18, 80),
-        ]
-        for ver, ece_v, brier_v, n_v in demo_versions:
-            # build a near-diagonal with slight bias
-            xs = [i / n_bins + 0.5 / n_bins for i in range(n_bins)]
-            ys = [min(1.0, max(0.0, x + (0.02 if ver.endswith("2") else -0.03))) for x in xs]
-            bins_data = [{"p_hat": round(x, 4), "emp": round(y, 4), "n": max(1, n_v // n_bins)} for x, y in zip(xs, ys)]
-            _plot_reliability(ver, bins_data, ece_v, n_v, artifacts_dir / f"cal_reliability_{ver}.png", True)
-            per_version_out.append({
-                "version": ver,
-                "ece": ece_v,
-                "brier": brier_v,
-                "n": n_v,
-                "bins": bins_data,
-                "alerts": ["ok"] if ece_v <= max_ece and n_v >= min_labels else (["low_n"] if n_v < min_labels else ["high_ece"]),
-                "demo": True,
-            })
+        # Plot reliability curve for this version
+        # Use only non-empty bins for markers; draw diagonal for reference.
+        xs = [b["p_hat"] for b in bins_list if b["n"] > 0]
+        ys = [b["emp"] for b in bins_list if b["n"] > 0]
 
-    # write JSON
-    out_json = models_dir / "calibration_reliability.json"
-    payload = {
+        fig, ax = plt.subplots(figsize=(5, 5), dpi=120)
+        ax.plot([0, 1], [0, 1], linestyle="--", linewidth=1)  # reference diagonal
+        if xs:
+            ax.plot(xs, ys, marker="o")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        title_demo = " (demo)" if demo_seeded else ""
+        ax.set_title(f"Reliability — {ver}{title_demo}")
+        ax.set_xlabel("Predicted probability (bin mean)")
+        ax.set_ylabel("Empirical positive rate")
+
+        fname = artifacts_dir / f"cal_reliability_{_sanitize_version(ver)}_.png"
+        # match tests expecting 'cal_reliability_<version>.png'
+        fname = artifacts_dir / f"cal_reliability_{_sanitize_version(ver)}.png"
+        fig.tight_layout()
+        fig.savefig(fname)
+        plt.close(fig)
+
+    # Persist JSON
+    out = {
         "window_hours": window_h,
-        "bins": n_bins,
+        "bins": bins,
         "min_labels": min_labels,
         "max_ece": max_ece,
         "generated_at": _iso(now),
-        "per_version": per_version_out,
-        "demo": ctx.is_demo and (not per_version_out or any(r.get("demo") for r in per_version_out)),
+        "per_version": per_version_rows,
+        "demo": bool(demo_seeded),
     }
-    out_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    (models_dir / "calibration_reliability.json").write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
 
-    # markdown
-    tag = " (demo)" if payload.get("demo") else ""
-    md.append(f"### 🧮 Calibration & Reliability ({window_h}h){tag}")
-    if per_version_out:
-        for r in per_version_out:
-            alerts = ",".join(r.get("alerts", []))
-            md.append(f"- `{r['version']}` → ECE={float(r['ece']):.3f} | Brier={float(r['brier']):.3f} | n={int(r['n'])} [{alerts}]")
+    # Markdown
+    md.append(f"### 🧮 Calibration & Reliability ({window_h}h){' (demo)' if demo_seeded else ''}")
+    if per_version_rows:
+        for r in per_version_rows:
+            ver = r["version"]
+            md.append(
+                f"- `{ver}` → ECE={r['ece']:.3f} | Brier={r['brier']:.3f} | n={r['n']} "
+                f"[{','.join(r['alerts'])}]"
+            )
     else:
-        md.append("_no calibration data available_")
+        md.append("_no calibration data in window_")
