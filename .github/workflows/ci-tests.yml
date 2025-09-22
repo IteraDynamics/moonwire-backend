@@ -118,8 +118,14 @@ jobs:
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
-          # --- optional: window for accuracy-by-version snapshot (default 72h) ---
+          # accuracy-by-version snapshot
           MW_ACCURACY_WINDOW_H: "72"
+          # calibration & reliability defaults (new)
+          MW_CAL_WINDOW_H: "72"
+          MW_CAL_BINS: "10"
+          MW_CAL_MIN_LABELS: "50"
+          MW_CAL_MAX_ECE: "0.06"
+          MW_CAL_PER_ORIGIN: "false"
         run: python scripts/mw_demo_summary.py
 
       # --- Upload JSON artifacts produced by summary sections ---
@@ -220,6 +226,25 @@ jobs:
         with:
           name: threshold-auto-apply
           path: models/threshold_auto_apply.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- Calibration & Reliability (new) ---
+      - name: Upload calibration reliability JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-reliability
+          path: models/calibration_reliability.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload calibration reliability plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-reliability-plots
+          path: artifacts/cal_reliability_*.png
           if-no-files-found: ignore
           retention-days: 14
 
