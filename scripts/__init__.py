@@ -1,16 +1,9 @@
-# marks "summary_sections" as a package
-from .common import SummaryContext
+# Make "scripts" a package.
+# Avoid importing a non-existent "scripts.common".
+# For convenience (and backward-compat), re-export SummaryContext from summary_sections.common if available.
 
-# optional convenience re-exports
-from . import score_distribution
-from . import signal_quality_per_origin
-from . import score_distribution_per_origin
-from . import calibration_reliability_trend   # ⬅️ NEW v0.6.5
-
-__all__ = [
-    "SummaryContext",
-    "score_distribution",
-    "signal_quality_per_origin",
-    "score_distribution_per_origin",
-    "calibration_reliability_trend",  # ⬅️ NEW
-]
+try:
+    from .summary_sections.common import SummaryContext  # noqa: F401
+    __all__ = ["SummaryContext"]
+except Exception:
+    __all__ = []
