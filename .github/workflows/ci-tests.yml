@@ -120,12 +120,14 @@ jobs:
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
           # accuracy-by-version snapshot
           MW_ACCURACY_WINDOW_H: "72"
-          # calibration & reliability defaults (new)
+          # calibration & reliability defaults
           MW_CAL_WINDOW_H: "72"
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
-          MW_CAL_PER_ORIGIN: "false"
+          # NEW: enable per-origin section + align paths
+          MW_CAL_PER_ORIGIN: "true"
+          ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
         run: python scripts/mw_demo_summary.py
 
       # --- Upload JSON artifacts produced by summary sections ---
@@ -229,7 +231,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- Calibration & Reliability (new) ---
+      # --- Calibration & Reliability (existing per-version) ---
       - name: Upload calibration reliability JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -248,6 +250,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- NEW: Per-origin calibration & reliability ---
+      - name: Upload calibration per-origin JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-per-origin
+          path: models/calibration_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       # --- Show artifacts & publish summary ---
       - name: Show artifacts (debug)
         if: ${{ success() }}
@@ -256,6 +268,8 @@ jobs:
           ls -lah
           echo "Artifacts in ./artifacts:"
           ls -lah artifacts || true
+          echo "Models in ./models:"
+          ls -lah models || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
 
       - name: Publish CI summary
