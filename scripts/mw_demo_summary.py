@@ -222,6 +222,7 @@ def main():
     score_distribution_per_origin.append(md, ctx)
     calibration_reliability.append(md, ctx)
     calibration_per_origin.append(md, ctx)
+    calibration_reliability_trend.append(md, ctx)
 
     # 3) Thresholds & explainability (what would/wouldn’t fire, and why)
     dynamic_vs_static_thresholds.append(md, ctx)
