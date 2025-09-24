@@ -8,7 +8,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# --- Small utils ----------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
+# Small utils
+# ----------------------------------------------------------------------------- #
 
 ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -18,7 +20,7 @@ def _iso(dt: datetime) -> str:
 
 
 def _parse_ts(s: str) -> datetime:
-    # Accept both '...Z' and general ISO with offsets
+    """Parse timestamps tolerant of 'Z' and ISO offsets."""
     try:
         if s.endswith("Z"):
             return datetime.strptime(s, ISO_FMT).replace(tzinfo=timezone.utc)
@@ -27,7 +29,6 @@ def _parse_ts(s: str) -> datetime:
             x = x.replace(tzinfo=timezone.utc)
         return x.astimezone(timezone.utc)
     except Exception:
-        # Best-effort: treat as UTC naive
         return datetime.fromisoformat(s.replace("Z", "")).replace(tzinfo=timezone.utc)
 
 
@@ -42,6 +43,7 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
         try:
             out.append(json.loads(line))
         except Exception:
+            # tolerate bad lines
             continue
     return out
 
@@ -50,7 +52,9 @@ def _ensure_dir(d: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
 
 
-# --- Metrics --------------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
+# Metrics
+# ----------------------------------------------------------------------------- #
 
 @dataclass
 class BucketStats:
@@ -90,7 +94,9 @@ def _brier(scores: List[float], labels: List[bool]) -> float:
     return float(sum((float(s) - (1.0 if y else 0.0)) ** 2 for s, y in zip(scores, labels)) / len(scores))
 
 
-# --- Core computation ------------------------------------------------------------
+# ----------------------------------------------------------------------------- #
+# Core computation
+# ----------------------------------------------------------------------------- #
 
 def _bucket_floor(ts: datetime, bucket_minutes: int) -> datetime:
     mins = (ts.minute // bucket_minutes) * bucket_minutes
@@ -148,7 +154,9 @@ def _compute_trend(
     return stats
 
 
-# --- Public API (used by tests) -------------------------------------------------
+# ----------------------------------------------------------------------------- #
+# Public API (used by tests)
+# ----------------------------------------------------------------------------- #
 
 def append(md: List[str], ctx) -> None:
     """
@@ -175,7 +183,7 @@ def append(md: List[str], ctx) -> None:
 
     stats = _compute_trend(joined, dim=dim, window_h=window_h, bucket_min=bucket_min, bins=ece_bins)
 
-    # Build series list with a stable 'key' for tests
+    # Build series with mandatory "key"
     series: List[Dict[str, Any]] = []
     for s in stats:
         bucket_iso = _iso(s.bucket_start)
@@ -191,7 +199,11 @@ def append(md: List[str], ctx) -> None:
             }
         )
 
-    # Wrap in object with "series" (what tests expect) + some meta
+    # Final sanitation (defensive): ensure every element has "key"
+    for i, it in enumerate(series):
+        if "key" not in it or not it["key"]:
+            it["key"] = f"{it.get('dim','dim')}:{it.get('value','unknown')}:{it.get('bucket_start','') or i}"
+
     obj = {
         "series": series,
         "meta": {
@@ -203,16 +215,13 @@ def append(md: List[str], ctx) -> None:
         },
     }
 
-    # primary filename expected by tests
-    trend_json = models_dir / "calibration_reliability_trend.json"
-    trend_json.write_text(json.dumps(obj, indent=2))
-
-    # back-compat filename used elsewhere
+    # Primary file the test reads
+    (models_dir / "calibration_reliability_trend.json").write_text(json.dumps(obj, indent=2))
+    # Back-compat name
     (models_dir / "calibration_trend.json").write_text(json.dumps(obj, indent=2))
 
-    # Markdown
+    # Minimal markdown summary
     md.append("### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)")
-
     if not stats:
         present = sorted({str(r.get(dim) or "unknown") for r in trig})
         if present:
@@ -229,6 +238,4 @@ def append(md: List[str], ctx) -> None:
             latest_by_val[s.dim_value] = s
 
     for val, s in sorted(latest_by_val.items(), key=lambda kv: kv[0].lower()):
-        ece_str = f"{s.ece:.3f}"
-        brier_str = f"{s.brier:.3f}"
-        md.append(f"{val}  → ECE {ece_str} | Brier {brier_str} | n {s.n}")
+        md.append(f"{val}  → ECE {s.ece:.3f} | Brier {s.brier:.3f} | n {s.n}")
