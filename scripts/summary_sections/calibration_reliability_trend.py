@@ -1,215 +1,232 @@
 from __future__ import annotations
 
-import os, json, statistics
-from pathlib import Path
-from datetime import datetime, timezone, timedelta
+import json
+import os
 from collections import defaultdict
-from typing import List, Dict, Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import matplotlib
-matplotlib.use("Agg")  # headless
-import matplotlib.pyplot as plt
+# --- Small utils ----------------------------------------------------------------
 
-from .common import SummaryContext, parse_ts, _iso, ensure_dir, is_demo_mode
-
-# ---- Config defaults ----
-_LOW_N = 30
-_HIGH_ECE = 0.06
-_DEFAULT_BINS = int(os.getenv("MW_CAL_BINS", "10"))
+ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def _floor_bucket(ts: datetime, bucket_min: int) -> datetime:
-    base = ts.replace(second=0, microsecond=0)
-    delta = (base.minute + base.hour * 60) % bucket_min
-    return base - timedelta(minutes=delta)
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime(ISO_FMT)
 
 
-def _compute_metrics(y_true: List[int], y_prob: List[float], bins: int) -> tuple[float, float]:
-    if not y_true:
-        return 0.0, 0.0
-    probs = [min(1.0, max(0.0, float(p))) for p in y_prob]
-    trues = [1 if y else 0 for y in y_true]
-
-    # Brier
-    brier = statistics.fmean((p - t) ** 2 for p, t in zip(probs, trues))
-
-    # ECE
-    edges = [i / bins for i in range(bins + 1)]
-    per_bin = [[] for _ in range(bins)]
-    for i, p in enumerate(probs):
-        b = min(int(p * bins), bins - 1)
-        per_bin[b].append(i)
-    ece = 0.0
-    N = len(probs)
-    for b, idxs in enumerate(per_bin):
-        if not idxs:
-            continue
-        p_mean = statistics.fmean(probs[i] for i in idxs)
-        t_mean = statistics.fmean(trues[i] for i in idxs)
-        ece += (len(idxs) / N) * abs(t_mean - p_mean)
-    return float(ece), float(brier)
+def _parse_ts(s: str) -> datetime:
+    # Accept both '...Z' and general ISO with offsets
+    try:
+        if s.endswith("Z"):
+            return datetime.strptime(s, ISO_FMT).replace(tzinfo=timezone.utc)
+        x = datetime.fromisoformat(s)
+        if x.tzinfo is None:
+            x = x.replace(tzinfo=timezone.utc)
+        return x.astimezone(timezone.utc)
+    except Exception:
+        # Best-effort: treat as UTC naive
+        return datetime.fromisoformat(s.replace("Z", "")).replace(tzinfo=timezone.utc)
 
 
-def _load_jsonl(path: Path) -> List[dict]:
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
-    rows: List[dict] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    rows.append(obj)
-            except Exception:
-                continue
-    return rows
-
-
-def _bucket_join(triggers: List[dict], labels: List[dict],
-                 window_h: int, bucket_min: int,
-                 dim: str) -> Dict[str, Dict[datetime, Dict[str, Any]]]:
-    now = datetime.now(timezone.utc)
-    t_start = now - timedelta(hours=window_h)
-
-    # Map labels by (id)
-    label_by_id: Dict[str, int] = {}
-    for r in labels:
-        rid = r.get("id")
-        if not rid:
+    out: List[Dict[str, Any]] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
             continue
-        lab = r.get("label")
-        lab_i = 1 if lab is True or str(lab).lower() in ("1","true","yes") else 0
-        label_by_id[rid] = lab_i
-
-    series: Dict[str, Dict[datetime, Dict[str, Any]]] = defaultdict(lambda: defaultdict(lambda: {"y": [], "p": []}))
-    for tr in triggers:
-        rid = tr.get("id")
-        if not rid or rid not in label_by_id:
-            continue
-        ts = parse_ts(tr.get("ts") or tr.get("timestamp"))
-        if not ts or ts < t_start or ts > now:
-            continue
-        key = tr.get("origin") if dim == "origin" else tr.get("model_version") or "unknown"
-        p = tr.get("score") or tr.get("adjusted_score")
         try:
-            p = float(p)
+            out.append(json.loads(line))
         except Exception:
             continue
-        b = _floor_bucket(ts, bucket_min)
-        series[key][b]["y"].append(label_by_id[rid])
-        series[key][b]["p"].append(p)
-    return series
+    return out
 
 
-def _synthesize_demo(dim: str, buckets: List[datetime]) -> Dict[str, Dict[datetime, Dict[str, Any]]]:
-    out: Dict[str, Dict[datetime, Dict[str, Any]]] = defaultdict(dict)
-    keys = ["reddit","twitter","rss_news"] if dim=="origin" else ["v_good","v_bad"]
-    import random
-    for k in keys:
-        for i,b in enumerate(buckets[-3:]):
-            out[k][b] = {
-                "y": [1 if random.random() < 0.5 else 0 for _ in range(40)],
-                "p": [random.random() for _ in range(40)],
+def _ensure_dir(d: Path) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+
+
+# --- Metrics --------------------------------------------------------------------
+
+@dataclass
+class BucketStats:
+    bucket_start: datetime
+    dim_value: str  # origin or version
+    n: int
+    ece: float
+    brier: float
+
+
+def _ece(scores: List[float], labels: List[bool], bins: int = 10) -> float:
+    if not scores:
+        return 0.0
+    counts = [0] * bins
+    conf_sum = [0.0] * bins
+    acc_sum = [0.0] * bins
+    for s, y in zip(scores, labels):
+        s_clamped = min(0.999999, max(0.0, float(s)))
+        idx = min(bins - 1, int(s_clamped * bins))
+        counts[idx] += 1
+        conf_sum[idx] += s_clamped
+        acc_sum[idx] += 1.0 if y else 0.0
+    total = len(scores)
+    ece = 0.0
+    for k in range(bins):
+        if counts[k] == 0:
+            continue
+        avg_conf = conf_sum[k] / counts[k]
+        avg_acc = acc_sum[k] / counts[k]
+        ece += (counts[k] / total) * abs(avg_acc - avg_conf)
+    return float(ece)
+
+
+def _brier(scores: List[float], labels: List[bool]) -> float:
+    if not scores:
+        return 0.0
+    return float(sum((float(s) - (1.0 if y else 0.0)) ** 2 for s, y in zip(scores, labels)) / len(scores))
+
+
+# --- Core computation ------------------------------------------------------------
+
+def _bucket_floor(ts: datetime, bucket_minutes: int) -> datetime:
+    mins = (ts.minute // bucket_minutes) * bucket_minutes
+    return ts.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=mins)
+
+
+def _join_triggers_labels(
+    triggers: Iterable[Dict[str, Any]],
+    labels: Iterable[Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    lab_by_id: Dict[str, Dict[str, Any]] = {r["id"]: r for r in labels if "id" in r}
+    out: Dict[str, Dict[str, Any]] = {}
+    for t in triggers:
+        tid = t.get("id")
+        if not tid:
+            continue
+        if tid in lab_by_id:
+            out[tid] = {
+                "id": tid,
+                "timestamp": t.get("timestamp"),
+                "origin": t.get("origin"),
+                "version": t.get("version"),
+                "score": float(t.get("score", 0.0)),
+                "label": bool(lab_by_id[tid].get("label")),
             }
     return out
 
 
-def append(md: List[str], ctx: SummaryContext) -> None:
-    window_h = int(os.getenv("MW_CAL_TREND_WINDOW_H", "72"))
-    bucket_min = int(os.getenv("MW_CAL_TREND_BUCKET_MIN", "180"))
-    dim = os.getenv("MW_CAL_TREND_DIM", "origin").lower()
-    bins = _DEFAULT_BINS
-
-    trig_rows = _load_jsonl(ctx.logs_dir / "trigger_history.jsonl")
-    lab_rows = _load_jsonl(ctx.logs_dir / "label_feedback.jsonl")
-
-    series = _bucket_join(trig_rows, lab_rows, window_h, bucket_min, dim)
-
-    # build buckets timeline
+def _compute_trend(
+    joined: Dict[str, Dict[str, Any]],
+    dim: str,
+    window_h: int,
+    bucket_min: int,
+    bins: int = 10,
+) -> List[BucketStats]:
     now = datetime.now(timezone.utc)
-    t_start = now - timedelta(hours=window_h)
-    buckets: List[datetime] = []
-    t = _floor_bucket(t_start, bucket_min)
-    while t <= _floor_bucket(now, bucket_min):
-        buckets.append(t)
-        t += timedelta(minutes=bucket_min)
+    start_time = now - timedelta(hours=window_h)
 
-    demo = False
-    if (not series or all(len(v)==0 for v in series.values())) and (ctx.is_demo or is_demo_mode()):
-        demo = True
-        series = _synthesize_demo(dim, buckets)
+    groups: Dict[Tuple[datetime, str], List[Tuple[float, bool]]] = defaultdict(list)
+    for r in joined.values():
+        ts = _parse_ts(r["timestamp"])
+        if ts < start_time or ts > now:
+            continue
+        dim_val = str(r.get(dim) or "unknown")
+        bstart = _bucket_floor(ts, bucket_min)
+        groups[(bstart, dim_val)].append((float(r["score"]), bool(r["label"])))
 
-    results = []
-    for key, per_b in series.items():
-        pts = []
-        for b in buckets:
-            y = per_b.get(b, {}).get("y", [])
-            p = per_b.get(b, {}).get("p", [])
-            if not y:
-                continue
-            ece, brier = _compute_metrics(y,p,bins)
-            n = len(y)
-            pts.append({
-                "bucket_start": _iso(b),
-                "bucket_mid": _iso(b + timedelta(minutes=bucket_min//2)),
-                "n": n,
-                "ece": round(ece,4),
-                "brier": round(brier,4),
-                "low_n": n < _LOW_N,
-                "high_ece": ece > _HIGH_ECE,
-            })
-        results.append({"key": key, "points": pts})
+    stats: List[BucketStats] = []
+    for (bstart, dim_val), pairs in sorted(groups.items(), key=lambda kv: kv[0][0]):
+        scores = [s for s, _ in pairs]
+        labels = [y for _, y in pairs]
+        e = _ece(scores, labels, bins=bins)
+        b = _brier(scores, labels)
+        stats.append(BucketStats(bucket_start=bstart, dim_value=dim_val, n=len(pairs), ece=e, brier=b))
+    return stats
 
-    # Write JSON
-    out = {
-        "window_hours": window_h,
-        "bucket_minutes": bucket_min,
-        "dimension": dim,
-        "generated_at": _iso(now),
-        "demo": demo,
-        "series": results,
+
+# --- Public API (used by tests) -------------------------------------------------
+
+def append(md: List[str], ctx) -> None:
+    """
+    Build calibration trend stats and emit markdown summary lines.
+    Writes both:
+      - models/calibration_reliability_trend.json (expected by tests)
+      - models/calibration_trend.json            (back-compat)
+    """
+    models_dir = Path(getattr(ctx, "models_dir", "models"))
+    logs_dir = Path(getattr(ctx, "logs_dir", "logs"))
+    artifacts_dir = Path(getattr(ctx, "artifacts_dir", "artifacts"))
+    _ensure_dir(models_dir)
+    _ensure_dir(logs_dir)
+    _ensure_dir(artifacts_dir)
+
+    window_h = int(os.getenv("MW_CAL_TREND_WINDOW_H", "72"))
+    bucket_min = int(os.getenv("MW_CAL_TREND_BUCKET_MIN", "120"))  # 2h default
+    dim = os.getenv("MW_CAL_TREND_DIM", "origin")
+    ece_bins = int(os.getenv("MW_CAL_ECE_BINS", "10"))
+
+    trig = _read_jsonl(logs_dir / "trigger_history.jsonl")
+    labs = _read_jsonl(logs_dir / "label_feedback.jsonl")
+    joined = _join_triggers_labels(trig, labs)
+
+    stats = _compute_trend(joined, dim=dim, window_h=window_h, bucket_min=bucket_min, bins=ece_bins)
+
+    # Build series list
+    series: List[Dict[str, Any]] = []
+    for s in stats:
+        series.append(
+            {
+                "bucket_start": _iso(s.bucket_start),
+                "dim": dim,
+                "value": s.dim_value,
+                "n": s.n,
+                "ece": s.ece,
+                "brier": s.brier,
+            }
+        )
+
+    # Wrap in object with "series" (what tests expect) + some meta
+    obj = {
+        "series": series,
+        "meta": {
+            "dim": dim,
+            "window_h": window_h,
+            "bucket_min": bucket_min,
+            "ece_bins": ece_bins,
+            "generated_at": _iso(datetime.now(timezone.utc)),
+        },
     }
-    (ctx.models_dir / "calibration_reliability_trend.json").write_text(
-        json.dumps(out, ensure_ascii=False), encoding="utf-8"
-    )
 
-    # Plots
-    art_dirs = [
-        Path("artifacts"),
-        ctx.logs_dir.parent / "artifacts",
-        ctx.models_dir.parent / "artifacts",
-    ]
-    for metric in ("ece","brier"):
-        fig, ax = plt.subplots(figsize=(9,3))
-        for r in results:
-            xs = [parse_ts(p["bucket_mid"]) for p in r["points"]]
-            ys = [p[metric] for p in r["points"]]
-            if xs and ys:
-                ax.plot(xs, ys, marker="o", label=r["key"])
-        ax.set_title(f"Calibration Trend — {metric.upper()} ({window_h}h)" + (" (demo)" if demo else ""))
-        ax.set_ylabel(metric)
-        ax.legend(loc="upper left", fontsize=8)
-        plt.xticks(rotation=45, ha="right")
-        fig.tight_layout()
-        last_path = None
-        for d in art_dirs:
-            try:
-                ensure_dir(d)
-                p = d / f"calibration_trend_{metric}.png"
-                fig.savefig(p, dpi=150)
-                last_path = p
-            except Exception:
-                continue
-        plt.close(fig)
+    # primary filename expected by tests
+    trend_json = models_dir / "calibration_reliability_trend.json"
+    trend_json.write_text(json.dumps(obj, indent=2))
+
+    # back-compat filename used earlier in the work
+    (models_dir / "calibration_trend.json").write_text(json.dumps(obj, indent=2))
+
     # Markdown
-    md.append(f"🧮 Calibration & Reliability Trend ({window_h}h){' (demo)' if demo else ''}")
-    for r in results:
-        pts = r["points"]
-        if len(pts) >= 2:
-            e0, e1 = pts[0]["ece"], pts[-1]["ece"]
-            b0, b1 = pts[0]["brier"], pts[-1]["brier"]
-            trend_e = "upward" if e1>e0 else "downward" if e1<e0 else "steady"
-            trend_b = "upward" if b1>b0 else "downward" if b1<b0 else "steady"
-            md.append(f"{r['key']:<8} → ECE {trend_e} ({e0:.2f}→{e1:.2f}), Brier {trend_b} ({b0:.2f}→{b1:.2f})")
-    md.append(f"- saved: artifacts/calibration_trend_ece.png")
-    md.append(f"- saved: artifacts/calibration_trend_brier.png")
+    md.append("### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)")
+
+    if not stats:
+        present = sorted({str(r.get(dim) or "unknown") for r in trig})
+        if present:
+            for v in present:
+                md.append(f"{v}  → (no joined labels in window)")
+        else:
+            md.append("_no data available_")
+        return
+
+    latest_by_val: Dict[str, BucketStats] = {}
+    for s in stats:
+        cur = latest_by_val.get(s.dim_value)
+        if (cur is None) or (s.bucket_start > cur.bucket_start):
+            latest_by_val[s.dim_value] = s
+
+    for val, s in sorted(latest_by_val.items(), key=lambda kv: kv[0].lower()):
+        ece_str = f"{s.ece:.3f}"
+        brier_str = f"{s.brier:.3f}"
+        md.append(f"{val}  → ECE {ece_str} | Brier {brier_str} | n {s.n}")
