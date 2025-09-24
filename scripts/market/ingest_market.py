@@ -8,6 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+# plotting (safe for headless CI)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from .coingecko_client import CoinGeckoClient
 
 
@@ -52,7 +57,6 @@ def _compute_returns(series: List[Tuple[int, float]]) -> Dict[str, float]:
     }
     out: Dict[str, float] = {}
     for k, tgt in targets.items():
-        # find closest at/after tgt
         prior = None
         for t, p in by_ts:
             if t >= tgt:
@@ -85,27 +89,21 @@ def build_market_context(client: CoinGeckoClient, cfg: IngestConfig) -> Dict[str
         # chart["prices"] is [[ms, price], ...]
         pts = []
         for ms, price in chart.get("prices", []):
-            # clamp/validate
             try:
                 t = int(ms // 1000)
                 p = float(price)
             except Exception:
                 continue
             pts.append({"t": t, "price": p})
-        # restrict to last window_h hours
         if pts:
             cutoff = pts[-1]["t"] - window_h * 3600
             pts = [x for x in pts if x["t"] >= cutoff]
         series[coin] = pts
 
-        # returns
         ret_series = [(x["t"], x["price"]) for x in pts]
         returns[coin] = _compute_returns(ret_series)
 
-    # latest price per coin for headline
-    latest_prices: Dict[str, float] = {}
-    for c, pts in series.items():
-        latest_prices[c] = float(pts[-1]["price"]) if pts else 0.0
+    latest_prices: Dict[str, float] = {c: (pts[-1]["price"] if pts else 0.0) for c, pts in series.items()}
 
     ctx = {
         "generated_at": _iso(),
@@ -159,9 +157,56 @@ def build_market_context_demo(cfg: IngestConfig) -> Dict[str, Any]:
     }
 
 
+def _render_charts(ctx: Dict[str, Any], artifacts_dir: Path) -> None:
+    """
+    Create two PNGs per coin:
+      - market_trend_price_<coin>.png (price vs time)
+      - market_trend_returns_<coin>.png (bars for h1/h24/h72)
+    """
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    coins = ctx.get("coins", [])
+    series = ctx.get("series", {})
+    returns = ctx.get("returns", {})
+    vs = ctx.get("vs", "usd")
+
+    for coin in coins:
+        pts = series.get(coin, [])
+        # --- Price chart ---
+        if pts:
+            xs = [datetime.fromtimestamp(p["t"], tz=timezone.utc) for p in pts]
+            ys = [float(p["price"]) for p in pts]
+
+            plt.figure(figsize=(7, 3.2))
+            plt.plot(xs, ys, linewidth=1.5)
+            plt.title(f"{coin.upper()} price (last {ctx.get('window_hours', 72)}h)")
+            plt.xlabel("time (UTC)")
+            plt.ylabel(f"price ({vs})")
+            plt.grid(True, alpha=0.25)
+            plt.tight_layout()
+            out_p = artifacts_dir / f"market_trend_price_{coin}.png"
+            plt.savefig(out_p, dpi=120)
+            plt.close()
+
+        # --- Returns bars ---
+        r = returns.get(coin, {"h1": 0.0, "h24": 0.0, "h72": 0.0})
+        labels = ["h1", "h24", "h72"]
+        vals = [float(r.get(k, 0.0)) * 100.0 for k in labels]
+
+        plt.figure(figsize=(5.2, 3.2))
+        plt.bar(labels, vals)
+        plt.axhline(0.0, linewidth=1)
+        plt.title(f"{coin.upper()} returns (%)")
+        plt.ylabel("%")
+        plt.tight_layout()
+        out_r = artifacts_dir / f"market_trend_returns_{coin}.png"
+        plt.savefig(out_r, dpi=120)
+        plt.close()
+
+
 def run_ingest(log_dir: Path, models_dir: Path, artifacts_dir: Path) -> Dict[str, Any]:
     """
-    Entry-point used by CI/tests. Writes models/market_context.json.
+    Entry-point used by CI/tests. Writes models/market_context.json and chart PNGs.
     Returns the context dict.
     """
     coins = [c.strip() for c in os.getenv("MW_CG_COINS", "bitcoin,ethereum,solana").split(",") if c.strip()]
@@ -188,12 +233,12 @@ def run_ingest(log_dir: Path, models_dir: Path, artifacts_dir: Path) -> Dict[str
             ctx["demo"] = True
             ctx["demo_reason"] = reason
 
-    # Persist JSON for other steps
+    # Persist JSON
     out_json = models_dir / "market_context.json"
     _write_json(out_json, ctx)
 
-    # (Optional) You could render charts into artifacts_dir here if desired.
-    # Tests only assert that market_context.json exists.
+    # Render charts to artifacts_dir (tests assert on these files)
+    _render_charts(ctx, artifacts_dir)
 
     return ctx
 
