@@ -108,8 +108,10 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"
-          MW_DEMO: "true"                 # ⬅️ NEW: enable demo for CoinGecko path in CI
+          DEMO_MODE: "true"              # keep other sections demo-friendly
+          MW_DEMO: "false"               # ⬅️ switch Market Context to REAL data
+          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}  # ⬅️ use CoinGecko Pro key
+          # MW_CG_BASE_URL: "https://pro-api.coingecko.com/api/v3"  # optional; client auto-switches when key is set
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
           # knobs for visibility in CI
@@ -126,10 +128,10 @@ jobs:
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
-          # NEW: enable per-origin section + align paths
+          # enable per-origin section + align paths
           MW_CAL_PER_ORIGIN: "true"
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
-          # Optional CoinGecko knobs (safe defaults for demo)
+          # CoinGecko knobs (safe defaults)
           MW_CG_COINS: "bitcoin,ethereum,solana"
           MW_CG_VS_CURRENCY: "usd"
           MW_CG_LOOKBACK_H: "72"
