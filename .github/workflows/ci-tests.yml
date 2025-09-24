@@ -123,7 +123,7 @@ jobs:
           DEMO_MODE: "true"              # keep other sections demo-friendly
           MW_DEMO: "false"               # Market Context should use REAL data
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
-          MW_CG_BASE_URL: "https://pro-api.coingecko.com/api/v3"
+          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
           # knobs for visibility in CI
