@@ -81,11 +81,11 @@ from scripts.summary_sections import (
     suppression_rate_by_origin,       # (v0.5.15)
     trigger_coverage_trend,           # (v0.5.14) trend chart
     trigger_suppression_trend,
-    calibration_reliability_trend,    # ⬅️ NEW v0.6.5 (imported so we can call it)
+    calibration_reliability_trend,    # v0.6.5
+    market_context,                   # ⬅️ NEW v0.6.6
 )
 
 # ---- Compatibility re-exports for any tests that import from mw_demo_summary ----
-# (These names match what some tests might import directly.)
 from scripts.summary_sections.common import (
     generate_demo_data_if_needed as generate_demo_data_if_needed,
     is_demo_mode as is_demo_mode,
@@ -204,13 +204,17 @@ def main():
         caches={},  # modules may place heavy intermediates here
     )
 
-    # ---------- call sections in the same order as the last green CI ----------
+    # ---------- call sections ----------
     header_overview.append(md, ctx, reviewers=reviewers, threshold=DEFAULT_THRESHOLD,
                            sig_id=sig_id, triggered_log=triggered_log)
-    # 1) Supply & stream activity (sets context like ctx.yield_data, trends)
+
+    # NEW: Market context near the top so others can reference returns
+    market_context.append(md, ctx)
+
+    # 1) Supply & stream activity
     source_yield_plan.append(md, ctx)
     origin_trends.append(md, ctx)
-    burst_detection.append(md, ctx)              # move earlier: belongs with “activity”
+    burst_detection.append(md, ctx)
     cross_origin_correlations.append(md, ctx)
     lead_lag.append(md, ctx)
     volatility_regimes.append(md, ctx)
@@ -223,30 +227,30 @@ def main():
     score_distribution_per_origin.append(md, ctx)
     calibration_reliability.append(md, ctx)
     calibration_per_origin.append(md, ctx)
-    calibration_reliability_trend.append(md, ctx)   # v0.6.5 — new trend chart
+    calibration_reliability_trend.append(md, ctx)
 
-    # 3) Thresholds & explainability (what would/wouldn’t fire, and why)
+    # 3) Thresholds & explainability
     dynamic_vs_static_thresholds.append(md, ctx)
     volatility_aware_thresholds.append(md, ctx)
     per_origin_thresholds.append(md, ctx)
     threshold_quality_per_origin.append(md, ctx)
     threshold_recommendations.append(md, ctx)
-    threshold_backtest.append(md, ctx) # v 0.6.1
-    threshold_auto_apply.append(md, ctx) # v0.6.2
+    threshold_backtest.append(md, ctx)
+    threshold_auto_apply.append(md, ctx)
     trigger_explainability.append(md, ctx)
 
-    # 4) Decisions & labels (what actually happened)
+    # 4) Decisions & labels
     trigger_history.append(md, ctx)
     label_feedback.append(md, ctx)
 
-    # 5) Quality & coverage (readability: coverage → suppression → precision → trend)
+    # 5) Quality & coverage
     signal_quality.append(md, ctx)
     signal_quality_per_origin.append(md, ctx)
     signal_quality_per_version.append(md, ctx)
     trigger_coverage_summary.append(md, ctx)
-    suppression_rate_by_origin.append(md, ctx)   # sits right next to coverage
+    suppression_rate_by_origin.append(md, ctx)
     trigger_precision_by_origin.append(md, ctx)
-    trigger_coverage_trend.append(md, ctx)       # chart after the summaries it visualizes
+    trigger_coverage_trend.append(md, ctx)
     trigger_suppression_trend.append(md, ctx)
 
     # 6) Performance snapshots
@@ -255,7 +259,7 @@ def main():
     source_precision_recall.append(md, ctx)
     calibration.append(md, ctx)
 
-    # 7) Training & drift (pipeline artifacts & health checks)
+    # 7) Training & drift
     training_data_snapshot.append(md, ctx)
     retrain_summary.append(md, ctx)
     latest_training_metadata.append(md, ctx)
