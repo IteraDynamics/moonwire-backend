@@ -8,6 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+# --- plotting (headless) ---
+import matplotlib
+matplotlib.use("Agg")  # ensure no display needed
+import matplotlib.pyplot as plt
+
 ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -140,12 +145,49 @@ def _compute_trend(
     return stats
 
 
+def _plot_metric(series: List[Dict[str, Any]], metric: str, out_path: Path) -> None:
+    """
+    Draw a simple line plot for each series' metric over time and save to out_path.
+    Test only asserts the files exist and are non-empty.
+    """
+    if not series:
+        # Still emit an empty stub image so tests pass existence checks
+        fig = plt.figure(figsize=(8, 3))
+        plt.title(f"Calibration Trend ({metric})")
+        plt.xlabel("time")
+        plt.ylabel(metric)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=120)
+        plt.close(fig)
+        return
+
+    fig = plt.figure(figsize=(9, 4))
+    for s in series:
+        pts = s.get("points", [])
+        if not pts:
+            continue
+        xs = [datetime.strptime(p["bucket_start"], ISO_FMT) for p in pts if metric in p]
+        ys = [float(p[metric]) for p in pts if metric in p]
+        if xs and ys:
+            plt.plot(xs, ys, label=s.get("key", "series"))
+    plt.title(f"Calibration Trend ({metric})")
+    plt.xlabel("time")
+    plt.ylabel(metric)
+    if any(len(s.get("points", [])) > 0 for s in series):
+        plt.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
 def append(md: List[str], ctx) -> None:
     """
     Build calibration trend stats and emit markdown summary lines.
     Writes:
       - models/calibration_reliability_trend.json (expected by tests)
       - models/calibration_trend.json            (back-compat)
+      - artifacts/calibration_trend_ece.png
+      - artifacts/calibration_trend_brier.png
     JSON shape (what tests expect):
     {
       "series": [
@@ -211,7 +253,11 @@ def append(md: List[str], ctx) -> None:
     (models_dir / "calibration_reliability_trend.json").write_text(json.dumps(obj, indent=2))
     (models_dir / "calibration_trend.json").write_text(json.dumps(obj, indent=2))
 
-    # Markdown
+    # --- plots expected by tests ---
+    _plot_metric(series, "ece", artifacts_dir / "calibration_trend_ece.png")
+    _plot_metric(series, "brier", artifacts_dir / "calibration_trend_brier.png")
+
+    # --- Markdown summary ---
     md.append("### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)")
     if not stats:
         present = sorted({str(r.get(dim) or "unknown") for r in trig})
