@@ -194,3 +194,8 @@ class CoinGeckoClient:
         if "prices" not in data or not isinstance(data["prices"], list):
             raise TypeError(f"/market_chart missing 'prices' list: keys={list(data.keys())}")
         return data
+
+    # Alias expected by tests
+    def market_chart_days(self, coin_id: str, vs_currency: str, days: int) -> Dict[str, Any]:
+        """Compatibility alias for tests: just forwards to get_market_chart()."""
+        return self.get_market_chart(coin_id=coin_id, vs_currency=vs_currency, days=days, interval=None)
