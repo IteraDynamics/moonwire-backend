@@ -10,6 +10,28 @@ from .common import SummaryContext, ensure_dir
 from scripts.market.ingest_market import run_ingest
 
 
+def _coin_symbol(coin_id: str) -> str:
+    """
+    Map common CoinGecko ids to canonical tickers, with a sane fallback.
+    """
+    if not coin_id:
+        return "N/A"
+    m = {
+        "bitcoin": "BTC",
+        "ethereum": "ETH",
+        "solana": "SOL",
+        # add more common ids here as needed
+    }
+    if coin_id in m:
+        return m[coin_id]
+    # fallback: try the first token before a hyphen, then upper
+    sym = coin_id.split("-")[0].upper()
+    # keep it readable (3–6 chars); truncate if extremely long
+    if len(sym) > 6:
+        sym = sym[:6]
+    return sym
+
+
 def append(md: List[str], ctx: SummaryContext) -> None:
     # decide artifact dirs similar to other sections
     artifact_dirs = [
@@ -63,7 +85,8 @@ def append(md: List[str], ctx: SummaryContext) -> None:
         h24 = r.get("h24", 0.0)
         h72 = r.get("h72", 0.0)
         vol = " [vol ↑]" if abs(h24) > 0.03 else ""
-        md.append(f"{cid.upper()[:3]:<3}  → {_fmt_price(last)}  | h1 {h1:+.1%} | h24 {h24:+.1%} | h72 {h72:+.1%}{vol}")
+        sym = _coin_symbol(cid)
+        md.append(f"{sym:<4}→ {_fmt_price(last)} | h1 {h1:+.1%} | h24 {h24:+.1%} | h72 {h72:+.1%}{vol}")
 
     # attribution
     md.append("— Data via CoinGecko API; subject to plan rate limits.")
