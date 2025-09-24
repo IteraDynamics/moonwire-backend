@@ -8,9 +8,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# --- plotting (headless) ---
+# plotting (headless)
 import matplotlib
-matplotlib.use("Agg")  # ensure no display needed
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -146,13 +146,9 @@ def _compute_trend(
 
 
 def _plot_metric(series: List[Dict[str, Any]], metric: str, out_path: Path) -> None:
-    """
-    Draw a simple line plot for each series' metric over time and save to out_path.
-    Test only asserts the files exist and are non-empty.
-    """
+    """Draw a simple line plot per series."""
+    fig = plt.figure(figsize=(9, 4))
     if not series:
-        # Still emit an empty stub image so tests pass existence checks
-        fig = plt.figure(figsize=(8, 3))
         plt.title(f"Calibration Trend ({metric})")
         plt.xlabel("time")
         plt.ylabel(metric)
@@ -161,11 +157,8 @@ def _plot_metric(series: List[Dict[str, Any]], metric: str, out_path: Path) -> N
         plt.close(fig)
         return
 
-    fig = plt.figure(figsize=(9, 4))
     for s in series:
         pts = s.get("points", [])
-        if not pts:
-            continue
         xs = [datetime.strptime(p["bucket_start"], ISO_FMT) for p in pts if metric in p]
         ys = [float(p[metric]) for p in pts if metric in p]
         if xs and ys:
@@ -180,28 +173,35 @@ def _plot_metric(series: List[Dict[str, Any]], metric: str, out_path: Path) -> N
     plt.close(fig)
 
 
+def _seed_demo_series(dim: str, window_h: int, bucket_min: int) -> List[Dict[str, Any]]:
+    """
+    Produce deterministic synthetic series for demo fallback.
+    Three buckets over the last ~6h with mild variation.
+    """
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    buckets = [now - timedelta(hours=h) for h in (6, 4, 2)]
+    pts = []
+    # Make it look reasonable/deterministic
+    for i, b in enumerate(buckets):
+        pts.append(
+            {
+                "bucket_start": _iso(_bucket_floor(b, bucket_min)),
+                "ece": 0.06 + 0.02 * (i % 2),   # 0.06, 0.08, 0.06
+                "brier": 0.12 + 0.03 * (i % 2), # 0.12, 0.15, 0.12
+                "n": 40 + 5 * i,
+            }
+        )
+    return [{"key": "reddit", "points": pts}]
+
+
 def append(md: List[str], ctx) -> None:
     """
     Build calibration trend stats and emit markdown summary lines.
     Writes:
-      - models/calibration_reliability_trend.json (expected by tests)
-      - models/calibration_trend.json            (back-compat)
+      - models/calibration_reliability_trend.json
+      - models/calibration_trend.json (back-compat)
       - artifacts/calibration_trend_ece.png
       - artifacts/calibration_trend_brier.png
-    JSON shape (what tests expect):
-    {
-      "series": [
-        {
-          "key": "<origin or version>",
-          "points": [
-            {"bucket_start": "...Z", "ece": 0.12, "brier": 0.18, "n": 40},
-            ...
-          ]
-        },
-        ...
-      ],
-      "meta": {...}
-    }
     """
     models_dir = Path(getattr(ctx, "models_dir", "models"))
     logs_dir = Path(getattr(ctx, "logs_dir", "logs"))
@@ -211,9 +211,11 @@ def append(md: List[str], ctx) -> None:
     _ensure_dir(artifacts_dir)
 
     window_h = int(os.getenv("MW_CAL_TREND_WINDOW_H", "72"))
-    bucket_min = int(os.getenv("MW_CAL_TREND_BUCKET_MIN", "120"))  # 2h default
+    bucket_min = int(os.getenv("MW_CAL_TREND_BUCKET_MIN", "120"))  # default 2h
     dim = os.getenv("MW_CAL_TREND_DIM", "origin")
     ece_bins = int(os.getenv("MW_CAL_ECE_BINS", "10"))
+    demo_env = os.getenv("DEMO_MODE", "").lower() == "true"
+    is_demo = bool(getattr(ctx, "is_demo", False) or demo_env)
 
     trig = _read_jsonl(logs_dir / "trigger_history.jsonl")
     labs = _read_jsonl(logs_dir / "label_feedback.jsonl")
@@ -221,7 +223,7 @@ def append(md: List[str], ctx) -> None:
 
     stats = _compute_trend(joined, dim=dim, window_h=window_h, bucket_min=bucket_min, bins=ece_bins)
 
-    # Group into the expected series structure: one entry per dim value with "points"
+    # Group into expected "series" structure
     points_by_val: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for s in stats:
         points_by_val[s.dim_value].append(
@@ -232,11 +234,16 @@ def append(md: List[str], ctx) -> None:
                 "n": s.n,
             }
         )
-    # Ensure points are time-ordered
     for val in points_by_val:
         points_by_val[val].sort(key=lambda p: p["bucket_start"])
 
     series: List[Dict[str, Any]] = [{"key": val, "points": pts} for val, pts in sorted(points_by_val.items())]
+
+    # --- DEMO FALLBACK: no joined data -> seed synthetic series and mark markdown with (demo)
+    used_demo = False
+    if not series and is_demo:
+        series = _seed_demo_series(dim=dim, window_h=window_h, bucket_min=bucket_min)
+        used_demo = True
 
     obj = {
         "series": series,
@@ -246,33 +253,33 @@ def append(md: List[str], ctx) -> None:
             "bucket_min": bucket_min,
             "ece_bins": ece_bins,
             "generated_at": _iso(datetime.now(timezone.utc)),
+            "demo": used_demo,
         },
     }
 
-    # Write both filenames (tests read the first)
+    # Write artifacts
     (models_dir / "calibration_reliability_trend.json").write_text(json.dumps(obj, indent=2))
     (models_dir / "calibration_trend.json").write_text(json.dumps(obj, indent=2))
-
-    # --- plots expected by tests ---
     _plot_metric(series, "ece", artifacts_dir / "calibration_trend_ece.png")
     _plot_metric(series, "brier", artifacts_dir / "calibration_trend_brier.png")
 
-    # --- Markdown summary ---
-    md.append("### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)")
-    if not stats:
-        present = sorted({str(r.get(dim) or "unknown") for r in trig})
-        if present:
-            for v in present:
-                md.append(f"{v}  → (no joined labels in window)")
-        else:
-            md.append("_no data available_")
+    # Markdown summary
+    title = "### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)"
+    if used_demo:
+        title += " (demo)"
+    md.append(title)
+
+    if not series:
+        # Non-demo, truly empty
+        md.append("_no data available_")
         return
 
-    latest_by_val: Dict[str, BucketStats] = {}
-    for s in stats:
-        cur = latest_by_val.get(s.dim_value)
-        if (cur is None) or (s.bucket_start > cur.bucket_start):
-            latest_by_val[s.dim_value] = s
-
-    for val, s in sorted(latest_by_val.items(), key=lambda kv: kv[0].lower()):
-        md.append(f"{val}  → ECE {s.ece:.3f} | Brier {s.brier:.3f} | n {s.n}")
+    # Show one line per series (latest bucket)
+    for s in sorted(series, key=lambda d: d.get("key", "")):
+        key = s.get("key", "series")
+        pts = s.get("points", [])
+        if not pts:
+            md.append(f"{key}  → (no points)")
+            continue
+        last = pts[-1]
+        md.append(f"{key}  → ECE {last.get('ece', 0.0):.3f} | Brier {last.get('brier', 0.0):.3f} | n {last.get('n', 0)}")
