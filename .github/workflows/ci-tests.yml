@@ -121,9 +121,9 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"              # keep other sections demo-friendly
-          MW_DEMO: "false"               # <-- switch Market Context to REAL data
-          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}  # <-- use CoinGecko Pro key
-          MW_CG_BASE_URL: "https://pro-api.coingecko.com/api/v3"  # explicit pro URL
+          MW_DEMO: "false"               # Market Context should use REAL data
+          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
+          MW_CG_BASE_URL: "https://pro-api.coingecko.com/api/v3"
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
           # knobs for visibility in CI
@@ -229,7 +229,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: threshold-recommendations
-        path: models/threshold_recommendations.json
+          path: models/threshold_recommendations.json
           if-no-files-found: ignore
           retention-days: 14
 
