@@ -1,56 +1,95 @@
 # scripts/summary_sections/market_context.py
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, List, Any
 
-from .common import SummaryContext, ensure_dir, _iso  # assuming these exist in your repo
+from .common import SummaryContext, _write_json  # ensure_dir implied via _write_json
 from scripts.market.ingest_market import build_market_context
 
 
-def render_market_context(ctx: SummaryContext) -> str:
+def _fmt_money(v: float, vs: str) -> str:
+    """Format price with a leading currency sign when vs=='usd', else '123.45 vs'."""
+    if v is None:
+        return "—"
+    if vs.lower() == "usd":
+        return f"${float(v):,.2f}"
+    return f"{float(v):,.2f} {vs.lower()}"
+
+
+def _pct_str(x: float) -> str:
+    try:
+        return f"{x*100:+.1f}%"
+    except Exception:
+        return "—"
+
+
+def _ticker_from_coin(coin: str) -> str:
+    mapping = {
+        "bitcoin": "BTC",
+        "ethereum": "ETH",
+        "solana": "SOL",
+    }
+    return mapping.get(coin.lower().strip(), coin.upper())
+
+
+def _summarize(ctx_data: Dict[str, Any]) -> List[str]:
     """
-    Renders the Market Context section.
-    Always reads/writes models/market_context.json and emits plots into artifacts/.
+    Build short markdown lines summarizing the market context.
+    Example:
+      📈 Market Context (CoinGecko, 72h) (demo)
+      • BTC → $65,100.14 | h1 +1.0% | h24 -2.0% | h72 +8.7%
+      — Data via CoinGecko API; subject to plan rate limits.
     """
-    models_dir = Path("models")
-    artifacts_dir = Path(os.getenv("ARTIFACTS_DIR", "artifacts"))
-    ensure_dir(models_dir)
-    ensure_dir(artifacts_dir)
-
-    coins = [c.strip() for c in os.getenv("MW_CG_COINS", "bitcoin,ethereum,solana").split(",") if c.strip()]
-    vs = os.getenv("MW_CG_VS_CURRENCY", "usd").strip().lower()
-    lookback_h = int(os.getenv("MW_CG_LOOKBACK_H", "72"))
-
-    data = build_market_context(coins, vs, lookback_h, models_dir, artifacts_dir)
-
-    # one-line headline for summary
     lines: List[str] = []
-    tag = "(demo)" if data.get("demo") else ""
-    if data.get("demo") and data.get("demo_reason"):
-        tag = f"(demo) [{data['demo_reason']}]"
-    lines.append(f"📈 Market Context (CoinGecko, {lookback_h}h) {tag}")
 
-    # compact bullets: COIN → $price | h1 … | h24 … | h72 …
-    def fmt_price(p: float) -> str:
-        return f"${p:,.2f}"
+    hours = ctx_data.get("window_hours") or ctx_data.get("lookback_h") or 72
+    demo = bool(ctx_data.get("demo"))
+    vs = (ctx_data.get("vs") or "usd").lower()
+    returns: Dict[str, Dict[str, float]] = ctx_data.get("returns") or {}
+    series: Dict[str, List[Dict[str, Any]]] = ctx_data.get("series") or {}
+    coins: List[str] = ctx_data.get("coins") or []
 
-    for c in coins:
-        last_price = None
-        s = data["series"].get(c, [])
-        if s:
-            last_price = s[-1]["price"]
-        else:
-            # fallback to simple/price if present in JSON (not stored by builder, so use series)
-            last_price = 0.0
-        r = data["returns"].get(c, {})
-        h1 = f"{r.get('h1', 0.0):+0.1%}"
-        h24 = f"{r.get('h24', 0.0):+0.1%}"
-        h72 = f"{r.get('h72', 0.0):+0.1%}"
-        lines.append(f"• {c.upper()} → {fmt_price(last_price or 0.0)} | h1 {h1} | h24 {h24} | h72 {h72}")
+    title = f"📈 Market Context (CoinGecko, {hours}h)"
+    if demo:
+        title += " (demo)"
+    lines.append(title)
 
-    # attribution
-    lines.append("— Data via CoinGecko API; subject to plan rate limits.")
-    return "\n".join(lines)
+    # One bullet per coin
+    for coin in coins:
+        arr = series.get(coin) or []
+        last_px = (arr[-1]["price"] if arr else None)
+        r = returns.get(coin) or {}
+        h1 = _pct_str(r.get("h1", 0.0))
+        h24 = _pct_str(r.get("h24", 0.0))
+        h72 = _pct_str(r.get("h72", 0.0))
+        ticker = _ticker_from_coin(coin)
+        money = _fmt_money(last_px, vs)
+        lines.append(f"• {ticker} → {money} | h1 {h1} | h24 {h24} | h72 {h72}")
+
+    # Attribution + reason if demo
+    attr = "— Data via CoinGecko API; subject to plan rate limits."
+    demo_reason = ctx_data.get("demo_reason")
+    if demo and demo_reason:
+        attr += f" [{demo_reason}]"
+    lines.append(attr)
+
+    return lines
+
+
+def append(md: List[str], ctx: SummaryContext) -> None:
+    """
+    Build market context (live or demo) and append a short markdown section
+    to the provided md list. Also writes models/market_context.json so the
+    rest of the pipeline (and tests) can find it.
+    """
+    # Respect MW_DEMO environment variable as the ingest does
+    # (build_market_context reads MW_DEMO / MW_CG_* knobs internally).
+    ctx_data = build_market_context()
+
+    # Persist JSON artifact for tests and downstream steps
+    out_json = ctx.models_dir / "market_context.json"
+    _write_json(out_json, ctx_data)
+
+    # Append markdown lines
+    md.extend(_summarize(ctx_data))
