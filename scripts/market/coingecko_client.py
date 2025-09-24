@@ -109,12 +109,20 @@ class CoinGeckoClient:
                     params=params or {},
                     timeout=self.timeout,
                 )
-                # Handle 429/5xx with retry
-                if resp.status_code == 429 or 500 <= resp.status_code < 600:
-                    raise _RetryableHTTPError(resp.status_code, resp.text)
+                status = getattr(resp, "status_code", None)
 
-                # On other non-2xx, raise with detail
-                resp.raise_for_status()
+                # Handle 429/5xx with retry
+                if status == 429 or (isinstance(status, int) and 500 <= status < 600):
+                    raise _RetryableHTTPError(status, getattr(resp, "text", None))
+
+                # Non-2xx and not retryable -> error
+                if not (isinstance(status, int) and 200 <= status < 300):
+                    body = None
+                    try:
+                        body = resp.text  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"HTTP {status} at {path} | body={(body or '')[:200]}")
 
                 data = resp.json()
                 if cache_ttl > 0.0 and key is not None:
@@ -129,10 +137,9 @@ class CoinGeckoClient:
             except requests.RequestException as e:
                 # network-ish errors are retryable
                 if attempt >= self.max_retries:
-                    # surface body when available for debugging
                     body = None
                     try:
-                        body = resp.text if resp is not None else None  # type: ignore
+                        body = resp.text if resp is not None else None  # type: ignore[attr-defined]
                     except Exception:
                         pass
                     detail = f"{e.__class__.__name__}: {str(e)}"
