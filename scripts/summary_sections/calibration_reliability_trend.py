@@ -175,12 +175,14 @@ def append(md: List[str], ctx) -> None:
 
     stats = _compute_trend(joined, dim=dim, window_h=window_h, bucket_min=bucket_min, bins=ece_bins)
 
-    # Build series list
+    # Build series list with a stable 'key' for tests
     series: List[Dict[str, Any]] = []
     for s in stats:
+        bucket_iso = _iso(s.bucket_start)
         series.append(
             {
-                "bucket_start": _iso(s.bucket_start),
+                "key": f"{dim}:{s.dim_value}:{bucket_iso}",
+                "bucket_start": bucket_iso,
                 "dim": dim,
                 "value": s.dim_value,
                 "n": s.n,
@@ -205,7 +207,7 @@ def append(md: List[str], ctx) -> None:
     trend_json = models_dir / "calibration_reliability_trend.json"
     trend_json.write_text(json.dumps(obj, indent=2))
 
-    # back-compat filename used earlier in the work
+    # back-compat filename used elsewhere
     (models_dir / "calibration_trend.json").write_text(json.dumps(obj, indent=2))
 
     # Markdown
