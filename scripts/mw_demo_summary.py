@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+
 MoonWire CI Demo Summary (orchestrator-only)
 
 Writes:
@@ -80,7 +81,7 @@ from scripts.summary_sections import (
     suppression_rate_by_origin,       # (v0.5.15)
     trigger_coverage_trend,           # (v0.5.14) trend chart
     trigger_suppression_trend,
-    
+    calibration_reliability_trend,    # ⬅️ NEW v0.6.5 (imported so we can call it)
 )
 
 # ---- Compatibility re-exports for any tests that import from mw_demo_summary ----
@@ -222,6 +223,7 @@ def main():
     score_distribution_per_origin.append(md, ctx)
     calibration_reliability.append(md, ctx)
     calibration_per_origin.append(md, ctx)
+    calibration_reliability_trend.append(md, ctx)   # v0.6.5 — new trend chart
 
     # 3) Thresholds & explainability (what would/wouldn’t fire, and why)
     dynamic_vs_static_thresholds.append(md, ctx)
