@@ -1,18 +1,16 @@
-# marks "summary_sections" as a package
-from .common import SummaryContext
+# scripts/summary_sections/__init__.py
+"""
+Summary sections registry.
 
-# optional convenience re-exports
-from . import score_distribution
-from . import signal_quality_per_origin
-from . import score_distribution_per_origin
+Each section exposes:
+    append(md: List[str], ctx: SummaryContext) -> None
+
+This module imports sections so callers can reference them as:
+    from scripts.summary_sections import market_context, calibration_reliability_trend, ...
+"""
+
+from .common import SummaryContext  # re-export
+
+# Import sections here so they are discoverable to callers
+from . import market_context
 from . import calibration_reliability_trend
-from . import market_context  # ⬅️ NEW v0.6.6
-
-__all__ = [
-    "SummaryContext",
-    "score_distribution",
-    "signal_quality_per_origin",
-    "score_distribution_per_origin",
-    "calibration_reliability_trend",
-    "market_context",  # ⬅️ NEW
-]
