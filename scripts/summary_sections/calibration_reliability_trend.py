@@ -175,10 +175,10 @@ def append(md: List[str], ctx) -> None:
 
     stats = _compute_trend(joined, dim=dim, window_h=window_h, bucket_min=bucket_min, bins=ece_bins)
 
-    # Persist JSON (list of buckets) to BOTH filenames for compatibility
-    payload: List[Dict[str, Any]] = []
+    # Build series list
+    series: List[Dict[str, Any]] = []
     for s in stats:
-        payload.append(
+        series.append(
             {
                 "bucket_start": _iso(s.bucket_start),
                 "dim": dim,
@@ -189,12 +189,24 @@ def append(md: List[str], ctx) -> None:
             }
         )
 
+    # Wrap in object with "series" (what tests expect) + some meta
+    obj = {
+        "series": series,
+        "meta": {
+            "dim": dim,
+            "window_h": window_h,
+            "bucket_min": bucket_min,
+            "ece_bins": ece_bins,
+            "generated_at": _iso(datetime.now(timezone.utc)),
+        },
+    }
+
     # primary filename expected by tests
     trend_json = models_dir / "calibration_reliability_trend.json"
-    trend_json.write_text(json.dumps(payload, indent=2))
+    trend_json.write_text(json.dumps(obj, indent=2))
 
     # back-compat filename used earlier in the work
-    (models_dir / "calibration_trend.json").write_text(json.dumps(payload, indent=2))
+    (models_dir / "calibration_trend.json").write_text(json.dumps(obj, indent=2))
 
     # Markdown
     md.append("### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)")
