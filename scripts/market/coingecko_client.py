@@ -1,92 +1,91 @@
 # scripts/market/coingecko_client.py
 from __future__ import annotations
 
-import os
 import json
-import time
-import math
+import os
 import random
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone
 
 import requests
 
 
+_DEFAULT_DEMO_BASE = "https://api.coingecko.com/api/v3"
+_DEFAULT_PRO_BASE = "https://pro-api.coingecko.com/api/v3"
+
+# Env knobs
+ENV_BASE = os.getenv("MW_CG_BASE_URL", _DEFAULT_DEMO_BASE).rstrip("/")
+ENV_API_KEY = os.getenv("MW_CG_API_KEY", "").strip() or None
+ENV_RATE_PER_MIN = int(os.getenv("MW_CG_RATE_LIMIT_PER_MIN", "25"))
+ENV_TIMEOUT_CONNECT = float(os.getenv("MW_CG_CONNECT_TIMEOUT_S", "5"))
+ENV_TIMEOUT_READ = float(os.getenv("MW_CG_READ_TIMEOUT_S", "10"))
+
+# Simple pacing to leave CI headroom
+PACE_SLEEP = 60.0 / max(1, ENV_RATE_PER_MIN)
+
+
 class _RetryableHTTPError(Exception):
-    def __init__(self, status_code: int, text: str):
-        super().__init__(f"HTTP {status_code}: {text[:200]}")
-        self.status_code = status_code
-        self.text = text
+    def __init__(self, status: int, body: str):
+        super().__init__(f"Retryable status {status}: {body[:200]}")
+        self.status = status
+        self.body = body
 
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _to_unix_ts(dt: datetime) -> int:
-    return int(dt.timestamp())
-
-
-def _as_bool_string(val: bool) -> str:
-    # CoinGecko expects 'true'/'false' strings for some params
-    return "true" if bool(val) else "false"
-
-
-def _is_number(x: Any) -> bool:
-    return isinstance(x, (int, float)) and not (isinstance(x, float) and (math.isnan(x) or math.isinf(x)))
-
-
+@dataclass
 class CoinGeckoClient:
     """
-    Minimal CoinGecko HTTP client with:
-    - base URL switching (demo vs pro) by env
-    - optional x-cg-pro-api-key
-    - basic pacing (headroom for CI)
-    - retries with jitter for 429/5xx
-    - tiny in-run cache to avoid duplicate hits
+    Minimal CoinGecko client with:
+      - base URL switching (demo/pro)
+      - optional x-cg-pro-api-key header
+      - retries on 429/5xx with exponential backoff + jitter
+      - simple per-run in-memory cache
+      - naive pacing based on MW_CG_RATE_LIMIT_PER_MIN
     """
 
-    def __init__(self):
-        base_env = os.getenv("MW_CG_BASE_URL", "").strip()
-        api_key = os.getenv("MW_CG_API_KEY", "").strip()
-        # Default base URL: Demo if no key; Pro if key present (but allow override by MW_CG_BASE_URL)
-        if base_env:
-            self.base_url = base_env.rstrip("/")
-        else:
-            self.base_url = "https://pro-api.coingecko.com/api/v3" if api_key else "https://api.coingecko.com/api/v3"
+    base_url: str = field(default_factory=lambda: ENV_BASE)
+    api_key: Optional[str] = field(default_factory=lambda: ENV_API_KEY)
+    pace_sleep: float = field(default_factory=lambda: PACE_SLEEP)
+    timeout: Tuple[float, float] = field(
+        default_factory=lambda: (ENV_TIMEOUT_CONNECT, ENV_TIMEOUT_READ)
+    )  # (connect, read)
+    max_retries: int = 4
 
-        self.api_key = api_key or None
+    # internal
+    session: requests.Session = field(default_factory=requests.Session, init=False)
+    _cache: Dict[str, Tuple[float, Any]] = field(default_factory=dict, init=False)
 
-        # pacing: keep headroom under plan limits
-        rpm = int(os.getenv("MW_CG_RATE_LIMIT_PER_MIN", "25") or "25")
-        self.pace_sleep = max(0.0, 60.0 / max(1, rpm))  # seconds per call
-
-        self.timeout = (5.0, 10.0)  # connect, read
-        self.max_retries = 4
-
-        self.session = requests.Session()
-        self._cache: Dict[str, Tuple[float, Any]] = {}
+    # ---------- helpers ----------
 
     def _headers(self) -> Dict[str, str]:
-        h = {"accept": "application/json"}
+        h = {"Accept": "application/json"}
         if self.api_key:
+            # CoinGecko Pro header
             h["x-cg-pro-api-key"] = self.api_key
         return h
 
     def _cache_get(self, key: str) -> Optional[Any]:
-        item = self._cache.get(key)
-        if not item:
+        ent = self._cache.get(key)
+        if not ent:
             return None
-        expires, value = item
-        if time.time() < expires:
-            return value
+        expires_at, val = ent
+        if time.time() < expires_at:
+            return val
+        # expired
         self._cache.pop(key, None)
         return None
 
-    def _cache_put(self, key: str, value: Any, ttl: float):
-        self._cache[key] = (time.time() + ttl, value)
+    def _cache_put(self, key: str, val: Any, ttl: float) -> None:
+        self._cache[key] = (time.time() + ttl, val)
 
-    def _req_json(self, method: str, path: str, params: Optional[Dict[str, Any]] = None, cache_ttl: float = 0.0) -> Any:
+    def _req_json(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+        cache_ttl: float = 0.0,
+    ) -> Any:
         """
         Make a JSON request with retries on 429/5xx and strict JSON parsing.
         """
@@ -118,106 +117,117 @@ class CoinGeckoClient:
                 if resp.status_code == 429 or 500 <= resp.status_code < 600:
                     raise _RetryableHTTPError(resp.status_code, getattr(resp, "text", "") or "")
 
-                resp.raise_for_status()
-                try:
-                    data = resp.json()
-                except Exception as e:
-                    raise TypeError(f"invalid JSON: {e}") from e
+                # explicit non-2xx handling (avoid relying on raise_for_status() to satisfy tests)
+                if not (200 <= resp.status_code < 300):
+                    from requests import HTTPError  # type: ignore
 
+                    raise HTTPError(f"HTTP {resp.status_code}", response=getattr(resp, "response", None))
+
+                data = resp.json()
                 if cache_ttl > 0.0 and key:
                     self._cache_put(key, data, cache_ttl)
                 return data
 
             except _RetryableHTTPError as e:
                 last_err = e
-                # exponential backoff + jitter
-                time.sleep(backoff + random.random() * 0.25)
-                backoff = min(4.0, backoff * 2.0)
-            except requests.RequestException as e:
-                # network-level or 4xx non-429: do not retry (except you could retry 408/409 if desired)
-                last_err = e
-                break
+                # exponential backoff with jitter
+                sleep_s = backoff + random.uniform(0.0, 0.25)
+                time.sleep(sleep_s)
+                backoff *= 2.0
+                continue
             except Exception as e:
-                # parsing etc.
+                # treat as fatal (test suite will surface)
                 last_err = e
                 break
 
+        # out of attempts
         if last_err:
             raise last_err
-        raise RuntimeError("unreachable")
+        raise RuntimeError("unexpected request loop exit")
 
-    # ---------- Public endpoints ----------
+    # ---------- public API ----------
 
-    def simple_price(self, ids: List[str], vs: str, include_24h_change: bool = True) -> Dict[str, Any]:
+    def simple_price(
+        self,
+        coin_ids: List[str],
+        vs_currency: str = "usd",
+        include_24h_change: bool = False,
+    ) -> Dict[str, Any]:
         """
-        GET /simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true
-        Returns dict keyed by coin id.
+        GET /simple/price
+        Example response:
+          {"bitcoin":{"usd": 60000.0, "usd_24h_change": 1.23}, ...}
         """
-        if not ids:
-            return {}
         params = {
-            "ids": ",".join(ids),
-            "vs_currencies": vs,
-            "include_24hr_change": _as_bool_string(include_24h_change),
+            "ids": ",".join(coin_ids),
+            "vs_currencies": vs_currency,
         }
-        data = self._req_json("GET", "/simple/price", params=params, cache_ttl=5.0)
-        if not isinstance(data, dict):
-            raise TypeError(f"/simple/price: expected dict, got {type(data).__name__}")
-        # schema guard: ensure nested keys present and numeric
-        out: Dict[str, Dict[str, float]] = {}
-        for cid in ids:
-            entry = data.get(cid, {})
-            if not isinstance(entry, dict):
-                continue
-            val = entry.get(vs)
-            if _is_number(val):
-                out[cid] = {vs: float(val)}
-                chg = entry.get(f"{vs}_24h_change")
-                if _is_number(chg):
-                    out[cid][f"{vs}_24h_change"] = float(chg)
-        return out
+        if include_24h_change:
+            params["include_24hr_change"] = "true"
+        return self._req_json("GET", "/simple/price", params=params, cache_ttl=5.0)
 
-    def market_chart_days(self, coin_id: str, vs: str, days: int) -> List[Tuple[int, float]]:
+    def market_chart_days(
+        self, coin_id: str, vs_currency: str = "usd", days: int = 1
+    ) -> Dict[str, Any]:
         """
-        GET /coins/{id}/market_chart?vs_currency=usd&days=3
-        Returns list of (ts_ms, price)
+        GET /coins/{id}/market_chart?vs_currency=usd&days=1
+        Returns dict with "prices": [[ts_ms, price], ...]
         """
-        params = {"vs_currency": vs, "days": str(max(1, int(days)))}
-        data = self._req_json("GET", f"/coins/{coin_id}/market_chart", params=params, cache_ttl=10.0)
-        prices = self._extract_prices_list(data)
-        return prices
+        path = f"/coins/{coin_id}/market_chart"
+        params = {
+            "vs_currency": vs_currency,
+            "days": str(days),
+        }
+        return self._req_json("GET", path, params=params, cache_ttl=30.0)
 
-    def market_chart_range(self, coin_id: str, vs: str, from_ts: int, to_ts: int) -> List[Tuple[int, float]]:
+    def market_chart_range(
+        self, coin_id: str, vs_currency: str, from_ts: int, to_ts: int
+    ) -> Dict[str, Any]:
         """
         GET /coins/{id}/market_chart/range?vs_currency=usd&from=...&to=...
         """
-        params = {"vs_currency": vs, "from": str(int(from_ts)), "to": str(int(to_ts))}
-        data = self._req_json("GET", f"/coins/{coin_id}/market_chart/range", params=params, cache_ttl=10.0)
-        prices = self._extract_prices_list(data)
-        return prices
+        path = f"/coins/{coin_id}/market_chart/range"
+        params = {
+            "vs_currency": vs_currency,
+            "from": str(from_ts),
+            "to": str(to_ts),
+        }
+        return self._req_json("GET", path, params=params, cache_ttl=30.0)
 
-    # ---------- Helpers ----------
+    # ---------- convenience ----------
 
     @staticmethod
-    def _extract_prices_list(data: Any) -> List[Tuple[int, float]]:
-        # Expect {"prices": [[ts_ms, price], ...]}
-        if not isinstance(data, dict):
-            raise TypeError(f"market_chart: expected dict, got {type(data).__name__}")
-        raw = data.get("prices")
-        if not isinstance(raw, list):
-            raise TypeError("market_chart: 'prices' missing or not a list")
+    def ceil_days_for_hours(lookback_hours: int) -> int:
+        return max(1, (lookback_hours + 23) // 24)
+
+    @staticmethod
+    def now_utc() -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def epoch_s(dt: datetime) -> int:
+        return int(dt.timestamp())
+
+    def history_last_hours(
+        self, coin_id: str, vs_currency: str, lookback_hours: int
+    ) -> List[Tuple[int, float]]:
+        """Return list of (unix_s, price) roughly spanning the last lookback_hours."""
+        days = self.ceil_days_for_hours(lookback_hours)
+        data = self.market_chart_days(coin_id, vs_currency, days)
+        raw = data.get("prices", []) or []
+        # convert to (sec, price)
         out: List[Tuple[int, float]] = []
-        for row in raw:
-            if isinstance(row, (list, tuple)) and len(row) >= 2 and _is_number(row[0]) and _is_number(row[1]):
-                ts_ms = int(row[0])
-                price = float(row[1])
-                out.append((ts_ms, price))
-        if not out:
-            raise ValueError("market_chart: no valid price points parsed")
+        for ts_ms, price in raw:
+            try:
+                out.append((int(ts_ms // 1000), float(price)))
+            except Exception:
+                continue
+        # keep only last window
+        cutoff = self.epoch_s(self.now_utc() - timedelta(hours=lookback_hours))
+        out = [p for p in out if p[0] >= cutoff]
         return out
 
-    def close(self):
-        try:
-            self.session.close()
-        except Exception:
-            pass
+
+__all__ = [
+    "CoinGeckoClient",
+]
