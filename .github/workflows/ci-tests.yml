@@ -104,14 +104,26 @@ jobs:
         if: ${{ success() }}
         run: mkdir -p artifacts
 
+      # --- Debug market env (no secrets printed) ---
+      - name: Debug market env
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import os
+          print("MW_DEMO =", os.getenv("MW_DEMO"))
+          print("DEMO_MODE =", os.getenv("DEMO_MODE"))
+          print("Has API key? ->", bool(os.getenv("MW_CG_API_KEY")))
+          print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
+          PY
+
       - name: Build demo summary (read-only)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"              # keep other sections demo-friendly
-          MW_DEMO: "false"               # ⬅️ switch Market Context to REAL data
-          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}  # ⬅️ use CoinGecko Pro key
-          # MW_CG_BASE_URL: "https://pro-api.coingecko.com/api/v3"  # optional; client auto-switches when key is set
+          MW_DEMO: "false"               # <-- switch Market Context to REAL data
+          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}  # <-- use CoinGecko Pro key
+          MW_CG_BASE_URL: "https://pro-api.coingecko.com/api/v3"  # explicit pro URL
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
           # knobs for visibility in CI
@@ -217,7 +229,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: threshold-recommendations
-          path: models/threshold_recommendations.json
+        path: models/threshold_recommendations.json
           if-no-files-found: ignore
           retention-days: 14
 
