@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import json 
+import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-
-# ----------------------------------------------------------------------------- #
-# Small utils
-# ----------------------------------------------------------------------------- #
 
 ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -20,7 +16,6 @@ def _iso(dt: datetime) -> str:
 
 
 def _parse_ts(s: str) -> datetime:
-    """Parse timestamps tolerant of 'Z' and ISO offsets."""
     try:
         if s.endswith("Z"):
             return datetime.strptime(s, ISO_FMT).replace(tzinfo=timezone.utc)
@@ -43,7 +38,6 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
         try:
             out.append(json.loads(line))
         except Exception:
-            # tolerate bad lines
             continue
     return out
 
@@ -51,10 +45,6 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
 def _ensure_dir(d: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
 
-
-# ----------------------------------------------------------------------------- #
-# Metrics
-# ----------------------------------------------------------------------------- #
 
 @dataclass
 class BucketStats:
@@ -93,10 +83,6 @@ def _brier(scores: List[float], labels: List[bool]) -> float:
         return 0.0
     return float(sum((float(s) - (1.0 if y else 0.0)) ** 2 for s, y in zip(scores, labels)) / len(scores))
 
-
-# ----------------------------------------------------------------------------- #
-# Core computation
-# ----------------------------------------------------------------------------- #
 
 def _bucket_floor(ts: datetime, bucket_minutes: int) -> datetime:
     mins = (ts.minute // bucket_minutes) * bucket_minutes
@@ -154,16 +140,26 @@ def _compute_trend(
     return stats
 
 
-# ----------------------------------------------------------------------------- #
-# Public API (used by tests)
-# ----------------------------------------------------------------------------- #
-
 def append(md: List[str], ctx) -> None:
     """
     Build calibration trend stats and emit markdown summary lines.
-    Writes both:
+    Writes:
       - models/calibration_reliability_trend.json (expected by tests)
       - models/calibration_trend.json            (back-compat)
+    JSON shape (what tests expect):
+    {
+      "series": [
+        {
+          "key": "<origin or version>",
+          "points": [
+            {"bucket_start": "...Z", "ece": 0.12, "brier": 0.18, "n": 40},
+            ...
+          ]
+        },
+        ...
+      ],
+      "meta": {...}
+    }
     """
     models_dir = Path(getattr(ctx, "models_dir", "models"))
     logs_dir = Path(getattr(ctx, "logs_dir", "logs"))
@@ -183,26 +179,22 @@ def append(md: List[str], ctx) -> None:
 
     stats = _compute_trend(joined, dim=dim, window_h=window_h, bucket_min=bucket_min, bins=ece_bins)
 
-    # Build series with mandatory "key"
-    series: List[Dict[str, Any]] = []
+    # Group into the expected series structure: one entry per dim value with "points"
+    points_by_val: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for s in stats:
-        bucket_iso = _iso(s.bucket_start)
-        series.append(
+        points_by_val[s.dim_value].append(
             {
-                "key": f"{dim}:{s.dim_value}:{bucket_iso}",
-                "bucket_start": bucket_iso,
-                "dim": dim,
-                "value": s.dim_value,
-                "n": s.n,
+                "bucket_start": _iso(s.bucket_start),
                 "ece": s.ece,
                 "brier": s.brier,
+                "n": s.n,
             }
         )
+    # Ensure points are time-ordered
+    for val in points_by_val:
+        points_by_val[val].sort(key=lambda p: p["bucket_start"])
 
-    # Final sanitation (defensive): ensure every element has "key"
-    for i, it in enumerate(series):
-        if "key" not in it or not it["key"]:
-            it["key"] = f"{it.get('dim','dim')}:{it.get('value','unknown')}:{it.get('bucket_start','') or i}"
+    series: List[Dict[str, Any]] = [{"key": val, "points": pts} for val, pts in sorted(points_by_val.items())]
 
     obj = {
         "series": series,
@@ -215,12 +207,11 @@ def append(md: List[str], ctx) -> None:
         },
     }
 
-    # Primary file the test reads
+    # Write both filenames (tests read the first)
     (models_dir / "calibration_reliability_trend.json").write_text(json.dumps(obj, indent=2))
-    # Back-compat name
     (models_dir / "calibration_trend.json").write_text(json.dumps(obj, indent=2))
 
-    # Minimal markdown summary
+    # Markdown
     md.append("### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)")
     if not stats:
         present = sorted({str(r.get(dim) or "unknown") for r in trig})
