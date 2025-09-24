@@ -1,334 +1,300 @@
 # scripts/market/ingest_market.py
 from __future__ import annotations
 
-import math
 import os
-import time
 import json
-from dataclasses import dataclass
+import math
+from typing import Dict, List, Tuple, Any
 from datetime import datetime, timedelta, timezone
+
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
 
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use("Agg")  # CI-safe
 import matplotlib.pyplot as plt  # noqa: E402
 
-from scripts.summary_sections.common import ensure_dir  # type: ignore
-
-try:
-    from scripts.market.coingecko_client import CoinGeckoClient  # type: ignore
-except Exception:
-    CoinGeckoClient = None  # type: ignore
+from .coingecko_client import CoinGeckoClient
 
 
-@dataclass
-class Cfg:
-    base_url: str
-    api_key: Optional[str]
-    coins: List[str]
-    vs: str
-    lookback_h: int
-    rate_per_min: int
-    demo: bool
-    artifacts_dir: Path
+def _ensure_dir(p: Path):
+    p.mkdir(parents=True, exist_ok=True)
 
 
-def _default_base_url(api_key: Optional[str]) -> str:
-    # If key present, prefer pro; else public.
-    return "https://pro-api.coingecko.com/api/v3" if api_key else "https://api.coingecko.com/api/v3"
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def _env_cfg() -> Cfg:
-    coins = [c.strip().lower() for c in os.getenv("MW_CG_COINS", "bitcoin,ethereum,solana").split(",") if c.strip()]
-    api_key = os.getenv("MW_CG_API_KEY") or None
-    # If MW_CG_BASE_URL not set, infer from presence of api key.
-    base_url = os.getenv("MW_CG_BASE_URL") or _default_base_url(api_key)
-    return Cfg(
-        base_url=base_url,
-        api_key=api_key,
-        coins=coins,
-        vs=os.getenv("MW_CG_VS_CURRENCY", "usd").lower(),
-        lookback_h=int(os.getenv("MW_CG_LOOKBACK_H", "72")),
-        rate_per_min=int(os.getenv("MW_CG_RATE_LIMIT_PER_MIN", "25")),
-        demo=str(os.getenv("MW_DEMO", "")).lower() in ("1", "true", "yes"),
-        artifacts_dir=Path(os.getenv("ARTIFACTS_DIR", "artifacts")),
-    )
+def _floor_to_hour(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
 
 
-def _fmt_usd(p: float) -> str:
-    return f"${float(p):,.2f}"
+def _to_unix(dt: datetime) -> int:
+    return int(dt.timestamp())
 
 
-def _epoch_hour_floor(dt: datetime) -> datetime:
-    return dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+def _fmt_money(p: float, symbol: str = "$") -> str:
+    try:
+        return f"{symbol}{float(p):,.2f}"
+    except Exception:
+        return f"{symbol}0.00"
 
 
-def _hourly_timeline(now_utc: datetime, lookback_h: int) -> List[datetime]:
-    end = _epoch_hour_floor(now_utc)
-    start = end - timedelta(hours=lookback_h - 1)
-    cur = start
-    out: List[datetime] = []
-    while cur <= end:
-        out.append(cur)
-        cur += timedelta(hours=1)
-    return out
+def _write_json(path: Path, obj: Any):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
 
 
-def _resample_hourly_from_pairs(pairs_ms_price: List[List[float]], now_utc: datetime, lookback_h: int) -> List[Tuple[int, float]]:
-    if not pairs_ms_price:
-        return []
-    pts = sorted([(int(ms) // 1000, float(px)) for ms, px in pairs_ms_price], key=lambda x: x[0])
-    timeline = _hourly_timeline(now_utc, lookback_h)
-    out: List[Tuple[int, float]] = []
-    i = 0
-    latest_px: Optional[float] = None
-    for bucket_dt in timeline:
-        bucket_s = int(bucket_dt.timestamp())
-        while i < len(pts) and pts[i][0] <= bucket_s:
-            latest_px = pts[i][1]
-            i += 1
-        if latest_px is not None:
-            out.append((bucket_s, latest_px))
-    return out
-
-
-def _hourly_returns(series: List[Tuple[int, float]]) -> List[Tuple[int, float]]:
-    out: List[Tuple[int, float]] = []
-    for idx in range(1, len(series)):
-        t, p = series[idx]
-        _, prev = series[idx - 1]
-        if prev != 0:
-            out.append((t, p / prev - 1.0))
-    return out
-
-
-def _window_return(series: List[Tuple[int, float]], hours: int) -> Optional[float]:
-    if not series:
-        return None
-    tail_t, tail_p = series[-1]
-    target_t = tail_t - hours * 3600
-    prev_p = None
-    for t, p in reversed(series):
-        if t <= target_t:
-            prev_p = p
-            break
-    if prev_p is None or prev_p == 0:
-        return None
-    return tail_p / prev_p - 1.0
-
-
-def _plot_price(coin: str, series: List[Tuple[int, float]], out_path: Path, lookback_h: int):
-    ensure_dir(out_path.parent)
-    if not series:
-        return
-    xs = [datetime.fromtimestamp(t, tz=timezone.utc) for t, _ in series]
-    ys = [p for _, p in series]
-    plt.figure(figsize=(8.5, 3))
-    plt.plot(xs, ys, marker="o", linewidth=1.5)
-    plt.title(f"{coin} price ({lookback_h}h)")
-    plt.xlabel("UTC time")
-    plt.ylabel("price")
-    plt.xticks(rotation=45, ha="right")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
-
-
-def _plot_returns(coin: str, returns: List[Tuple[int, float]], out_path: Path, lookback_h: int):
-    ensure_dir(out_path.parent)
-    if not returns:
-        return
-    xs = [datetime.fromtimestamp(t, tz=timezone.utc) for t, _ in returns]
-    ys = [r for _, r in returns]
-    plt.figure(figsize=(8.5, 3))
-    plt.axhline(0.0)
-    plt.bar(xs, ys)
-    plt.title(f"{coin} hourly returns ({lookback_h}h)")
-    plt.xlabel("UTC time")
-    plt.ylabel("return")
-    plt.xticks(rotation=45, ha="right")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
-
-
-def _seed_demo_series(coins: List[str], now_utc: datetime, lookback_h: int) -> Dict[str, List[Tuple[int, float]]]:
-    import math
-    import random
-    random.seed(1337)
-    base = {"bitcoin": 60000.0, "ethereum": 3000.0, "solana": 150.0}
-    amp = {"bitcoin": 4000.0, "ethereum": 200.0, "solana": 12.0}
-    timeline = _hourly_timeline(now_utc, lookback_h)
-    out: Dict[str, List[Tuple[int, float]]] = {}
-    for c in coins:
-        b = base.get(c, 100.0); a = amp.get(c, 5.0)
-        pts: List[Tuple[int, float]] = []
-        for i, dt in enumerate(timeline):
-            theta = 2.0 * math.pi * (i / 48.0)
-            px = b * (1.0 + 0.01 * math.sin(theta)) + a * math.sin(theta * 1.7) + 0.25 * a * math.sin(theta * 0.33)
-            px = max(0.1, px)
-            pts.append((int(dt.timestamp()), float(px)))
-        out[c] = pts
-    return out
-
-
-def _max_sleep_for_rate(rate_per_min: int) -> float:
-    return max(60.0 / float(max(1, rate_per_min)) * 1.10, 0.0)
-
-
-def _live_fetch_series(cfg: Cfg, coins: List[str], now_utc: datetime) -> Dict[str, List[Tuple[int, float]]]:
-    if CoinGeckoClient is None:
-        raise ImportError("CoinGeckoClient unavailable")
-
-    client = CoinGeckoClient(
-        base_url=cfg.base_url,
-        api_key=cfg.api_key,
-        max_per_min=cfg.rate_per_min,
-        timeout_connect=5,
-        timeout_read=10,
-        max_retries=4,
-    )
-
-    days = max(1, (cfg.lookback_h + 23) // 24)
-    series: Dict[str, List[Tuple[int, float]]] = {}
-    spacing = _max_sleep_for_rate(cfg.rate_per_min)
-
-    for i, coin in enumerate(coins):
-        if i > 0 and spacing > 0:
-            time.sleep(spacing)
-        # signature aligns with client: coin_id, vs_currency, days
-        data = client.get_market_chart(coin_id=coin, vs_currency=cfg.vs, days=days)
-        pairs = data.get("prices") or []
-        if not isinstance(pairs, list):
-            raise TypeError(f"unexpected 'prices' type: {type(pairs)}")
-        ser = _resample_hourly_from_pairs(pairs, now_utc=now_utc, lookback_h=cfg.lookback_h)
-        series[coin] = ser
-
-    return series
-
-
-def _append_spot_log(logs_dir: Path, vs: str, spots: Dict[str, float], demo: bool):
-    ensure_dir(logs_dir)
-    path = logs_dir / "market_prices.jsonl"
-    ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+def _append_jsonl(path: Path, line: Dict[str, Any]):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        for coin, price in spots.items():
-            row = {
-                "ts_utc": ts,
-                "id": coin,
-                "symbol": coin[:3],
-                "vs": vs,
-                "price": float(price),
-                "source": "coingecko",
-                "attribution": "CoinGecko",
-                "demo": bool(demo),
-            }
-            f.write(json.dumps(row) + "\n")
+        f.write(json.dumps(line) + "\n")
 
 
-def _latest_spots_from_series(series: Dict[str, List[Tuple[int, float]]]) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    for c, ser in series.items():
-        if ser:
-            out[c] = float(ser[-1][1])
+def _resample_hourly(prices_ms: List[Tuple[int, float]], lookback_h: int) -> List[Tuple[datetime, float]]:
+    """
+    Input: list of (ts_ms, price) sorted ascending or not.
+    Output: hourly (right-labeled) points covering last lookback_h hours.
+    We keep the last price within each hour bucket.
+    """
+    if not prices_ms:
+        return []
+    prices_ms = sorted(prices_ms, key=lambda x: x[0])
+    now = _now_utc()
+    start = now - timedelta(hours=lookback_h)
+    # Build buckets on the hour
+    buckets: Dict[datetime, float] = {}
+    for ts_ms, price in prices_ms:
+        try:
+            ts = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+        except Exception:
+            continue
+        if ts < start or ts > now:
+            continue
+        hour = _floor_to_hour(ts)
+        buckets[hour] = float(price)  # last wins
+
+    # Ensure contiguous hours
+    out: List[Tuple[datetime, float]] = []
+    h = _floor_to_hour(start)
+    end_hour = _floor_to_hour(now)
+    last_price: float | None = None
+    while h <= end_hour:
+        if h in buckets:
+            last_price = buckets[h]
+        if last_price is not None:
+            out.append((h, last_price))
+        h = h + timedelta(hours=1)
     return out
 
 
-def _symbol_upper(coin_id: str) -> str:
-    return {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL"}.get(coin_id, coin_id[:3].upper())
+def _hourly_returns(series: List[Tuple[datetime, float]]) -> List[Tuple[datetime, float]]:
+    out: List[Tuple[datetime, float]] = []
+    prev = None
+    for t, p in series:
+        if prev is None:
+            out.append((t, 0.0))
+        else:
+            try:
+                r = (p / prev) - 1.0 if prev else 0.0
+            except Exception:
+                r = 0.0
+            out.append((t, r))
+        prev = p
+    return out
 
 
-def build_market_context(ctx) -> Tuple[Dict[str, object], List[str]]:
-    cfg = _env_cfg()
-    now_utc = datetime.now(timezone.utc)
+def _window_return(series: List[Tuple[datetime, float]], hours: int) -> float:
+    if not series:
+        return 0.0
+    end_t, end_p = series[-1]
+    start_cut = end_t - timedelta(hours=hours)
+    # find first point at/after start_cut
+    start_p = None
+    for t, p in series:
+        if t >= start_cut:
+            start_p = p
+            break
+    if start_p is None:
+        # fallback to earliest
+        start_p = series[0][1]
+    try:
+        return (end_p / start_p) - 1.0 if start_p else 0.0
+    except Exception:
+        return 0.0
 
-    demo_reason: Optional[str] = None
-    use_demo = cfg.demo
-    series: Dict[str, List[Tuple[int, float]]] = {}
 
-    if not use_demo:
+def _plot_price(path: Path, series: List[Tuple[datetime, float]], title: str):
+    if not series:
+        return
+    xs = [t for t, _ in series]
+    ys = [p for _, p in series]
+    plt.figure()
+    plt.plot(xs, ys, marker="o", linestyle="-", linewidth=1)
+    plt.title(title)
+    plt.xlabel("time (UTC)")
+    plt.ylabel("price")
+    plt.grid(True, linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path)
+    plt.close()
+
+
+def _plot_returns(path: Path, rets: List[Tuple[datetime, float]], title: str):
+    if not rets:
+        return
+    xs = [t for t, _ in rets]
+    ys = [r * 100.0 for _, r in rets]  # percent
+    plt.figure()
+    plt.bar(xs, ys)
+    # zero line
+    plt.axhline(0.0)
+    plt.title(title)
+    plt.xlabel("time (UTC)")
+    plt.ylabel("hourly return (%)")
+    plt.grid(True, linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path)
+    plt.close()
+
+
+def _demo_series(coin_id: str, lookback_h: int) -> List[Tuple[datetime, float]]:
+    # Deterministic-ish sine with small noise
+    now = _now_utc()
+    start = now - timedelta(hours=lookback_h)
+    out: List[Tuple[datetime, float]] = []
+    base = {"bitcoin": 60000.0, "ethereum": 3000.0, "solana": 150.0}.get(coin_id, 100.0)
+    amp = base * 0.05
+    step = timedelta(hours=1)
+    h = _floor_to_hour(start)
+    i = 0
+    while h <= _floor_to_hour(now):
+        val = base + amp * math.sin(i / 6.0) + amp * 0.1 * math.sin(i / 2.0)
+        out.append((h, float(val)))
+        h += step
+        i += 1
+    return out
+
+
+def build_market_context(models_dir: Path, artifacts_dir: Path, logs_dir: Path) -> Dict[str, Any]:
+    """
+    Live ingestion if possible; otherwise demo fallback.
+    Returns the JSON object written to models/market_context.json
+    """
+    vs = os.getenv("MW_CG_VS_CURRENCY", "usd").strip().lower() or "usd"
+    coins = [c.strip().lower() for c in (os.getenv("MW_CG_COINS", "bitcoin,ethereum,solana").split(","))]
+    coins = [c for c in coins if c]
+    lookback_h = int(os.getenv("MW_CG_LOOKBACK_H", "72") or "72")
+    demo_mode = os.getenv("MW_DEMO", "").strip().lower() in ("1", "true", "yes")
+
+    series_map: Dict[str, List[Tuple[datetime, float]]] = {}
+    spot_map: Dict[str, float] = {}
+    used_demo = False
+    demo_reason = None
+
+    if not demo_mode:
+        client = CoinGeckoClient()
         try:
-            series = _live_fetch_series(cfg, cfg.coins, now_utc=now_utc)
-            if not any(series.get(c) for c in cfg.coins):
-                raise RuntimeError("no series returned from market_chart")
+            # 1) Spot (single call)
+            sp = client.simple_price(coins, vs, include_24h_change=True)
+            for cid in coins:
+                val = sp.get(cid, {}).get(vs)
+                if isinstance(val, (int, float)):
+                    spot_map[cid] = float(val)
+
+            # 2) History per-coin
+            days = max(1, math.ceil(lookback_h / 24))
+            for cid in coins:
+                try:
+                    prices = client.market_chart_days(cid, vs, days)
+                    series_map[cid] = _resample_hourly(prices, lookback_h)
+                except Exception as e:
+                    # per-coin fallback: at least have something
+                    series_map[cid] = _demo_series(cid, lookback_h)
+                    if demo_reason is None:
+                        demo_reason = f"partial_history_failed[{cid}]: {type(e).__name__}"
+            client.close()
         except Exception as e:
-            use_demo = True
-            demo_reason = f"live_fetch_failed: {e.__class__.__name__}"
+            used_demo = True
+            demo_reason = f"live_fetch_failed: {type(e).__name__}"
+            # Demo for all coins
+            for cid in coins:
+                series_map[cid] = _demo_series(cid, lookback_h)
+                # synthetic spot = last point
+                if series_map[cid]:
+                    spot_map[cid] = series_map[cid][-1][1]
+    else:
+        used_demo = True
+        demo_reason = "MW_DEMO=true"
+        for cid in coins:
+            series_map[cid] = _demo_series(cid, lookback_h)
+            if series_map[cid]:
+                spot_map[cid] = series_map[cid][-1][1]
 
-    if use_demo:
-        series = _seed_demo_series(cfg.coins, now_utc=now_utc, lookback_h=cfg.lookback_h)
-
-    returns_by_coin: Dict[str, List[Tuple[int, float]]] = {}
-    agg_returns: Dict[str, Dict[str, Optional[float]]] = {}
-    for c in cfg.coins:
-        ser = series.get(c, [])
+    # Compute returns and JSON artifact
+    json_series: Dict[str, List[Dict[str, Any]]] = {}
+    returns_summary: Dict[str, Dict[str, float]] = {}
+    for cid in coins:
+        ser = series_map.get(cid, [])
         rets = _hourly_returns(ser)
-        returns_by_coin[c] = rets
-        agg_returns[c] = {
-            "h1": (rets[-1][1] if len(rets) >= 1 else None),
-            "h24": _window_return(ser, 24),
-            "h72": _window_return(ser, 72),
+        json_series[cid] = [{"t": _to_unix(t), "price": float(p)} for t, p in ser]
+        returns_summary[cid] = {
+            "h1": float(rets[-1][1]) if len(rets) >= 1 else 0.0,
+            "h24": float(_window_return(ser, 24)),
+            "h72": float(_window_return(ser, 72)),
         }
 
-    models_dir: Path = ensure_dir(Path(getattr(ctx, "models_dir", "models")))
-    payload: Dict[str, object] = {
-        "generated_at": now_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "vs": cfg.vs,
-        "coins": cfg.coins,
-        "window_hours": cfg.lookback_h,
-        "series": {c: [{"t": int(t), "price": float(p)} for (t, p) in series.get(c, [])] for c in cfg.coins},
-        "returns": {
-            c: {k: (None if v is None else round(float(v), 6)) for k, v in agg_returns.get(c, {}).items()}
-            for c in cfg.coins
-        },
-        "demo": bool(use_demo),
+    obj = {
+        "generated_at": _now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "vs": vs,
+        "coins": coins,
+        "window_hours": lookback_h,
+        "series": json_series,
+        "returns": returns_summary,
+        "demo": bool(used_demo),
         "attribution": "CoinGecko",
     }
-    if demo_reason:
-        payload["demo_reason"] = demo_reason
+    if used_demo and demo_reason:
+        obj["demo_reason"] = demo_reason
 
-    (models_dir / "market_context.json").write_text(json.dumps(payload), encoding="utf-8")
+    # Write JSON
+    _ensure_dir(models_dir)
+    _write_json(models_dir / "market_context.json", obj)
 
-    spots = _latest_spots_from_series(series)
-    logs_dir: Path = ensure_dir(Path(getattr(ctx, "logs_dir", "logs")))
-    _append_spot_log(logs_dir, vs=cfg.vs, spots=spots, demo=use_demo)
+    # Append spot logs
+    _ensure_dir(logs_dir)
+    ts = obj["generated_at"]
+    for cid in coins:
+        price = spot_map.get(cid)
+        if isinstance(price, (int, float)):
+            _append_jsonl(
+                logs_dir / "market_prices.jsonl",
+                {
+                    "ts_utc": ts,
+                    "id": cid,
+                    "symbol": {"bitcoin": "btc", "ethereum": "eth", "solana": "sol"}.get(cid, cid[:3]),
+                    "vs": vs,
+                    "price": float(price),
+                    "source": "coingecko",
+                    "attribution": "CoinGecko",
+                    "demo": bool(used_demo),
+                },
+            )
 
-    art_dir = ensure_dir(cfg.artifacts_dir)
-    for c in cfg.coins:
-        ser = series.get(c, [])
-        rets = returns_by_coin.get(c, [])
-        _plot_price(c, ser, art_dir / f"market_trend_price_{c}.png", cfg.lookback_h)
-        _plot_returns(c, rets, art_dir / f"market_trend_returns_{c}.png", cfg.lookback_h)
+    # Plots
+    _ensure_dir(artifacts_dir)
+    for cid in coins:
+        ser = series_map.get(cid, [])
+        if not ser:
+            continue
+        _plot_price(artifacts_dir / f"market_trend_price_{cid}.png", ser, f"{cid} price ({obj['window_hours']}h)")
+        rets = _hourly_returns(ser)
+        _plot_returns(artifacts_dir / f"market_trend_returns_{cid}.png", rets, f"{cid} hourly returns ({obj['window_hours']}h)")
 
-    header = f"📈 Market Context (CoinGecko, {cfg.lookback_h}h)" + (" (demo)" if use_demo else "")
-    lines: List[str] = [header]
-    for c in cfg.coins:
-        sym = _symbol_upper(c)
-        px = spots.get(c)
-        r = agg_returns.get(c, {})
-        h1 = r.get("h1"); h24 = r.get("h24"); h72 = r.get("h72")
-        vol_flag = " [vol ↑]" if (h24 is not None and abs(h24) >= 0.02) else ""
-        price_str = _fmt_usd(px) if px is not None else "—"
-        def pct(v): return ("—" if v is None else f"{v*100:+.1f}%")
-        lines.append(f"• {sym} → {price_str} | h1 {pct(h1)} | h24 {pct(h24)} | h72 {pct(h72)}{vol_flag}")
-    lines.append("— Data via CoinGecko API; subject to plan rate limits.")
-    if demo_reason:
-        lines[-1] += f" [demo_fallback: {demo_reason}]"
-
-    return payload, lines
-
-
-def run_ingest(logs_dir: str | Path = "logs", models_dir: str | Path = "models", artifacts_dir: Optional[str | Path] = None):
-    if artifacts_dir is not None:
-        os.environ["ARTIFACTS_DIR"] = str(artifacts_dir)
-
-    class _Ctx: ...
-    ctx = _Ctx()
-    ctx.logs_dir = Path(logs_dir)
-    ctx.models_dir = Path(models_dir)
-    return build_market_context(ctx)
+    return obj
 
 
-if __name__ == "__main__":
-    run_ingest()
+def run_ingest(models_dir: str | Path, artifacts_dir: str | Path, logs_dir: str | Path) -> Dict[str, Any]:
+    return build_market_context(Path(models_dir), Path(artifacts_dir), Path(logs_dir))
