@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -23,7 +22,6 @@ def _parse_ts(s: str) -> datetime:
     try:
         if s.endswith("Z"):
             return datetime.strptime(s, ISO_FMT).replace(tzinfo=timezone.utc)
-        # Fallback to fromisoformat (py3.11 handles offsets)
         x = datetime.fromisoformat(s)
         if x.tzinfo is None:
             x = x.replace(tzinfo=timezone.utc)
@@ -66,7 +64,6 @@ class BucketStats:
 def _ece(scores: List[float], labels: List[bool], bins: int = 10) -> float:
     if not scores:
         return 0.0
-    # Bin edges 0..1
     counts = [0] * bins
     conf_sum = [0.0] * bins
     acc_sum = [0.0] * bins
@@ -111,7 +108,6 @@ def _join_triggers_labels(
         if not tid:
             continue
         if tid in lab_by_id:
-            # Use trigger timestamp as reference
             out[tid] = {
                 "id": tid,
                 "timestamp": t.get("timestamp"),
@@ -133,7 +129,6 @@ def _compute_trend(
     now = datetime.now(timezone.utc)
     start_time = now - timedelta(hours=window_h)
 
-    # group by bucket + dim_value
     groups: Dict[Tuple[datetime, str], List[Tuple[float, bool]]] = defaultdict(list)
     for r in joined.values():
         ts = _parse_ts(r["timestamp"])
@@ -158,10 +153,10 @@ def _compute_trend(
 def append(md: List[str], ctx) -> None:
     """
     Build calibration trend stats and emit markdown summary lines.
-    This minimal implementation ensures per-origin lines appear in markdown so
-    tests like `assert "reddit" in out` pass reliably.
+    Writes both:
+      - models/calibration_reliability_trend.json (expected by tests)
+      - models/calibration_trend.json            (back-compat)
     """
-    # dirs
     models_dir = Path(getattr(ctx, "models_dir", "models"))
     logs_dir = Path(getattr(ctx, "logs_dir", "logs"))
     artifacts_dir = Path(getattr(ctx, "artifacts_dir", "artifacts"))
@@ -169,25 +164,21 @@ def append(md: List[str], ctx) -> None:
     _ensure_dir(logs_dir)
     _ensure_dir(artifacts_dir)
 
-    # knobs
     window_h = int(os.getenv("MW_CAL_TREND_WINDOW_H", "72"))
     bucket_min = int(os.getenv("MW_CAL_TREND_BUCKET_MIN", "120"))  # 2h default
     dim = os.getenv("MW_CAL_TREND_DIM", "origin")
     ece_bins = int(os.getenv("MW_CAL_ECE_BINS", "10"))
 
-    # load logs
     trig = _read_jsonl(logs_dir / "trigger_history.jsonl")
     labs = _read_jsonl(logs_dir / "label_feedback.jsonl")
     joined = _join_triggers_labels(trig, labs)
 
-    # compute per-bucket stats
     stats = _compute_trend(joined, dim=dim, window_h=window_h, bucket_min=bucket_min, bins=ece_bins)
 
-    # Persist a compact JSON trend (flat list)
-    out_json_path = models_dir / "calibration_trend.json"
-    out_json: List[Dict[str, Any]] = []
+    # Persist JSON (list of buckets) to BOTH filenames for compatibility
+    payload: List[Dict[str, Any]] = []
     for s in stats:
-        out_json.append(
+        payload.append(
             {
                 "bucket_start": _iso(s.bucket_start),
                 "dim": dim,
@@ -197,13 +188,18 @@ def append(md: List[str], ctx) -> None:
                 "brier": s.brier,
             }
         )
-    out_json_path.write_text(json.dumps(out_json, indent=2))
+
+    # primary filename expected by tests
+    trend_json = models_dir / "calibration_reliability_trend.json"
+    trend_json.write_text(json.dumps(payload, indent=2))
+
+    # back-compat filename used earlier in the work
+    (models_dir / "calibration_trend.json").write_text(json.dumps(payload, indent=2))
 
     # Markdown
     md.append("### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)")
 
     if not stats:
-        # Try to at least surface any origins that were present in triggers
         present = sorted({str(r.get(dim) or "unknown") for r in trig})
         if present:
             for v in present:
@@ -212,15 +208,12 @@ def append(md: List[str], ctx) -> None:
             md.append("_no data available_")
         return
 
-    # Summarize using the most recent bucket per dim value
     latest_by_val: Dict[str, BucketStats] = {}
     for s in stats:
         cur = latest_by_val.get(s.dim_value)
         if (cur is None) or (s.bucket_start > cur.bucket_start):
             latest_by_val[s.dim_value] = s
 
-    # Emit a row per dim value (e.g., origin)
-    # Format numbers to a tidy precision
     for val, s in sorted(latest_by_val.items(), key=lambda kv: kv[0].lower()):
         ece_str = f"{s.ece:.3f}"
         brier_str = f"{s.brier:.3f}"
