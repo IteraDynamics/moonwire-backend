@@ -109,6 +109,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"
+          MW_DEMO: "true"                 # ⬅️ NEW: enable demo for CoinGecko path in CI
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
           # knobs for visibility in CI
@@ -128,6 +129,11 @@ jobs:
           # NEW: enable per-origin section + align paths
           MW_CAL_PER_ORIGIN: "true"
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+          # Optional CoinGecko knobs (safe defaults for demo)
+          MW_CG_COINS: "bitcoin,ethereum,solana"
+          MW_CG_VS_CURRENCY: "usd"
+          MW_CG_LOOKBACK_H: "72"
+          MW_CG_RATE_LIMIT_PER_MIN: "25"
         run: python scripts/mw_demo_summary.py
 
       # --- Upload JSON artifacts produced by summary sections ---
@@ -257,6 +263,27 @@ jobs:
         with:
           name: calibration-per-origin
           path: models/calibration_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- NEW: Market Context artifacts ---
+      - name: Upload market context JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-context
+          path: models/market_context.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload market trend charts
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-trends
+          path: |
+            artifacts/market_trend_price_*.png
+            artifacts/market_trend_returns_*.png
           if-no-files-found: ignore
           retention-days: 14
 
