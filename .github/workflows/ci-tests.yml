@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      MPLBACKEND: Agg
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,15 +30,12 @@ jobs:
           python -m pip install -r requirements-dev.txt
 
       - name: Run pytest suite
-        env:
-          PYTHONPATH: ${{ github.workspace }}
         run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
 
       # --- Train trigger likelihood model(s) ---
       - name: Train trigger likelihood models (logistic)
         if: ${{ success() }}
         env:
-          PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"          # seed-friendly for CI
         run: |
           python -m src.ml.train_trigger_model --days 14 --interval hour
@@ -65,7 +65,6 @@ jobs:
       - name: Build training data from logs (join)
         if: ${{ success() }}
         env:
-          PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"              # seed demo rows if logs empty
           TRAINING_JOIN_WINDOW_MIN: "5"  # ±5 min join window
         run: |
@@ -78,7 +77,6 @@ jobs:
       - name: Retrain from training data (v0.5.1)
         if: ${{ success() }}
         env:
-          PYTHONPATH: ${{ github.workspace }}
           MODEL_VERSION: "v0.5.1"
           TRAIN_LOG_PATH: "models/training_data.jsonl"
           SAVE_MODEL_DIR: "models"
@@ -107,6 +105,9 @@ jobs:
       # --- Debug market env (no secrets printed) ---
       - name: Debug market env
         if: ${{ success() }}
+        env:
+          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
+          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
         run: |
           python - <<'PY'
           import os
@@ -116,24 +117,51 @@ jobs:
           print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
           PY
 
-      # --- NEW: Probe CoinGecko connectivity (status-only) ---
-      - name: Probe CoinGecko connectivity
+      # --- NEW: Live smoke test against CoinGecko (surfaces real error cause) ---
+      - name: CoinGecko live smoke test
         if: ${{ success() }}
         env:
-          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
+          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
         run: |
-          set -e
-          echo "HEAD $MW_CG_BASE_URL/ping"
-          code=$(curl -s -o /dev/null -w "%{http_code}" -H "x-cg-pro-api-key: $MW_CG_API_KEY" "$MW_CG_BASE_URL/ping")
-          echo "HTTP $code"
+          python - <<'PY'
+          import os, sys, json, time
+          import requests
+          base = (os.getenv("MW_CG_BASE_URL") or "https://api.coingecko.com/api/v3").rstrip("/")
+          key  = os.getenv("MW_CG_API_KEY") or ""
+          hdrs = {}
+          if key:
+              hdrs["x-cg-pro-api-key"] = key
 
+          def hit(path, params=None):
+              url = f"{base}{path}"
+              try:
+                  r = requests.get(url, headers=hdrs, params=params or {}, timeout=15)
+                  print(f"[CG] {path} -> {r.status_code}")
+                  body = r.text or ""
+                  print(f"[CG] body[:400]: {body[:400].replace(os.getenv('MW_CG_API_KEY',''), '***')}")
+                  r.raise_for_status()
+                  return r.json()
+              except Exception as e:
+                  print(f"[CG] ERROR {path}: {type(e).__name__}: {e}")
+                  # Non-fatal for CI; we just want the signal
+                  return None
+
+          # ping
+          hit("/ping")
+          # simple price
+          hit("/simple/price", {"ids":"bitcoin,ethereum,solana","vs_currencies":"usd","include_24hr_change":"true"})
+          # market chart (1 day) — typical path our code uses
+          hit("/coins/bitcoin/market_chart", {"vs_currency":"usd","days":"1"})
+          PY
+
+      # --- Build demo summary (Market Context live; others demo) ---
       - name: Build demo summary (read-only)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"              # keep other sections demo-friendly
-          MW_DEMO: "false"               # Market Context should use REAL data
+          MW_DEMO: "false"               # Market Context should use REAL data if possible
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
           MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MPLBACKEND: "Agg"
@@ -161,23 +189,6 @@ jobs:
           MW_CG_LOOKBACK_H: "72"
           MW_CG_RATE_LIMIT_PER_MIN: "25"
         run: python scripts/mw_demo_summary.py
-
-      # --- NEW: Inspect Market Context artifact (did we use demo?) ---
-      - name: Inspect market_context.json (demo flags)
-        if: ${{ success() }}
-        run: |
-          python - <<'PY'
-          import json, pathlib
-          p = pathlib.Path("models/market_context.json")
-          if p.exists():
-              j = json.loads(p.read_text())
-              print("demo =", j.get("demo"))
-              print("demo_reason =", j.get("demo_reason"))
-              print("series keys =", list((j.get("series") or {}).keys()))
-              print("returns keys =", list((j.get("returns") or {}).keys()))
-          else:
-              print("market_context.json missing")
-          PY
 
       # --- Upload JSON artifacts produced by summary sections ---
       - name: Upload accuracy-by-version snapshot
