@@ -116,6 +116,18 @@ jobs:
           print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
           PY
 
+      # --- NEW: Probe CoinGecko connectivity (status-only) ---
+      - name: Probe CoinGecko connectivity
+        if: ${{ success() }}
+        env:
+          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
+          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
+        run: |
+          set -e
+          echo "HEAD $MW_CG_BASE_URL/ping"
+          code=$(curl -s -o /dev/null -w "%{http_code}" -H "x-cg-pro-api-key: $MW_CG_API_KEY" "$MW_CG_BASE_URL/ping")
+          echo "HTTP $code"
+
       - name: Build demo summary (read-only)
         if: ${{ success() }}
         env:
@@ -149,6 +161,23 @@ jobs:
           MW_CG_LOOKBACK_H: "72"
           MW_CG_RATE_LIMIT_PER_MIN: "25"
         run: python scripts/mw_demo_summary.py
+
+      # --- NEW: Inspect Market Context artifact (did we use demo?) ---
+      - name: Inspect market_context.json (demo flags)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("models/market_context.json")
+          if p.exists():
+              j = json.loads(p.read_text())
+              print("demo =", j.get("demo"))
+              print("demo_reason =", j.get("demo_reason"))
+              print("series keys =", list((j.get("series") or {}).keys()))
+              print("returns keys =", list((j.get("returns") or {}).keys()))
+          else:
+              print("market_context.json missing")
+          PY
 
       # --- Upload JSON artifacts produced by summary sections ---
       - name: Upload accuracy-by-version snapshot
