@@ -377,3 +377,30 @@ def build_market_context(ctx) -> Tuple[Dict[str, object], List[str]]:
         lines[-1] += f" [demo_fallback: {demo_reason}]"
 
     return payload, lines
+
+
+def run_ingest(logs_dir: str | Path = "logs", models_dir: str | Path = "models", artifacts_dir: Optional[str | Path] = None):
+    """
+    Convenience runner used by tests and ad-hoc scripts.
+
+    Example:
+        from scripts.market.ingest_market import run_ingest
+        run_ingest("/tmp/logs", "/tmp/models", "/tmp/artifacts")
+    """
+    # allow ARTIFACTS_DIR override for this invocation
+    if artifacts_dir is not None:
+        os.environ["ARTIFACTS_DIR"] = str(artifacts_dir)
+
+    # minimal ctx object with the attrs we need
+    class _Ctx:
+        pass
+    ctx = _Ctx()
+    ctx.logs_dir = Path(logs_dir)
+    ctx.models_dir = Path(models_dir)
+
+    return build_market_context(ctx)
+
+
+if __name__ == "__main__":
+    # CLI-ish local run
+    run_ingest()
