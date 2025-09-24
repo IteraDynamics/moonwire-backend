@@ -17,10 +17,17 @@ class _CacheEntry:
     t0: float
 
 
+class _RetryableHTTPError(Exception):
+    def __init__(self, status_code: int, body: Optional[str]):
+        super().__init__(f"retryable status {status_code}")
+        self.status_code = status_code
+        self.body = body
+
+
 class CoinGeckoClient:
     """
     Minimal CoinGecko client with:
-      - base URL switching (demo vs pro)
+      - base URL switching (public vs pro)
       - x-cg-pro-api-key header (if provided)
       - simple in-run cache
       - retries with exponential backoff + jitter on 429/5xx
@@ -36,6 +43,9 @@ class CoinGeckoClient:
         timeout_read: int = 10,
         max_retries: int = 4,
     ):
+        # Allow env to supply defaults
+        api_key = api_key if api_key is not None else (os.getenv("MW_CG_API_KEY") or None)
+
         # If caller didn’t supply base_url, pick one based on whether an API key is set.
         if not base_url:
             base_url = "https://pro-api.coingecko.com/api/v3" if api_key else "https://api.coingecko.com/api/v3"
@@ -110,7 +120,7 @@ class CoinGeckoClient:
                 if cache_ttl > 0.0 and key is not None:
                     self._cache_put(key, data, cache_ttl)
                 return data
-            except _RetryableHTTPError as e:
+            except _RetryableHTTPError:
                 if attempt >= self.max_retries:
                     raise
                 # exponential backoff + jitter
@@ -138,8 +148,9 @@ class CoinGeckoClient:
     # Public API
     # -----------------------
 
-    def get_simple_price(self, ids: List[str], vs_currency: str) -> Dict[str, Any]:
+    def simple_price(self, ids: List[str], vs_currency: str, include_24h_change: bool = False) -> Dict[str, Any]:
         """
+        Compatibility method expected by tests:
         GET /simple/price
         Example return: {"bitcoin":{"usd":12345.6}, "ethereum":{"usd":3210.0}}
         """
@@ -148,12 +159,17 @@ class CoinGeckoClient:
         params = {
             "ids": ",".join(ids),
             "vs_currencies": vs_currency,
-            "include_24hr_change": "true",
         }
+        if include_24h_change:
+            params["include_24hr_change"] = "true"
         data = self._req_json("GET", "/simple/price", params=params, cache_ttl=5.0)
         if not isinstance(data, dict):
             raise TypeError(f"/simple/price returned non-dict: {type(data)}")
         return data
+
+    # Internal helper retained for our ingestion code (and future use).
+    def get_simple_price(self, ids: List[str], vs_currency: str) -> Dict[str, Any]:
+        return self.simple_price(ids, vs_currency, include_24h_change=True)
 
     def get_market_chart(self, coin_id: str, vs_currency: str, days: int, interval: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -171,10 +187,3 @@ class CoinGeckoClient:
         if "prices" not in data or not isinstance(data["prices"], list):
             raise TypeError(f"/market_chart missing 'prices' list: keys={list(data.keys())}")
         return data
-
-
-class _RetryableHTTPError(Exception):
-    def __init__(self, status_code: int, body: Optional[str]):
-        super().__init__(f"retryable status {status_code}")
-        self.status_code = status_code
-        self.body = body
