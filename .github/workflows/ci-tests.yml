@@ -9,7 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
+      # --- Checkout & Python toolchain ---
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -26,6 +28,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-dev.txt
 
+      # --- Run test suite (fast fail) ---
       - name: Run pytest suite
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -99,34 +102,71 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # --- Prepare & build CI demo summary ---
+      # --- Prepare dirs for summary ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
 
-      - name: Build demo summary (read-only)
+      # --- Debug market env (no secrets printed) ---
+      - name: Debug market env
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import os
+          print("MW_DEMO =", os.getenv("MW_DEMO"))
+          print("DEMO_MODE =", os.getenv("DEMO_MODE"))
+          print("Has API key? ->", bool(os.getenv("MW_CG_API_KEY")))
+          print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
+          print("MW_CG_RATE_LIMIT_PER_MIN =", os.getenv("MW_CG_RATE_LIMIT_PER_MIN"))
+          print("MW_CG_PACE_SLEEP =", os.getenv("MW_CG_PACE_SLEEP"))
+          print("MW_CG_TIMEOUT =", os.getenv("MW_CG_TIMEOUT"))
+          PY
+
+      # --- Build CI demo summary ---
+      # We keep other sections demo-friendly but force Market Context to use live data.
+      - name: Build demo summary (with live market context)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"
+
+          # Summary toggles
+          DEMO_MODE: "true"               # other sections may use demo
+          MW_DEMO: "false"                # Market Context should use REAL data
+
+          # CoinGecko credentials + tuning
+          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
+          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"  # free-tier endpoint
+          MW_CG_COINS: "bitcoin,ethereum,solana"
+          MW_CG_VS_CURRENCY: "usd"
+          MW_CG_LOOKBACK_H: "72"
+
+          # Rate-limit & pacing for free/beta keys (be conservative)
+          MW_CG_RATE_LIMIT_PER_MIN: "5"
+          MW_CG_PACE_SLEEP: "1.2"
+          MW_CG_TIMEOUT: "20"
+
+          # Enable inline diagnostics in the markdown on failure
+          MW_CG_DIAG: "1"
+
+          # Matplotlib headless
           MPLBACKEND: "Agg"
+
+          # Other existing knobs
           DEMO_RICH_SCORES: "true"
-          # knobs for visibility in CI
           TL_DRIFT_Z_THRESHOLD: "0.5"
           TL_DRIFT_PER_FEATURE_PENALTY: "0.1"
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
-          # accuracy-by-version snapshot
+
           MW_ACCURACY_WINDOW_H: "72"
-          # calibration & reliability defaults
           MW_CAL_WINDOW_H: "72"
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
-          # NEW: enable per-origin section + align paths
           MW_CAL_PER_ORIGIN: "true"
+
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
         run: python scripts/mw_demo_summary.py
 
@@ -257,6 +297,27 @@ jobs:
         with:
           name: calibration-per-origin
           path: models/calibration_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- NEW: Market Context artifacts ---
+      - name: Upload market context JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-context
+          path: models/market_context.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload market trend charts
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-trends
+          path: |
+            artifacts/market_trend_price_*.png
+            artifacts/market_trend_returns_*.png
           if-no-files-found: ignore
           retention-days: 14
 
