@@ -15,7 +15,6 @@ def _iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 def _parse_iso(s: str) -> datetime:
-    # Accepts "...Z" or full ISO with tz
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     return datetime.fromisoformat(s).astimezone(timezone.utc)
@@ -60,10 +59,6 @@ class _CtxShim:
 # ---------- Market helpers ----------
 
 def _series_to_hourly_prices(series: List[Dict[str, Any]]) -> Dict[datetime, float]:
-    """
-    Convert CG series (t: epoch seconds, price: float) to {hour_floor: price}.
-    If multiple within an hour, keep the last (tests use 1/hr).
-    """
     out: Dict[datetime, float] = {}
     for p in series:
         t = p.get("t")
@@ -75,9 +70,6 @@ def _series_to_hourly_prices(series: List[Dict[str, Any]]) -> Dict[datetime, flo
     return out
 
 def _hourly_returns_from_prices(hourly_prices: Dict[datetime, float]) -> Dict[datetime, float]:
-    """
-    Simple % returns: (p_t - p_{t-1}) / p_{t-1}, keyed by hour (for t where t-1 exists).
-    """
     if not hourly_prices:
         return {}
     out: Dict[datetime, float] = {}
@@ -91,9 +83,6 @@ def _hourly_returns_from_prices(hourly_prices: Dict[datetime, float]) -> Dict[da
     return out
 
 def _rolling_volatility(returns: Dict[datetime, float], window: int = 6) -> Dict[datetime, float]:
-    """
-    Rolling volatility proxy = population stdev of last `window` hourly returns.
-    """
     if not returns:
         return {}
     out: Dict[datetime, float] = {}
@@ -103,7 +92,7 @@ def _rolling_volatility(returns: Dict[datetime, float], window: int = 6) -> Dict
         buf.append(returns[t])
         if len(buf) > window:
             buf.pop(0)
-        if len(buf) >= max(2, window//2):  # need enough points
+        if len(buf) >= max(2, window//2):
             out[t] = pstdev(buf)
     return out
 
@@ -124,7 +113,6 @@ def _percentile(values: List[float], pct: float) -> float:
 # ---------- Base trend construction (fallbacks) ----------
 
 def _demo_trend(now: datetime) -> dict:
-    # 3 hourly buckets with a slight pattern
     buckets = [now - timedelta(hours=h) for h in (6, 4, 2)]
     return {
         "meta": {
@@ -148,11 +136,6 @@ def _demo_trend(now: datetime) -> dict:
     }
 
 def _build_base_trend_from_logs(logs_dir: Path, now: datetime) -> dict:
-    """
-    Minimal fallback: if logs exist (trigger_history + label_feedback), build a
-    coarse trend with 3 buckets for a single origin 'reddit' to satisfy tests.
-    (We keep this simple—tests for the overlay don’t validate the builder itself.)
-    """
     trig = (logs_dir / "trigger_history.jsonl")
     labs = (logs_dir / "label_feedback.jsonl")
     if not trig.exists() or not labs.exists():
@@ -182,10 +165,6 @@ def _build_base_trend_from_logs(logs_dir: Path, now: datetime) -> dict:
 # ---------- Enrichment ----------
 
 def _enrich_with_market(trend: dict, market: dict, now: datetime) -> Tuple[dict, Dict[datetime, str], Dict[datetime, float]]:
-    """
-    Adds 'market' subobject and 'alerts' list to each point in each series.
-    Also returns (trend, vol_bucket_by_hour, btc_returns_by_hour)
-    """
     series = market.get("series") or {}
     btc = series.get("bitcoin") or []
     hourly_prices = _series_to_hourly_prices(btc)
@@ -193,7 +172,6 @@ def _enrich_with_market(trend: dict, market: dict, now: datetime) -> Tuple[dict,
     vol_window = _env_int("MW_VOL_WINDOW_H", 6)
     vol = _rolling_volatility(btc_rets, window=vol_window)
 
-    # thresh by 75th percentile over last 72h of available vol
     vol_vals = list(vol.values())
     high_thresh = _percentile(vol_vals, 75.0) if vol_vals else float("inf")
     vol_bucket_by_hour: Dict[datetime, str] = {}
@@ -202,13 +180,11 @@ def _enrich_with_market(trend: dict, market: dict, now: datetime) -> Tuple[dict,
 
     ece_thresh = _env_float("MW_CAL_MAX_ECE", 0.06)
 
-    # mutate points in-place
     for s in trend.get("series", []):
         pts = s.get("points", [])
         for p in pts:
             bs = _parse_iso(p["bucket_start"])
             hour = _hour_floor(bs)
-            # find closest hourly return at same hour
             r = btc_rets.get(hour, 0.0)
             vb = vol_bucket_by_hour.get(hour, "normal")
             p["market"] = {
@@ -229,12 +205,11 @@ def _enrich_with_market(trend: dict, market: dict, now: datetime) -> Tuple[dict,
 def _plot_with_vol_bands(trend: dict, vol_bucket_by_hour: Dict[datetime, str], artifacts_dir: Path) -> None:
     try:
         import matplotlib
-        # Respect existing backend if set; otherwise, Agg is fine in CI
         if not os.getenv("MPLBACKEND"):
             matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except Exception:
-        return  # plotting optional in tests, but they do check files—best effort only
+        return
 
     def _collect_timeseries(metric: str):
         xs: List[datetime] = []
@@ -247,12 +222,11 @@ def _plot_with_vol_bands(trend: dict, vol_bucket_by_hour: Dict[datetime, str], a
                 ts.append(_parse_iso(p["bucket_start"]))
                 ys.append(float(p.get(metric, 0.0)))
             if ts and ys:
-                xs = ts  # all aligned by buckets in tests
+                xs = ts
                 ys_by_key[key] = ys
         return xs, ys_by_key
 
     def _shade(ax, hours: List[datetime]):
-        # Merge contiguous "high" hours into spans.
         if not hours:
             return
         spans: List[Tuple[datetime, datetime]] = []
@@ -267,11 +241,10 @@ def _plot_with_vol_bands(trend: dict, vol_bucket_by_hour: Dict[datetime, str], a
                 start = h; prev = h
         spans.append((start, prev + timedelta(hours=1)))
         for (a, b) in spans:
-            ax.axvspan(a, b, alpha=0.15)  # default facecolor
+            ax.axvspan(a, b, alpha=0.15)
 
     high_hours = [t for t, b in vol_bucket_by_hour.items() if b == "high"]
 
-    # ECE plot
     xs, ys_by_key = _collect_timeseries("ece")
     if xs and ys_by_key:
         fig = plt.figure()
@@ -287,7 +260,6 @@ def _plot_with_vol_bands(trend: dict, vol_bucket_by_hour: Dict[datetime, str], a
         fig.savefig(artifacts_dir / "calibration_trend_ece.png", bbox_inches="tight")
         plt.close(fig)
 
-    # Brier plot
     xs, ys_by_key = _collect_timeseries("brier")
     if xs and ys_by_key:
         fig = plt.figure()
@@ -308,17 +280,7 @@ def _plot_with_vol_bands(trend: dict, vol_bucket_by_hour: Dict[datetime, str], a
 def append(md: List[str], ctx) -> None:
     """
     Enrich calibration trend with market regimes and emit plots + markdown.
-
-    Behavior:
-      - If models/calibration_reliability_trend.json exists and has non-empty series: use it as base.
-      - Else, try to build a simple base from logs.
-      - Else, synthesize a demo trend.
-      - If models/market_context.json exists, overlay btc_return + volatility regime and alerts.
-      - Write enriched JSON back to models/calibration_reliability_trend.json.
-      - Produce plots with volatility bands.
-      - Emit a concise markdown summary including origins and flags.
     """
-    # Support SummaryContext used in tests; fill missing attrs
     models_dir = Path(getattr(ctx, "models_dir", Path("models")))
     artifacts_dir = Path(getattr(ctx, "artifacts_dir", Path("artifacts")))
     logs_dir = Path(getattr(ctx, "logs_dir", Path("logs")))
@@ -327,45 +289,41 @@ def append(md: List[str], ctx) -> None:
 
     now = datetime.now(timezone.utc)
 
-    # 1) Base trend preference: existing file -> logs -> demo
     trend_path = models_dir / "calibration_reliability_trend.json"
     trend = _load_json(trend_path) or {}
 
-    # Normalize shape if present
     base_series = trend.get("series") or []
     if not base_series:
-        # try logs
         built = _build_base_trend_from_logs(logs_dir, now)
         if built:
             trend = built
         else:
             trend = _demo_trend(now)
 
-    # 2) Overlay market regimes if market context present
     market_path = models_dir / "market_context.json"
     market = _load_json(market_path) or {}
     vol_bucket_by_hour: Dict[datetime, str] = {}
-    btc_rets: Dict[datetime, float] = {}
     if market.get("series"):
-        trend, vol_bucket_by_hour, btc_rets = _enrich_with_market(trend, market, now)
+        trend, vol_bucket_by_hour, _ = _enrich_with_market(trend, market, now)
 
-    # 3) Persist enriched JSON (do NOT wipe series)
-    # For test expectations: top-level "demo" mirrors meta.demo if present
     meta = trend.get("meta", {})
     if "demo" in meta:
         trend["demo"] = bool(meta["demo"])
     _write_json(trend_path, trend)
 
-    # 4) Plots
     try:
         _plot_with_vol_bands(trend, vol_bucket_by_hour, artifacts_dir)
     except Exception:
         pass
 
-    # 5) Markdown summary
-    md.append("### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)")
+    # --- Markdown ---
+    is_demo_context = bool(meta.get("demo") or os.getenv("DEMO_MODE") == "true" or getattr(ctx, "is_demo", False))
+    title = "### 🧮 Calibration & Reliability Trend vs Market Regimes (72h)"
+    if is_demo_context:
+        title += " (demo)"
+    md.append(title)
+
     lines: List[str] = []
-    # If we have series, emit per-key summary; else say no data
     if trend.get("series"):
         for s in trend["series"]:
             key = s.get("key", "unknown")
@@ -373,13 +331,9 @@ def append(md: List[str], ctx) -> None:
             if not pts:
                 continue
             last = pts[-1]
-            flags = []
             alerts = last.get("alerts", [])
-            if alerts:
-                flags.extend(alerts)
             mkt = last.get("market", {})
             br = mkt.get("btc_return")
-            # compact (-3.1% style)
             br_txt = f"{br:+.1%}" if isinstance(br, (int, float)) else "n/a"
             vol_b = mkt.get("btc_vol_bucket")
             frag = f"{key} → ECE {last.get('ece', 0):.2f}, BTC {br_txt}"
@@ -389,12 +343,9 @@ def append(md: List[str], ctx) -> None:
                 frag += " [high_ece]"
             lines.append(frag)
         if not lines:
-            # fall back in case points missing
             lines.append("_no data available_")
     else:
-        # demo path should have "(demo)" in summary (tests expect this when DEMO_MODE)
-        is_demo = bool(os.getenv("DEMO_MODE") == "true" or getattr(ctx, "is_demo", False))
-        lines.append("(demo) _no data available_" if is_demo else "_no data available_")
+        lines.append("(demo) _no data available_" if is_demo_context else "_no data available_")
 
     for ln in lines:
         md.append(ln)
