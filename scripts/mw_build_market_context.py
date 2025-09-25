@@ -1,104 +1,101 @@
 #!/usr/bin/env python3
 """
-Convenience wrapper to (re)build Market Context artifacts.
+mw_build_market_context.py
 
-Usage examples:
+Tiny CLI wrapper to (re)build Market Context artifacts using CoinGecko ingest.
 
-# Demo (no network)
-python scripts/mw_build_market_context.py --demo
-
-# Live CoinGecko (requires key in env or flag)
-python scripts/mw_build_market_context.py \
-  --no-demo \
-  --cg-api-key "$MW_CG_API_KEY" \
-  --cg-base-url "https://api.coingecko.com/api/v3" \
-  --coins "bitcoin,ethereum,solana" \
-  --lookback-h 72
-
-You can also set environment variables instead of flags:
-  MW_DEMO=true|false
-  MW_CG_API_KEY=...
-  MW_CG_BASE_URL=...
-  MW_CG_COINS=bitcoin,ethereum,solana
-  MW_CG_VS_CURRENCY=usd
-  MW_CG_LOOKBACK_H=72
-  MW_CG_RATE_LIMIT_PER_MIN=25
+- Calls scripts.market.ingest_market.run_ingest(logs_dir, models_dir, artifacts_dir)
+- Respects --demo flag (by setting MW_DEMO)
+- Lets you override directories via flags; defaults to ./logs, ./models, ./artifacts
+- Exits non-zero on failure so CI can catch it
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
-import argparse
 from pathlib import Path
 
+def _bool_env(val: str | None) -> bool:
+    if val is None:
+        return False
+    return val.strip().lower() in ("1", "true", "yes", "y", "on")
 
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build Market Context artifacts via CoinGecko ingest.")
-    # Paths
-    p.add_argument("--logs-dir", default="logs", help="Directory for append-only logs (default: logs)")
-    p.add_argument("--models-dir", default="models", help="Directory for JSON artifacts (default: models)")
-    p.add_argument("--artifacts-dir", default="artifacts", help="Directory for PNG artifacts (default: artifacts)")
-
-    # Demo / live
-    demo_default = os.getenv("MW_DEMO", "true").lower() in ("1", "true", "yes", "y")
-    g = p.add_mutually_exclusive_group()
-    g.add_argument("--demo", dest="demo", action="store_true", default=demo_default, help="Force demo mode")
-    g.add_argument("--no-demo", dest="demo", action="store_false", help="Disable demo mode (use live data)")
-
-    # CoinGecko knobs
-    p.add_argument("--cg-api-key", default=os.getenv("MW_CG_API_KEY"), help="CoinGecko API key (Pro key if applicable)")
-    p.add_argument("--cg-base-url", default=os.getenv("MW_CG_BASE_URL", "https://api.coingecko.com/api/v3"),
-                   help="CoinGecko base URL")
-    p.add_argument("--coins", default=os.getenv("MW_CG_COINS", "bitcoin,ethereum,solana"),
-                   help="Comma-separated list of coins (ids)")
-    p.add_argument("--vs", default=os.getenv("MW_CG_VS_CURRENCY", "usd"), help="Quote currency (default: usd)")
-    p.add_argument("--lookback-h", type=int, default=int(os.getenv("MW_CG_LOOKBACK_H", "72")),
-                   help="Lookback window in hours (default: 72)")
-    p.add_argument("--rate-limit-per-min", type=int, default=int(os.getenv("MW_CG_RATE_LIMIT_PER_MIN", "25")),
-                   help="Client-side pacing for requests per minute")
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Build Market Context (CoinGecko) artifacts.")
+    p.add_argument("--logs", dest="logs_dir", type=Path, default=Path("logs"),
+                   help="Directory for append-only logs (default: ./logs)")
+    p.add_argument("--models", dest="models_dir", type=Path, default=Path("models"),
+                   help="Directory for JSON models (default: ./models)")
+    p.add_argument("--artifacts", dest="artifacts_dir", type=Path, default=Path("artifacts"),
+                   help="Directory for PNG artifacts (default: ./artifacts)")
+    p.add_argument("--demo", dest="demo", action="store_true",
+                   help="Force demo mode (sets MW_DEMO=true for this run)")
+    p.add_argument("--no-demo", dest="no_demo", action="store_true",
+                   help="Force live mode (sets MW_DEMO=false for this run)")
+    # passthrough convenience (optional; ingest reads envs)
+    p.add_argument("--coins", dest="coins", type=str, default=None,
+                   help="Override MW_CG_COINS (e.g., 'bitcoin,ethereum,solana')")
+    p.add_argument("--vs", dest="vs", type=str, default=None,
+                   help="Override MW_CG_VS_CURRENCY (default via env)")
+    p.add_argument("--lookback-h", dest="lookback_h", type=str, default=None,
+                   help="Override MW_CG_LOOKBACK_H (hours)")
+    p.add_argument("--base-url", dest="base_url", type=str, default=None,
+                   help="Override MW_CG_BASE_URL")
     return p.parse_args()
 
-
 def main() -> int:
-    args = _parse_args()
+    args = parse_args()
 
-    # Ensure dirs
-    logs_dir = Path(args.logs_dir); logs_dir.mkdir(parents=True, exist_ok=True)
-    models_dir = Path(args.models_dir); models_dir.mkdir(parents=True, exist_ok=True)
-    artifacts_dir = Path(args.artifacts_dir); artifacts_dir.mkdir(parents=True, exist_ok=True)
+    # Ensure directories exist
+    args.logs_dir.mkdir(parents=True, exist_ok=True)
+    args.models_dir.mkdir(parents=True, exist_ok=True)
+    args.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    # Reflect flags into env that the underlying ingest already reads
-    os.environ["MW_DEMO"] = "true" if args.demo else "false"
-    if args.cg_api_key:
-        os.environ["MW_CG_API_KEY"] = args.cg_api_key
-    if args.cg_base_url:
-        os.environ["MW_CG_BASE_URL"] = args.cg_base_url
-    if args.coins:
+    # Respect --demo / --no-demo (explicit flag beats env)
+    if args.demo and args.no_demo:
+        print("[mw_build_market_context] --demo and --no-demo are mutually exclusive.", file=sys.stderr)
+        return 2
+    if args.demo:
+        os.environ["MW_DEMO"] = "true"
+    elif args.no_demo:
+        os.environ["MW_DEMO"] = "false"
+    else:
+        # leave MW_DEMO as-is; allow existing env to flow through
+        pass
+
+    # Optional passthrough envs
+    if args.coins is not None:
         os.environ["MW_CG_COINS"] = args.coins
-    if args.vs:
+    if args.vs is not None:
         os.environ["MW_CG_VS_CURRENCY"] = args.vs
-    os.environ["MW_CG_LOOKBACK_H"] = str(args.lookback_h)
-    os.environ["MW_CG_RATE_LIMIT_PER_MIN"] = str(args.rate_limit_per_min)
+    if args.lookback_h is not None:
+        os.environ["MW_CG_LOOKBACK_H"] = args.lookback_h
+    if args.base_url is not None:
+        os.environ["MW_CG_BASE_URL"] = args.base_url
 
     try:
         from scripts.market.ingest_market import run_ingest
     except Exception as e:
-        print(f"[mw_build_market_context] Failed to import ingest: {type(e).__name__}: {e}", file=sys.stderr)
-        return 2
+        print(f"[mw_build_market_context] Import failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
 
     try:
-        run_ingest(logs_dir=logs_dir, models_dir=models_dir, artifacts_dir=artifacts_dir)
+        # IMPORTANT: your run_ingest expects *positional* arguments
+        out = run_ingest(args.logs_dir, args.models_dir, args.artifacts_dir)
+        # Be chatty on success
+        print("[mw_build_market_context] Done.")
+        if out is not None:
+            print(out)
+        # Sanity: show the key outputs if present
+        mc = args.models_dir / "market_context.json"
+        if mc.exists():
+            print(f"[mw_build_market_context] wrote {mc}")
+        return 0
     except Exception as e:
         print(f"[mw_build_market_context] Ingest failed: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
 
-    print("[mw_build_market_context] Done.")
-    print(f"  models:    {models_dir / 'market_context.json'}")
-    print(f"  artifacts: {(artifacts_dir / 'market_trend_price_bitcoin.png').parent}")
-    print(f"  logs:      {logs_dir / 'market_prices.jsonl'}")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
