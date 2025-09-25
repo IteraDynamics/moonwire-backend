@@ -3,149 +3,118 @@ from __future__ import annotations
 
 import os
 import json
-from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
+# Summary sections
+from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
+from scripts.summary_sections import (
+    calibration_reliability_trend as cal_trend,  # enhanced market-aware block
+    market_context,                              # market context section
+)
 
-# ------------------------------
-# Demo data seeding (test-backed)
-# ------------------------------
+# -------------------------------------------------------------------
+# Demo seeding (kept minimal; tested in tests/test_demo_seed.py)
+# -------------------------------------------------------------------
 
-def _ziso(dt: datetime) -> str:
-    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def generate_demo_data_if_needed(origins_rows: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+def generate_demo_data_if_needed(reviewers_seed: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Return (reviewers, events).
+    If DEMO_MODE=true and no reviewers provided, seed 3 demo reviewers and a
+    single 'demo_summary_generated' event. If DEMO_MODE=false, return inputs.
 
-    Contract required by tests:
-      - If DEMO_MODE != "true": return ([], []).
-      - If DEMO_MODE == "true" and `origins_rows` is non-empty (real reviewers): return (origins_rows, []).
-      - If DEMO_MODE == "true" and no reviewers provided: synthesize 3 reviewers and
-        emit one event per reviewer (len(events) == len(reviewers)).
+    Returns (reviewers, events).
     """
     demo_mode = str(os.getenv("DEMO_MODE", "")).lower() == "true"
+
     if not demo_mode:
-        return [], []
+        # Pass-through: no side-effects/events
+        return reviewers_seed, []
 
-    if origins_rows:
-        # In demo mode but real reviewers were passed in -> do not synthesize events.
-        return list(origins_rows), []
+    if reviewers_seed:
+        # Respect given reviewers in demo mode; no synthetic summary event
+        return reviewers_seed, []
 
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-
+    now = datetime.now(timezone.utc)
     reviewers = [
-        {
-            "id": "rev_demo_1",
-            "origin": "reddit",
-            "score": 0.82,
-            "timestamp": _ziso(now - timedelta(hours=2)),
-        },
-        {
-            "id": "rev_demo_2",
-            "origin": "rss_news",
-            "score": 0.31,
-            "timestamp": _ziso(now - timedelta(hours=1)),
-        },
-        {
-            "id": "rev_demo_3",
-            "origin": "twitter",
-            "score": 0.67,
-            "timestamp": _ziso(now),
-        },
+        {"id": "rev_demo_1", "origin": "reddit",  "score": 0.82, "timestamp": _iso(now.replace(minute=0))},
+        {"id": "rev_demo_2", "origin": "rss_news","score": 0.74, "timestamp": _iso(now.replace(minute=0) + (now - now))},
+        {"id": "rev_demo_3", "origin": "twitter", "score": 0.67, "timestamp": _iso(now.replace(minute=0))},
     ]
-    events = [
-        {
-            "type": "demo_review_created",
-            "at": r["timestamp"],
-            "meta": {"version": "v0.6.6", "note": "seeded in demo mode"},
-            "review_id": r["id"],
-        }
-        for r in reviewers
-    ]
+    events = [{
+        "type": "demo_summary_generated",
+        "at": _iso(now),
+        "meta": {"version": "v0.6.6", "note": "seeded in demo mode"},
+    }]
     return reviewers, events
 
+# -------------------------------------------------------------------
+# Markdown summary builder
+# -------------------------------------------------------------------
 
-# --------------------------------
-# Minimal CI summary file generator
-# --------------------------------
+def _gather_plot_inventory(artifacts_dir: Path) -> List[str]:
+    if not artifacts_dir.exists():
+        return []
+    names = []
+    for p in sorted(artifacts_dir.glob("*.png")):
+        names.append(p.name)
+    return names
 
-def _read_json_safe(p: Path):
+def _append_section_safe(md: List[str], title: str, fn, ctx: SummaryContext):
+    """Run a summary section, never crash summary, surface short error note."""
     try:
-        return json.loads(p.read_text())
-    except Exception:
-        return None
+        fn(md, ctx)
+    except Exception as e:  # noqa: BLE001
+        md.append(f"\n**{title}**: _error: {e!r}_\n")
 
+def build_summary_md(ctx: SummaryContext) -> str:
+    md: List[str] = []
+    md.append("### MoonWire CI Demo Summary\n")
 
-def build_demo_summary(models_dir: Path = Path("models"), artifacts_dir: Path = Path("artifacts")) -> Path:
-    """
-    Create a lightweight CI markdown summary at artifacts/demo_summary.md.
-    This never raises on missing files; it simply reports what exists.
-    """
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    models_dir.mkdir(parents=True, exist_ok=True)
+    # --- Market Context (shows BTC/ETH/SOL and writes artifacts/models) ---
+    _append_section_safe(md, "Market Context", market_context.append, ctx)
 
-    out_md = artifacts_dir / "demo_summary.md"
+    # --- Calibration & Reliability Trend (market-aware overlays) ---
+    _append_section_safe(md, "Calibration & Reliability Trend", cal_trend.append, ctx)
 
-    # Collect a few optional model artifacts for display
-    sections: List[str] = []
-    sections.append("### MoonWire CI Demo Summary\n")
+    # --- Plots inventory (so the CI summary always lists what’s viewable) ---
+    plots = _gather_plot_inventory(Path(ctx.artifacts_dir))
+    if plots:
+        md.append("\n**🖼️ Plots available**")
+        for name in plots:
+            md.append(f"- {name}")
+        md.append("")  # final newline
 
-    # Market context (optional)
-    mc_path = models_dir / "market_context.json"
-    mc = _read_json_safe(mc_path)
-    if mc:
-        returns = mc.get("returns", {})
-        coins = mc.get("coins", [])
-        lines = []
-        for sym in coins:
-            r = returns.get(sym, {})
-            if isinstance(r, dict):
-                lines.append(f"- {sym}: h1 {r.get('h1','n/a')} | h24 {r.get('h24','n/a')} | h72 {r.get('h72','n/a')}")
-        if lines:
-            sections.append("#### 📈 Market Context (CoinGecko)\n" + "\n".join(lines) + "\n")
+    return "\n".join(md)
 
-    # Calibration trend (optional)
-    crt_path = models_dir / "calibration_reliability_trend.json"
-    crt = _read_json_safe(crt_path)
-    if crt and isinstance(crt, dict):
-        dim = crt.get("meta", {}).get("dim", "origin")
-        series = crt.get("series", [])
-        bullets = []
-        for s in series[:3]:
-            key = s.get("key", "unknown")
-            pts = s.get("points", [])
-            if pts:
-                last = pts[-1]
-                bullets.append(f"- {key}: ECE {last.get('ece','n/a')} (n={last.get('n','?')})")
-        if bullets:
-            sections.append("#### 🧮 Calibration Trend (latest)\n" + "\n".join(bullets) + "\n")
+# -------------------------------------------------------------------
+# CLI
+# -------------------------------------------------------------------
 
-    # List available PNG plots in artifacts
-    pngs = sorted([p for p in artifacts_dir.glob("*.png")])
-    if pngs:
-        sections.append("#### 🖼️ Plots available\n" + "\n".join(f"- {p.name}" for p in pngs) + "\n")
+def main() -> None:
+    repo_root = Path(os.getcwd())
+    artifacts = ensure_dir(repo_root / "artifacts")
+    models = ensure_dir(repo_root / "models")
+    logs = ensure_dir(repo_root / "logs")
 
-    # Fallback if nothing else
-    if len(sections) == 1:
-        sections.append("_No artifacts found yet; this is a minimal summary stub._\n")
+    is_demo = str(os.getenv("DEMO_MODE", "")).lower() == "true"
 
-    out_md.write_text("\n".join(sections))
-    return out_md
+    # Seed (no-op unless demo + no reviewers provided)
+    _ = generate_demo_data_if_needed([])
 
-
-def _main() -> None:
-    # Keep demo seeding behavior (used by tests) and also ensure the CI summary exists.
-    reviewers, events = generate_demo_data_if_needed([])
-    _ = build_demo_summary(Path("models"), Path("artifacts"))
-    demo = "true" if reviewers or events else "false"
-    print(
-        f"[mw_demo_summary] DEMO_MODE derived output present: {demo} "
-        f"(reviewers={len(reviewers)}, events={len(events)})"
+    ctx = SummaryContext(
+        logs_dir=logs,
+        models_dir=models,
+        is_demo=is_demo,
     )
+    # Some callers (and our enhanced sections) expect artifacts_dir on ctx
+    setattr(ctx, "artifacts_dir", artifacts)
 
+    md = build_summary_md(ctx)
+
+    out_path = artifacts / "demo_summary.md"
+    out_path.write_text(md)
 
 if __name__ == "__main__":
-    _main()
+    main()
