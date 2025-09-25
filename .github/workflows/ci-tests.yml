@@ -9,9 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
-      # --- Checkout & Python toolchain ---
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -28,7 +26,6 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-dev.txt
 
-      # --- Run test suite (fast fail) ---
       - name: Run pytest suite
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -102,56 +99,66 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # --- Prepare dirs for summary ---
+      # --- Prepare & build CI demo summary ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
 
-      # --- Debug market env (no secrets printed) ---
-      - name: Debug market env
+      # --- Debug env (no secrets printed) ---
+      - name: Debug env
         if: ${{ success() }}
         run: |
           python - <<'PY'
           import os
           print("MW_DEMO =", os.getenv("MW_DEMO"))
           print("DEMO_MODE =", os.getenv("DEMO_MODE"))
-          print("Has API key? ->", bool(os.getenv("MW_CG_API_KEY")))
+          print("Has CoinGecko API key? ->", bool(os.getenv("MW_CG_API_KEY")))
           print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
-          print("MW_CG_RATE_LIMIT_PER_MIN =", os.getenv("MW_CG_RATE_LIMIT_PER_MIN"))
-          print("MW_CG_PACE_SLEEP =", os.getenv("MW_CG_PACE_SLEEP"))
-          print("MW_CG_TIMEOUT =", os.getenv("MW_CG_TIMEOUT"))
+          print("MW_REDDIT_MODE =", os.getenv("MW_REDDIT_MODE"))
+          print("MW_REDDIT_SUBS =", os.getenv("MW_REDDIT_SUBS"))
           PY
 
-      # --- Build CI demo summary ---
-      # We keep other sections demo-friendly but force Market Context to use live data.
-      - name: Build demo summary (with live market context)
+      # --- Market Context: LIVE (CoinGecko) ---
+      - name: Build Market Context artifacts (live)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-
-          # Summary toggles
-          DEMO_MODE: "true"               # other sections may use demo
-          MW_DEMO: "false"                # Market Context should use REAL data
-
-          # CoinGecko credentials + tuning
+          MW_DEMO: "false"
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
-          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"  # free-tier endpoint
+          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MW_CG_COINS: "bitcoin,ethereum,solana"
           MW_CG_VS_CURRENCY: "usd"
           MW_CG_LOOKBACK_H: "72"
-
-          # Rate-limit & pacing for free/beta keys (be conservative)
-          MW_CG_RATE_LIMIT_PER_MIN: "5"
-          MW_CG_PACE_SLEEP: "1.2"
-          MW_CG_TIMEOUT: "20"
-
-          # Enable inline diagnostics in the markdown on failure
-          MW_CG_DIAG: "1"
-
-          # Matplotlib headless
+          MW_CG_RATE_LIMIT_PER_MIN: "25"
           MPLBACKEND: "Agg"
+        run: python scripts/mw_build_market_context.py
 
-          # Other existing knobs
+      # --- Reddit Lite Ingest: LIVE via RSS (no auth) ---
+      - name: Ingest Reddit (RSS live)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_DEMO: "false"
+          MW_REDDIT_MODE: "rss"
+          MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
+          MW_REDDIT_SORT: "new"
+          MW_REDDIT_LOOKBACK_H: "72"
+          MPLBACKEND: "Agg"
+        run: |
+          python -m scripts.social.reddit_lite_ingest
+          echo "Reddit artifacts:"
+          ls -lah artifacts || true
+          echo "Reddit models:"
+          ls -lah models || true
+          echo "Reddit logs:"
+          ls -lah logs || true
+
+      # --- Build CI summary (includes Market, Social, Calibration) ---
+      - name: Build CI summary (markdown)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_DEMO: "false"                 # show live data
           DEMO_RICH_SCORES: "true"
           TL_DRIFT_Z_THRESHOLD: "0.5"
           TL_DRIFT_PER_FEATURE_PENALTY: "0.1"
@@ -159,148 +166,14 @@ jobs:
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
-
           MW_ACCURACY_WINDOW_H: "72"
           MW_CAL_WINDOW_H: "72"
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
-          MW_CAL_PER_ORIGIN: "true"
-
-          ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
         run: python scripts/mw_demo_summary.py
 
       # --- Upload JSON artifacts produced by summary sections ---
-      - name: Upload accuracy-by-version snapshot
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: accuracy-by-version
-          path: models/accuracy_by_version.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload signal quality summary
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: signal-quality-summary
-          path: models/signal_quality_summary.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload per-origin signal quality
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: signal-quality-per-origin
-          path: models/signal_quality_per_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload per-version signal quality
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: signal-quality-per-version
-          path: models/signal_quality_per_version.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload trigger coverage per origin
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trigger-coverage-per-origin
-          path: models/trigger_coverage_per_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload trigger precision by origin
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trigger-precision-by-origin
-          path: models/trigger_precision_by_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # --- NEW uploads from recent tasks ---
-      - name: Upload suppression rate per origin
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: suppression-rate-per-origin
-          path: models/suppression_rate_per_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload threshold quality per origin
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: threshold-quality-per-origin
-          path: models/threshold_quality_per_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload threshold recommendations
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: threshold-recommendations
-          path: models/threshold_recommendations.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload threshold backtest
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: threshold-backtest
-          path: models/threshold_backtest.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload threshold auto-apply audit
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: threshold-auto-apply
-          path: models/threshold_auto_apply.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # --- Calibration & Reliability (existing per-version) ---
-      - name: Upload calibration reliability JSON
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: calibration-reliability
-          path: models/calibration_reliability.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload calibration reliability plots
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: calibration-reliability-plots
-          path: artifacts/cal_reliability_*.png
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # --- NEW: Per-origin calibration & reliability ---
-      - name: Upload calibration per-origin JSON
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: calibration-per-origin
-          path: models/calibration_per_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # --- NEW: Market Context artifacts ---
       - name: Upload market context JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -310,41 +183,49 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload market trend charts
+      - name: Upload Reddit social context JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: market-trends
-          path: |
-            artifacts/market_trend_price_*.png
-            artifacts/market_trend_returns_*.png
+          name: social-reddit-context
+          path: models/social_reddit_context.json
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- Show artifacts & publish summary ---
-      - name: Show artifacts (debug)
+      - name: Upload Reddit plots
         if: ${{ success() }}
-        run: |
-          echo "Artifacts in repo root:"
-          ls -lah
-          echo "Artifacts in ./artifacts:"
-          ls -lah artifacts || true
-          echo "Models in ./models:"
-          ls -lah models || true
-          test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddit-plots
+          path: |
+            artifacts/reddit_activity_*.png
+            artifacts/reddit_bursts_*.png
+          if-no-files-found: ignore
+          retention-days: 14
 
+      # --- Existing uploads (quality, calibration, etc.) ---
+      - name: Upload calibration reliability plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-reliability-plots
+          path: artifacts/calibration_trend_*.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload other plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: moonwire-demo
+          path: artifacts/*
+          if-no-files-found: warn
+          retention-days: 14
+
+      # --- Publish CI summary to GitHub Summary UI ---
       - name: Publish CI summary
         if: ${{ success() }}
         run: |
           echo "## MoonWire CI Demo Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           cat artifacts/demo_summary.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload demo-summary artifact
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: moonwire-demo
-          path: artifacts/*
-          if-no-files-found: error
-          retention-days: 14
