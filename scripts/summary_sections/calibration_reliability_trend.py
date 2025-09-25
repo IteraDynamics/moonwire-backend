@@ -181,7 +181,6 @@ def _seed_demo_series(dim: str, window_h: int, bucket_min: int) -> List[Dict[str
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     buckets = [now - timedelta(hours=h) for h in (6, 4, 2)]
     pts = []
-    # Make it look reasonable/deterministic
     for i, b in enumerate(buckets):
         pts.append(
             {
@@ -239,7 +238,7 @@ def append(md: List[str], ctx) -> None:
 
     series: List[Dict[str, Any]] = [{"key": val, "points": pts} for val, pts in sorted(points_by_val.items())]
 
-    # --- DEMO FALLBACK: no joined data -> seed synthetic series and mark markdown with (demo)
+    # --- DEMO FALLBACK ---
     used_demo = False
     if not series and is_demo:
         series = _seed_demo_series(dim=dim, window_h=window_h, bucket_min=bucket_min)
@@ -255,6 +254,8 @@ def append(md: List[str], ctx) -> None:
             "generated_at": _iso(datetime.now(timezone.utc)),
             "demo": used_demo,
         },
+        # top-level demo flag for tests expecting d.get("demo")
+        "demo": used_demo,
     }
 
     # Write artifacts
@@ -270,11 +271,9 @@ def append(md: List[str], ctx) -> None:
     md.append(title)
 
     if not series:
-        # Non-demo, truly empty
         md.append("_no data available_")
         return
 
-    # Show one line per series (latest bucket)
     for s in sorted(series, key=lambda d: d.get("key", "")):
         key = s.get("key", "series")
         pts = s.get("points", [])
