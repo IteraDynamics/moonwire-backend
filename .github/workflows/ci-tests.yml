@@ -9,6 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -88,7 +89,7 @@ jobs:
           ls -lah models || true
           ls -lah "models/$MODEL_VERSION" || true
 
-      # --- Upload retrained model artifacts (versioned) ---
+      # --- Upload retrained artifacts (versioned) ---
       - name: Upload retrained model artifacts (v0.5.1)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -116,56 +117,57 @@ jobs:
           print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
           PY
 
-      # --- Build demo summary with FREE CoinGecko & resilient settings ---
-      - name: Build demo summary (market LIVE on free API, resilient)
+      # --- Build Market Context (live if possible, demo fallback inside code) ---
+      # This just runs the standard summary script; our market section will ingest as needed.
+      - name: Build demo summary (read-only)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-
-          # Market Context: LIVE via free API (be polite!)
-          MW_DEMO: "false"
+          DEMO_MODE: "true"              # keep other sections demo-friendly
+          MW_DEMO: "false"               # Market Context should try REAL data
+          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}   # may be empty; code falls back
           MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MW_CG_COINS: "bitcoin,ethereum,solana"
           MW_CG_VS_CURRENCY: "usd"
           MW_CG_LOOKBACK_H: "72"
-
-          # Politeness & resilience knobs tuned for free tier
-          MW_CG_RATE_LIMIT_PER_MIN: "8"   # ≤ 8/min
-          MW_CG_PACE_SLEEP_MS: "750"      # ~0.75s pacing within our own loop
-          MW_CG_MAX_RETRIES: "8"          # tolerate transient 429/5xx
-          MW_CG_TIMEOUT_S: "10"           # read timeout
-
-          # Other sections can remain demo-friendly & deterministic
-          DEMO_MODE: "true"
+          MW_CG_RATE_LIMIT_PER_MIN: "25"
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
+          # knobs for visibility in CI
           TL_DRIFT_Z_THRESHOLD: "0.5"
           TL_DRIFT_PER_FEATURE_PENALTY: "0.1"
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
+          # accuracy-by-version snapshot
           MW_ACCURACY_WINDOW_H: "72"
+          # calibration & reliability defaults
           MW_CAL_WINDOW_H: "72"
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
+          # enable per-origin section + align paths
           MW_CAL_PER_ORIGIN: "true"
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+        run: python scripts/mw_demo_summary.py
+
+      # --- Build Reddit Social Context (explicit) ---
+      # Runs after demo summary to guarantee social JSON/PNGs exist for the CI summary block.
+      - name: Build social reddit context
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_DEMO: "false"                          # set "true" for deterministic demo runs
+          MW_REDDIT_MODE: "rss"                     # rss | api
+          MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
+          MW_REDDIT_SORT: "new"                     # rss only
+          MW_REDDIT_LOOKBACK_H: "72"
+          MW_REDDIT_RATE_LIMIT_PER_MIN: "60"        # api mode only
+          MW_REDDIT_CLIENT_ID: ${{ secrets.MW_REDDIT_CLIENT_ID }}
+          MW_REDDIT_CLIENT_SECRET: ${{ secrets.MW_REDDIT_CLIENT_SECRET }}
         run: |
-          # tiny retry wrapper to ride out free-API flaps
-          set -e
-          tries=3
-          for i in $(seq 1 $tries); do
-            echo "[mw_demo_summary attempt $i/$tries]"
-            if python scripts/mw_demo_summary.py; then
-              exit 0
-            fi
-            echo "mw_demo_summary failed; sleeping before retry..."
-            sleep $(( 5 * i ))
-          done
-          echo "mw_demo_summary failed after retries"
-          exit 1
+          python -m scripts.social.reddit_lite_ingest
 
       # --- Upload JSON artifacts produced by summary sections ---
       - name: Upload accuracy-by-version snapshot
@@ -222,6 +224,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- NEW uploads from recent tasks ---
       - name: Upload suppression rate per origin
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -267,6 +270,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Calibration & Reliability (existing per-version) ---
       - name: Upload calibration reliability JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -285,6 +289,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- NEW: Per-origin calibration & reliability ---
       - name: Upload calibration per-origin JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -294,6 +299,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Market Context artifacts ---
       - name: Upload market context JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -314,18 +320,26 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload reddit social context
+      # --- Reddit Social Context artifacts ---
+      - name: Upload social reddit context JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: social-reddit
-          path: |
-            models/social_reddit_context.json
-            artifacts/reddit_activity_*.png
-            artifacts/reddit_bursts_*.png
+          name: social-reddit-context
+          path: models/social_reddit_context.json
           if-no-files-found: ignore
           retention-days: 14
 
+      - name: Upload reddit plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddit-plots
+          path: artifacts/reddit_*.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- Show artifacts & publish summary ---
       - name: Show artifacts (debug)
         if: ${{ success() }}
         run: |
