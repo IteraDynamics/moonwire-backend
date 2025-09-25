@@ -1,9 +1,10 @@
+# scripts/summary_sections/__init__.py
 """
 Summary sections registry + compatibility helpers.
 
 This module exposes:
 - build_all(ctx) -> List[str]  : assembles all enabled sections in the right order
-- Re-exports of section modules (market_context, calibration_reliability_trend) for direct use
+- Re-exports of section modules (market_context, social_context_reddit, calibration_reliability_trend) for direct use
 """
 
 from typing import List, Callable, Optional, Any
@@ -16,6 +17,11 @@ try:
     from . import market_context  # must provide append(md, ctx)
 except Exception as _e_mc:
     market_context = None  # type: ignore
+
+try:
+    from . import social_context_reddit  # NEW: Reddit Lite Ingest (append(md, ctx))
+except Exception as _e_red:
+    social_context_reddit = None  # type: ignore
 
 try:
     from . import calibration_reliability_trend  # must provide append(md, ctx)
@@ -75,10 +81,13 @@ def build_all(ctx: SummaryContext) -> List[str]:
     # 1) Market Context first (this also ensures its artifacts exist for later sections)
     _maybe_append(market_context, md, ctx, "Market Context")
 
-    # 2) Calibration trend with market regime overlays (new in v0.6.6+)
+    # 2) Social Context — Reddit (new in v0.6.8), after market and before calibration
+    _maybe_append(social_context_reddit, md, ctx, "Social Context — Reddit")
+
+    # 3) Calibration trend with market regime overlays (v0.6.6+)
     _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market Regimes")
 
-    # 3) Any optional sections present in this repo
+    # 4) Any optional sections present in this repo
     for _mod in OPTIONAL_SECTIONS:
         # Use module name for a friendlier label
         _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
@@ -91,5 +100,6 @@ __all__ = [
     "SummaryContext",
     "build_all",
     "market_context",
+    "social_context_reddit",
     "calibration_reliability_trend",
 ]
