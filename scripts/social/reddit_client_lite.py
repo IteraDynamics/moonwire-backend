@@ -24,12 +24,62 @@ import requests  # tests patch requests.Session.request here
 ISO = "%Y-%m-%dT%H:%M:%SZ"
 def _iso(dt: datetime) -> str: return dt.strftime(ISO)
 
+ATOM_NS = "{http://www.w3.org/2005/Atom}"
+
+
+def _find(el: ET.Element, tag_local: str) -> Optional[ET.Element]:
+    """
+    Find child by local tag name, tolerant to Atom namespace (or no ns).
+    """
+    x = el.find(f"{ATOM_NS}{tag_local}")
+    if x is not None:
+        return x
+    return el.find(tag_local)
+
+
+def _findall(el: ET.Element, tag_local: str) -> List[ET.Element]:
+    xs = list(el.findall(f"{ATOM_NS}{tag_local}"))
+    xs.extend(list(el.findall(tag_local)))
+    return xs
+
+
+def _findtext(el: ET.Element, tag_local: str, default: str = "") -> str:
+    x = _find(el, tag_local)
+    if x is None:
+        return default
+    return (x.text or "").strip()
+
+
+def _parse_dt_fallback(txt: str) -> datetime:
+    """
+    Parse various timestamp formats we might see in feeds. Fallback to now(UTC).
+    """
+    if not txt:
+        return datetime.now(timezone.utc)
+    t = txt.strip()
+    # Atom-ish: 2025-09-25T10:00:00Z
+    try:
+        return datetime.fromisoformat(t.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        pass
+    # RFC822-ish: Wed, 25 Sep 2025 10:00:00 +0000
+    for fmt in ("%a, %d %b %Y %H:%M:%S %z", "%d %b %Y %H:%M:%S %z"):
+        try:
+            return datetime.strptime(t, fmt).astimezone(timezone.utc)
+        except Exception:
+            continue
+    return datetime.now(timezone.utc)
+
 
 class _HTTP:
     """Minimal pacing + retry wrapper using THIS module's requests import."""
-    def __init__(self, rate_per_min: int = 60):
+    def __init__(self, rate_per_min: int | str = 60):
+        try:
+            rpm = int(rate_per_min)  # env may pass string
+        except Exception:
+            rpm = 60
         self.session = requests.Session()
-        self.rate_per_min = max(1, int(rate_per_min))
+        self.rate_per_min = max(1, int(rpm))
         self._last = 0.0
 
     def _pace(self):
@@ -71,41 +121,67 @@ class RedditLite:
 
     # ---------- RSS ----------
     def fetch_rss(self, sub: str, sort: str = "new") -> List[Dict[str, Any]]:
+        """
+        Parse Atom (namespaced or not). Tolerates classic RSS <item> as well.
+        """
         url = f"https://www.reddit.com/r/{sub}/{sort}.rss"
         resp = self.http.request("GET", url, headers={"User-Agent": "moonwire/0.6.8 (+rss)"})
-        root = ET.fromstring(resp.content)
-        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        data = resp.content if getattr(resp, "content", None) is not None else resp.text.encode("utf-8")
+        root = ET.fromstring(data)
         out: List[Dict[str, Any]] = []
 
-        for entry in root.findall("atom:entry", ns):
-            eid = entry.findtext("atom:id", default="", namespaces=ns).strip()
-            title = entry.findtext("atom:title", default="", namespaces=ns).strip()
-            published = entry.findtext("atom:published", default="", namespaces=ns).strip()
+        # Prefer Atom <entry>; fallback to RSS <item>
+        entries = _findall(root, "entry")
+        if not entries:
+            entries = root.findall(".//item")
 
+        for entry in entries:
+            # id/guid
+            eid = _findtext(entry, "id") or _findtext(entry, "guid")
+
+            # title
+            title = _findtext(entry, "title")
+            if not title:
+                tnode = entry.find("title")
+                title = (tnode.text or "").strip() if tnode is not None else ""
+
+            # published/updated/pubDate
+            published = _findtext(entry, "published") or _findtext(entry, "updated")
+            if not published:
+                pnode = entry.find("pubDate")
+                published = (pnode.text or "").strip() if pnode is not None else ""
+
+            dt = _parse_dt_fallback(published)
+
+            # author: <author><name>… or <author>text or <dc:creator>…
             author = ""
-            author_el = entry.find("atom:author", ns)
-            if author_el is not None:
-                author = (author_el.findtext("atom:name", default="", namespaces=ns) or "").strip()
+            a_el = _find(entry, "author") or entry.find("author")  # non-ns
+            if a_el is not None:
+                name = _findtext(a_el, "name")
+                author = (name or (a_el.text or "")).strip()
+            if not author:
+                dc = entry.find("{http://purl.org/dc/elements/1.1/}creator")
+                if dc is not None:
+                    author = (dc.text or "").strip()
 
-            link = ""
-            for l in entry.findall("atom:link", ns):
-                if l.get("rel") == "alternate":
-                    link = l.get("href") or ""
+            # permalink: atom:link rel=alternate OR <link> text/href
+            permalink = ""
+            for l in _findall(entry, "link"):
+                rel = (l.get("rel") or "").lower()
+                href = l.get("href")
+                if rel == "alternate" and href:
+                    permalink = href
                     break
-
-            if published:
-                try:
-                    dt = datetime.fromisoformat(published.replace("Z", "+00:00")).astimezone(timezone.utc)
-                except Exception:
-                    dt = datetime.now(timezone.utc)
-            else:
-                dt = datetime.now(timezone.utc)
+            if not permalink:
+                l = entry.find("link")
+                if l is not None:
+                    permalink = (l.text or l.get("href") or "").strip()
 
             out.append({
                 "id": eid or "",
                 "title": title,
                 "created_utc": _iso(dt),
-                "permalink": link,
+                "permalink": permalink,
                 "author": author or None,
             })
         return out
