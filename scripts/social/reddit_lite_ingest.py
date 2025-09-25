@@ -1,247 +1,424 @@
-# scripts/social/reddit_lite_ingest.py
+# -*- coding: utf-8 -*-
+"""
+Reddit Lite Ingest (RSS by default; optional API mode)
+Writes:
+  - logs/social_reddit.jsonl (append-only, one per kept post)
+  - models/social_reddit_context.json (summary)
+  - artifacts/reddit_activity_<sub>.png
+  - artifacts/reddit_bursts_<sub>.png
+Env:
+  MW_REDDIT_MODE=rss|api (default rss)
+  MW_REDDIT_SUBS=CryptoCurrency,Bitcoin,ethtrader,Solana
+  MW_REDDIT_SORT=new (rss)
+  MW_REDDIT_LOOKBACK_H=72
+  MW_REDDIT_RATE_LIMIT_PER_MIN=60 (api)
+  MW_REDDIT_CLIENT_ID, MW_REDDIT_CLIENT_SECRET (api)
+  MW_DEMO=true/false
+"""
+
 from __future__ import annotations
-
-import os
-import re
-import json
-import math
-import string
-from collections import Counter, defaultdict
-from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+import os, re, json, time, math, random, string
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import requests
+import xml.etree.ElementTree as ET
 import matplotlib
-matplotlib.use("Agg")  # headless
+matplotlib.use("Agg")  # safemode
 import matplotlib.pyplot as plt
 
-from .reddit_client_lite import LiteConfig, RedditLiteClient, _iso, _now_utc
+# -------------------
+# Helpers
+# -------------------
 
-STOPWORDS = {
-    "the","a","and","or","but","for","to","of","in","on","is","it","its","at","by","with",
-    "this","that","be","as","are","from","an","was","were","if","else","we","you","i",
-    "rt","amp","vs","via","about","has","have","had","will","just","they","he","she",
-    "can","could","should","would","did","do","does","than","then","over","under","into",
-    "out","up","down","not","no","yes",
+ISO = "%Y-%m-%dT%H:%M:%SZ"
+def _iso(dt: datetime) -> str: return dt.strftime(ISO)
+
+STOP = {
+    "the","a","an","and","or","to","of","in","on","for","with","by","as","at","is","are",
+    "be","from","this","that","it","its","you","your","we","our","they","their",
+    "i","me","my","was","were","will","shall","has","have","had"
 }
+WORD_RE = re.compile(r"[a-z0-9]+")
 
-TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(second=0, microsecond=0)
 
+def _bounded_sleep(min_s=0.8, max_s=1.6):
+    time.sleep(random.uniform(min_s, max_s))
 
-def _tokenize(text: str) -> List[str]:
-    text = text.lower()
-    toks = TOKEN_RE.findall(text)
-    return [t for t in toks if t not in STOPWORDS and not t.isdigit() and len(t) > 1]
+def _write_json(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False))
 
+def _append_jsonl(path: Path, row: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-@dataclass
-class IngestPaths:
-    logs_dir: Path
-    models_dir: Path
-    artifacts_dir: Path
+def _bucket_hour(dt: datetime) -> datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
 
-
-def _load_env_paths() -> IngestPaths:
-    root = Path(os.getcwd())
-    logs = Path(os.getenv("LOGS_DIR", root / "logs"))
-    models = Path(os.getenv("MODELS_DIR", root / "models"))
-    arts = Path(os.getenv("ARTIFACTS_DIR", root / "artifacts"))
-    logs.mkdir(parents=True, exist_ok=True)
-    models.mkdir(parents=True, exist_ok=True)
-    arts.mkdir(parents=True, exist_ok=True)
-    return IngestPaths(logs, models, arts)
-
-
-def _within_lookback(dt: datetime, lookback_h: int) -> bool:
-    return dt >= (_now_utc() - timedelta(hours=lookback_h))
-
-
-def _z_scores(vals: List[int]) -> List[float]:
+def _zscore(vals: List[float]) -> List[float]:
     if not vals:
         return []
-    mu = sum(vals) / len(vals)
-    var = sum((v - mu)**2 for v in vals) / max(1, len(vals)-1)
-    sd = math.sqrt(var)
-    if sd <= 1e-9:
-        return [0.0] * len(vals)
-    return [(v - mu) / sd for v in vals]
+    mu = sum(vals)/len(vals)
+    var = sum((x-mu)**2 for x in vals)/len(vals)
+    sd = math.sqrt(var) if var>0 else 0.0
+    if sd == 0:
+        return [0.0]*len(vals)
+    return [(x-mu)/sd for x in vals]
 
+# -------------------
+# Client(s)
+# -------------------
 
-def _hour_floor(dt: datetime) -> datetime:
-    return dt.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+class _HTTP:
+    def __init__(self, rate_per_min: int = 60):
+        self.session = requests.Session()
+        self.rate_per_min = max(1, rate_per_min)
+        self._last = 0.0
 
+    def _pace(self):
+        gap = 60.0 / float(self.rate_per_min)
+        now = time.time()
+        if now - self._last < gap:
+            time.sleep(gap - (now - self._last))
+        self._last = time.time()
 
-def _plot_counts_with_bursts(hours: List[datetime], counts: List[int], burst_idx: List[int], out_path: Path, title: str) -> None:
-    plt.figure()
-    xs = hours
-    ys = counts
-    plt.plot(xs, ys)  # no color/style settings per guidelines
-    # overlay shaded bursts
-    for i in burst_idx:
-        # shade the hour block
-        start = xs[i]
-        end = start + timedelta(hours=1)
-        plt.axvspan(start, end, alpha=0.15)
-    plt.title(title)
-    plt.xlabel("UTC Hour")
-    plt.ylabel("Posts")
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
-
-
-def run_ingest(paths: Optional[IngestPaths] = None, cfg: Optional[LiteConfig] = None) -> Dict[str, Any]:
-    """
-    Fetch recent Reddit posts (RSS default; API optional), normalize, log, aggregate,
-    plot activity + bursts, and emit models/social_reddit_context.json
-    """
-    paths = paths or _load_env_paths()
-    cfg = cfg or LiteConfig.from_env()
-
-    client = RedditLiteClient(cfg)
-
-    # append-only log
-    log_path = paths.logs_dir / "social_reddit.jsonl"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # gather posts per subreddit
-    lookback_h = cfg.lookback_h
-    posts_by_sub: Dict[str, List[Dict[str, Any]]] = {}
-
-    for idx, sub in enumerate(cfg.subs):
-        posts = client.list_recent_posts(sub)
-        kept: List[Dict[str, Any]] = []
-        for p in posts:
-            dt = p.get("created_utc")
-            if isinstance(dt, str):
-                try:
-                    dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
-                except Exception:
-                    continue
-            if not isinstance(dt, datetime):
-                continue
-            if not _within_lookback(dt, lookback_h):
-                continue
-            kept.append(p)
-
-            # write to append-only log (one per kept post)
-            line = {
-                "ts_ingested_utc": _iso(_now_utc()),
-                "origin": "reddit",
-                "subreddit": sub,
-                "post_id": p.get("id"),
-                "title": p.get("title") or "",
-                "created_utc": _iso(dt),
-                "permalink": p.get("permalink") or "",
-                "mode": client.cfg.mode if not client.cfg.demo else "demo",
-                "fields": p.get("fields") or {},
-                "demo": bool(client.cfg.demo),
-                "source": "reddit",
-            }
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(line) + "\n")
-
-        posts_by_sub[sub] = kept
-
-        # politeness between subs
-        if not client.cfg.demo:
-            time_between = 1.25
+    def request(self, method: str, url: str, **kw) -> requests.Response:
+        backoff = 0.5
+        for attempt in range(5):
+            self._pace()
             try:
-                import time
-                time.sleep(time_between)
-            except Exception:
-                pass
+                resp = self.session.request(
+                    method=method.upper(),
+                    url=url,
+                    timeout=(5, 10),
+                    **kw,
+                )
+                if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                    raise RuntimeError(f"retryable:{resp.status_code}:{resp.text[:120]}")
+                resp.raise_for_status()
+                return resp
+            except Exception as e:
+                if attempt == 4:
+                    raise
+                time.sleep(backoff + random.uniform(0, 0.25))
+                backoff *= 2.0
+        raise RuntimeError("unreachable")
 
-    # aggregate per hour
-    window_hours = lookback_h
-    now = _now_utc().replace(minute=0, second=0, microsecond=0)
-    hours = [now - timedelta(hours=h) for h in range(window_hours)][::-1]  # ascending
+class RedditLite:
+    def __init__(self, mode: str = "rss"):
+        self.mode = (mode or "rss").strip().lower()
+        self.http = _HTTP(rate_per_min=int(os.getenv("MW_REDDIT_RATE_LIMIT_PER_MIN", "60")))
+        self.client_id = os.getenv("MW_REDDIT_CLIENT_ID") or ""
+        self.client_secret = os.getenv("MW_REDDIT_CLIENT_SECRET") or ""
+        self._token: Optional[str] = None
 
-    series = {}
-    counts_summary = {}
-    bursts_summary: List[Dict[str, Any]] = []
-    top_terms_global: Counter[str] = Counter()
-
-    for sub, plist in posts_by_sub.items():
-        # bucket to hour
-        count_by_hour: Dict[datetime, int] = {h: 0 for h in hours}
-        authors: set = set()
-        terms: Counter[str] = Counter()
-
-        for p in plist:
-            dt: datetime = p["created_utc"] if isinstance(p["created_utc"], datetime) else datetime.fromisoformat(str(p["created_utc"]).replace("Z", "+00:00"))
-            hf = _hour_floor(dt)
-            if hf in count_by_hour:
-                count_by_hour[hf] += 1
-            author = (p.get("author") or "").strip()
-            if author:
-                authors.add(author)
-            # terms from title (and selftext if present in fields -> ignored in lite)
-            terms.update(_tokenize(p.get("title") or ""))
-
-        hours_list = hours
-        counts = [count_by_hour[h] for h in hours_list]
-        z = _z_scores(counts)
-        burst_idx = [i for i, zval in enumerate(z) if zval >= 2.0]
-        # plot activity
-        paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        _plot_counts_with_bursts(
-            hours_list,
-            counts,
-            burst_idx,
-            paths.artifacts_dir / f"reddit_activity_{sub}.png",
-            f"/r/{sub} activity (posts/hour)",
-        )
-        _plot_counts_with_bursts(
-            hours_list,
-            counts,
-            burst_idx,
-            paths.artifacts_dir / f"reddit_bursts_{sub}.png",
-            f"/r/{sub} bursts (z≥2 highlighted)",
-        )
-
-        # summaries
-        counts_summary[sub] = {
-            "posts": int(sum(counts)),
-            "unique_authors": int(len(authors)) if not cfg.demo else int(max(1, len(authors)))  # demo keeps count-ish
-        }
-        for i in burst_idx[:3]:  # top 3 highlights
-            bursts_summary.append({
-                "subreddit": sub,
-                "bucket_start": _iso(hours_list[i]),
-                "posts": counts[i],
-                "z": round(float(z[i]), 3),
+    # ---- RSS ----
+    def fetch_rss(self, sub: str, sort: str="new") -> List[Dict[str, Any]]:
+        url = f"https://www.reddit.com/r/{sub}/{sort}.rss"
+        resp = self.http.request("GET", url, headers={"User-Agent":"moonwire/0.6.8 (+rss)"},
+                                 params={},)
+        root = ET.fromstring(resp.content)
+        ns = {"atom":"http://www.w3.org/2005/Atom"}
+        out: List[Dict[str, Any]] = []
+        for entry in root.findall("atom:entry", ns):
+            # prefer id/link/published/title/author
+            eid = entry.findtext("atom:id", default="", namespaces=ns).strip()
+            title = entry.findtext("atom:title", default="", namespaces=ns).strip()
+            published = entry.findtext("atom:published", default="", namespaces=ns).strip()
+            author_el = entry.find("atom:author", ns)
+            author = ""
+            if author_el is not None:
+                author = (author_el.findtext("atom:name", default="", namespaces=ns) or "").strip()
+            link = ""
+            for l in entry.findall("atom:link", ns):
+                if l.get("rel") == "alternate":
+                    link = l.get("href") or ""
+                    break
+            # normalize
+            created_dt = None
+            if published:
+                try:
+                    created_dt = datetime.fromisoformat(published.replace("Z","+00:00")).astimezone(timezone.utc)
+                except Exception:
+                    created_dt = _now()
+            out.append({
+                "id": eid or "",
+                "title": title,
+                "created_utc": _iso(created_dt or _now()),
+                "permalink": link,
+                "author": author or None,
             })
+        return out
 
-        # top terms (per sub) – also aggregate globally
-        top_terms = [{"term": t, "tf": int(c)} for t, c in Counter(terms).most_common(10)]
-        series[sub] = {
-            "hourly_counts": [{"t": _iso(h), "posts": count_by_hour[h]} for h in hours_list],
-            "top_terms": top_terms,
-        }
-        top_terms_global.update(terms)
+    # ---- API ----
+    def _ensure_token(self) -> Optional[str]:
+        if not (self.client_id and self.client_secret):
+            return None
+        if self._token:
+            return self._token
+        resp = self.http.request(
+            "POST",
+            "https://www.reddit.com/api/v1/access_token",
+            data={"grant_type":"client_credentials"},
+            auth=(self.client_id, self.client_secret),
+            headers={"User-Agent":"moonwire/0.6.8 (+api)"},
+        )
+        tok = resp.json().get("access_token")
+        if tok:
+            self._token = tok
+        return self._token
 
-    top_terms_all = [{"term": t, "tf": int(c)} for t, c in top_terms_global.most_common(10)]
+    def fetch_api_listing(self, sub: str) -> List[Dict[str, Any]]:
+        tok = self._ensure_token()
+        if not tok:
+            return []
+        out: List[Dict[str, Any]] = []
+        after = None
+        for _ in range(3):  # a few pages is enough for 72h window
+            params = {"limit":"100"}
+            if after: params["after"] = after
+            resp = self.http.request(
+                "GET",
+                f"https://oauth.reddit.com/r/{sub}/new.json",
+                headers={"Authorization": f"Bearer {tok}", "User-Agent":"moonwire/0.6.8 (+api)"},
+                params=params,
+            )
+            js = resp.json()
+            data = js.get("data", {})
+            after = data.get("after")
+            for ch in data.get("children", []):
+                d = ch.get("data", {})
+                out.append({
+                    "id": d.get("name") or f"t3_{d.get('id','')}",
+                    "title": d.get("title",""),
+                    "selftext": (d.get("selftext","") or "")[:800],
+                    "created_utc": _iso(datetime.fromtimestamp(d.get("created_utc", _now().timestamp()), tz=timezone.utc)),
+                    "score": int(d.get("score", 0) or 0),
+                    "num_comments": int(d.get("num_comments", 0) or 0),
+                    "permalink": f"https://www.reddit.com{d.get('permalink','')}",
+                    "author": d.get("author") or None,
+                })
+            if not after:
+                break
+        return out
 
-    artifact = {
-        "generated_at": _iso(_now_utc()),
-        "mode": "demo" if cfg.demo else cfg.mode,
-        "window_hours": window_hours,
-        "subs": cfg.subs,
-        "counts": counts_summary,
-        "bursts": bursts_summary,
-        "top_terms": top_terms_all,
-        "series": series,
-        "demo": bool(cfg.demo),
+# -------------------
+# Ingest
+# -------------------
+
+def _terms_from_title(title: str) -> List[str]:
+    toks = WORD_RE.findall((title or "").lower())
+    return [t for t in toks if t not in STOP and len(t) >= 2]
+
+def _summarize(posts: List[Dict[str, Any]], window_h: int, subs: List[str], mode: str) -> Dict[str, Any]:
+    # hourly counts + bursts + top terms per sub
+    by_sub: Dict[str, List[Dict[str, Any]]] = {s:[] for s in subs}
+    for p in posts:
+        by_sub.setdefault(p["subreddit"], []).append(p)
+
+    summary: Dict[str, Any] = {
+        "generated_at": _iso(_now()),
+        "mode": mode,
+        "window_hours": window_h,
+        "subs": subs,
+        "counts": {},
+        "bursts": [],
+        "top_terms": [],
+        "demo": False,
     }
 
-    out_json = paths.models_dir / "social_reddit_context.json"
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(artifact, ensure_ascii=False))
+    for sub in subs:
+        sub_posts = by_sub.get(sub, [])
+        # Counts + authors
+        counts: Dict[datetime, int] = {}
+        authors = set()
+        term_tf: Dict[str, int] = {}
+        for p in sub_posts:
+            dt = datetime.fromisoformat(p["created_utc"].replace("Z","+00:00"))
+            b = _bucket_hour(dt)
+            counts[b] = counts.get(b, 0) + 1
+            if p.get("author"): authors.add(p["author"])
+            for t in _terms_from_title(p.get("title","")):
+                term_tf[t] = term_tf.get(t, 0) + 1
 
-    return artifact
+        # normalize 72-hour grid
+        end = _bucket_hour(_now())
+        start = end - timedelta(hours=window_h-1)
+        grid, vals = [], []
+        cur = start
+        while cur <= end:
+            grid.append(cur)
+            vals.append(counts.get(cur, 0))
+            cur += timedelta(hours=1)
 
+        z = _zscore(vals)
+        burst_idxs = [i for i, zc in enumerate(z) if zc >= 2.0]
+        summary["counts"][sub] = {"posts": sum(vals), "unique_authors": len(authors)}
+        for bi in burst_idxs[-3:]:
+            summary["bursts"].append({
+                "subreddit": sub,
+                "bucket_start": _iso(grid[bi]),
+                "posts": vals[bi],
+                "z": z[bi],
+            })
+        # top terms (overall TF per sub)
+        tops = sorted(term_tf.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        for term, tf in tops:
+            summary["top_terms"].append({"subreddit": sub, "term": term, "tf": tf})
+
+    return summary
+
+def run_ingest(
+    logs_dir: Path = Path("logs"),
+    models_dir: Path = Path("models"),
+    artifacts_dir: Path = Path("artifacts"),
+) -> Dict[str, Any]:
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    demo = (os.getenv("MW_DEMO","false").lower() == "true")
+    mode = (os.getenv("MW_REDDIT_MODE","rss").strip().lower())
+    subs = [s.strip() for s in os.getenv("MW_REDDIT_SUBS","CryptoCurrency,Bitcoin,ethtrader,Solana").split(",") if s.strip()]
+    sort = os.getenv("MW_REDDIT_SORT","new")
+    lookback_h = int(os.getenv("MW_REDDIT_LOOKBACK_H","72") or "72")
+
+    client = RedditLite(mode=mode)
+    now = _now()
+    window_start = now - timedelta(hours=lookback_h)
+
+    kept: List[Dict[str, Any]] = []
+
+    if demo:
+        random.seed(6068)
+        for sub in subs:
+            for i in range(60):
+                t = window_start + timedelta(hours=i)
+                kept.append({
+                    "ts_ingested_utc": _iso(now),
+                    "origin": "reddit",
+                    "subreddit": sub,
+                    "post_id": f"demo_{sub}_{i}",
+                    "title": f"{sub} demo post #{i}",
+                    "created_utc": _iso(t),
+                    "permalink": f"/r/{sub}/comments/demo_{i}",
+                    "mode": "demo",
+                    "fields": {},
+                    "demo": True,
+                    "source": "reddit",
+                })
+    else:
+        for sub in subs:
+            try:
+                posts: List[Dict[str, Any]] = []
+                if mode == "api" and client._ensure_token():
+                    posts = client.fetch_api_listing(sub)
+                else:
+                    # fallback to RSS
+                    posts = client.fetch_rss(sub, sort=sort)
+
+                for p in posts:
+                    cdt = datetime.fromisoformat(p["created_utc"].replace("Z","+00:00"))
+                    if cdt < window_start:  # only within lookback
+                        continue
+                    row = {
+                        "ts_ingested_utc": _iso(now),
+                        "origin": "reddit",
+                        "subreddit": sub,
+                        "post_id": p.get("id") or "",
+                        "title": p.get("title",""),
+                        "created_utc": _iso(cdt),
+                        "permalink": p.get("permalink",""),
+                        "mode": "api" if p.get("score") is not None else "rss",
+                        "fields": {
+                            **({"score": p.get("score")} if p.get("score") is not None else {}),
+                            **({"num_comments": p.get("num_comments")} if p.get("num_comments") is not None else {}),
+                        },
+                        "author": p.get("author"),
+                        "demo": False,
+                        "source": "reddit",
+                    }
+                    kept.append(row)
+                _bounded_sleep()
+            except Exception:
+                # soft-fail per sub
+                continue
+
+    # append log
+    log_path = logs_dir / "social_reddit.jsonl"
+    for row in kept:
+        _append_jsonl(log_path, row)
+
+    # summary + plots
+    summary = _summarize(kept, lookback_h, subs, "demo" if demo else client.mode)
+    (models_dir / "social_reddit_context.json").write_text(json.dumps(summary, ensure_ascii=False))
+
+    # plots (hourly counts + bursts highlight)
+    # We re-create hourly grid using summary
+    end = _bucket_hour(now)
+    start = end - timedelta(hours=lookback_h-1)
+    grid = []
+    cur = start
+    while cur <= end:
+        grid.append(cur)
+        cur += timedelta(hours=1)
+
+    counts_by_sub: Dict[str, List[int]] = {}
+    bursts_by_sub_bucket: Dict[str, set] = {s:set() for s in summary["subs"]}
+    for sub in summary["subs"]:
+        counts_by_sub[sub] = [0]*len(grid)
+    for sub, cinfo in summary.get("counts", {}).items():
+        pass  # counts summary is aggregate only, so we reconstruct from log rows
+
+    # reconstruct from kept rows
+    by_sub_rows: Dict[str, Dict[datetime,int]] = {s:{} for s in summary["subs"]}
+    for row in kept:
+        if row["subreddit"] not in by_sub_rows:
+            continue
+        dt = _bucket_hour(datetime.fromisoformat(row["created_utc"].replace("Z","+00:00")))
+        d = by_sub_rows[row["subreddit"]]
+        d[dt] = d.get(dt, 0) + 1
+    for sub in summary["subs"]:
+        d = by_sub_rows[sub]
+        counts_by_sub[sub] = [d.get(t,0) for t in grid]
+
+    for b in summary.get("bursts", []):
+        bursts_by_sub_bucket.setdefault(b["subreddit"], set()).add(b["bucket_start"])
+
+    # draw
+    for sub in summary["subs"]:
+        xs = [t.strftime("%m-%d %H:%M") for t in grid]
+        ys = counts_by_sub[sub]
+
+        # activity
+        plt.figure()
+        plt.plot(xs, ys, marker="o")
+        plt.xticks(rotation=45, ha="right")
+        plt.title(f"{sub} hourly posts ({lookback_h}h)")
+        plt.tight_layout()
+        (artifacts_dir / f"reddit_activity_{sub}.png").parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(artifacts_dir / f"reddit_activity_{sub}.png", dpi=120)
+        plt.close()
+
+        # bursts overlay (shade top 3 z buckets already in summary)
+        plt.figure()
+        plt.plot(xs, ys, marker="o")
+        # shaded bands
+        for i, t in enumerate(grid):
+            if _iso(t) in bursts_by_sub_bucket.get(sub, set()):
+                plt.axvspan(max(i-0.5,0), min(i+0.5, len(xs)-1), alpha=0.2)
+        plt.xticks(rotation=45, ha="right")
+        plt.title(f"{sub} bursts ({lookback_h}h)")
+        plt.tight_layout()
+        plt.savefig(artifacts_dir / f"reddit_bursts_{sub}.png", dpi=120)
+        plt.close()
+
+    return summary
 
 if __name__ == "__main__":
     run_ingest()
