@@ -6,6 +6,8 @@ Exports:
 - SummaryContext: lightweight context with sane defaults
 - ensure_dir(path): mkdir -p
 - _iso(dt): UTC ISO-8601 helper (Z)
+- parse_ts(x): parse ISO-8601 string or epoch seconds -> aware UTC datetime
+- is_demo_mode(): bool sourced from env (DEMO_MODE or MW_DEMO)
 - _load_jsonl(path): read JSONL -> list[dict]
 - _write_json(path, obj): write compact JSON with sorted keys
 - _write_jsonl(path, rows): append (or write) rows to JSONL
@@ -14,10 +16,11 @@ Exports:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Union
 
 
 # ----------------------------
@@ -38,6 +41,60 @@ def _iso(dt: datetime) -> str:
     else:
         dt = dt.astimezone(timezone.utc)
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_ts(x: Union[str, int, float, datetime]) -> datetime:
+    """
+    Parse a timestamp into an aware UTC datetime.
+
+    Accepts:
+      - ISO-8601 strings (with/without 'Z')
+      - epoch seconds (int/float)
+      - datetime (naive -> assumed UTC; aware -> converted to UTC)
+    """
+    if isinstance(x, datetime):
+        if x.tzinfo is None:
+            return x.replace(tzinfo=timezone.utc)
+        return x.astimezone(timezone.utc)
+
+    if isinstance(x, (int, float)):
+        return datetime.fromtimestamp(float(x), tz=timezone.utc)
+
+    if isinstance(x, str):
+        s = x.strip()
+        # Handle trailing Z
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
+        except Exception:
+            # Fallback: try epoch string
+            try:
+                return datetime.fromtimestamp(float(x), tz=timezone.utc)
+            except Exception as e:
+                raise ValueError(f"Unsupported timestamp format: {x!r}") from e
+
+    raise ValueError(f"Unsupported timestamp type: {type(x)}")
+
+
+def is_demo_mode() -> bool:
+    """
+    Determine demo mode from environment:
+      - DEMO_MODE (preferred)
+      - MW_DEMO (legacy)
+    Any of: '1','true','yes','y','on' (case-insensitive) -> True
+    """
+    val = os.getenv("DEMO_MODE")
+    if val is None:
+        val = os.getenv("MW_DEMO")
+    if val is None:
+        return False
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _load_jsonl(path: Path | str) -> List[Dict[str, Any]]:
@@ -125,6 +182,8 @@ __all__ = [
     "SummaryContext",
     "ensure_dir",
     "_iso",
+    "parse_ts",
+    "is_demo_mode",
     "_load_jsonl",
     "_write_json",
     "_write_jsonl",
