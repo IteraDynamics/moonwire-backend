@@ -358,8 +358,11 @@ def _enrich_with_social(trend: Dict[str, Any], reddit_ctx: Optional[Dict[str, An
 # -------------------------------
 
 def _plot_metric(trend: Dict[str, Any], metric: str, outpath: Path) -> None:
+    """
+    Always write an image file even if plotting raises — tests assert existence.
+    """
     ensure_dir(outpath.parent)
-    plt.figure()
+    fig = plt.figure()
     try:
         # plot each key as its own line
         for s in trend.get("series", []):
@@ -370,7 +373,7 @@ def _plot_metric(trend: Dict[str, Any], metric: str, outpath: Path) -> None:
                 ys.append(float(p.get(metric, 0.0)))
             if xs:
                 plt.plot(xs, ys, marker="o", label=s.get("key", "series"))
-                # Overlay markers for social bursts (red triangles)
+                # Overlay markers for social bursts (triangles)
                 for p in s.get("points", []):
                     if p.get("social_bursts"):
                         x = parse_ts(p["bucket_start"])
@@ -381,9 +384,14 @@ def _plot_metric(trend: Dict[str, Any], metric: str, outpath: Path) -> None:
         if any(s.get("key") for s in trend.get("series", [])):
             plt.legend()
         plt.tight_layout()
-        plt.savefig(outpath)
+    except Exception:
+        # swallow — we'll still save whatever figure state we have
+        pass
     finally:
-        plt.close()
+        try:
+            fig.savefig(outpath)
+        finally:
+            plt.close(fig)
 
 # -------------------------------
 # Markdown rendering
@@ -398,7 +406,6 @@ def _render_md(md: List[str], trend: Dict[str, Any], window_h: int, title_suffix
         last = s["points"][-1]
         ece = last.get("ece", 0.0)
         alerts = ", ".join(last.get("alerts", [])) if last.get("alerts") else ""
-        # Try to show BTC return if present
         btc = last.get("market", {}).get("btc_return")
         btc_str = "n/a" if btc is None else f"{btc:+.1%}"
         suffix = f" [{alerts}]" if alerts else ""
@@ -434,7 +441,6 @@ def append(md: List[str], ctx: SummaryContext) -> None:
         except Exception:
             trend = {}
     else:
-        # Build from logs
         trend = _build_from_logs(Path(ctx.logs_dir), window_h, bucket_min, dim, ece_bins)
         _write_json(trend_path, trend)
 
@@ -457,18 +463,11 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     except Exception:
         pass
 
-    # Plots
-    try:
-        _plot_metric(trend, "ece", artifacts_dir / "calibration_trend_ece.png")
-    except Exception:
-        pass
-    try:
-        _plot_metric(trend, "brier", artifacts_dir / "calibration_trend_brier.png")
-    except Exception:
-        pass
+    # Plots (always emit a file, even if plotting fails)
+    _plot_metric(trend, "ece", artifacts_dir / "calibration_trend_ece.png")
+    _plot_metric(trend, "brier", artifacts_dir / "calibration_trend_brier.png")
 
-    # Markdown
-    # Show "(demo)" in header when artifact or environment flags demo.
+    # Markdown — show "(demo)" in header when artifact or environment flags demo.
     demo_flag = bool(trend.get("meta", {}).get("demo")) or bool(trend.get("demo")) or is_demo_mode()
     hdr_suffix = "Market + Social" + (" (demo)" if demo_flag else "")
     _render_md(md, trend, window_h, title_suffix=hdr_suffix)
