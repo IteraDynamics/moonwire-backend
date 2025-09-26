@@ -408,8 +408,23 @@ def _render_md(md: List[str], trend: Dict[str, Any], window_h: int, title_suffix
         alerts = ", ".join(last.get("alerts", [])) if last.get("alerts") else ""
         btc = last.get("market", {}).get("btc_return")
         btc_str = "n/a" if btc is None else f"{btc:+.1%}"
+
+        # >>> CHANGE: Surface social burst terms in the summary line
+        burst_terms: List[str] = []
+        for b in last.get("social_bursts", []) or []:
+            term = (b.get("term") or "").strip()
+            if term:
+                burst_terms.append(term)
+        burst_suffix = ""
+        if burst_terms:
+            # collapse duplicates, keep order
+            seen = set()
+            uniq_terms = [t for t in burst_terms if not (t in seen or seen.add(t))]
+            burst_suffix = f" + Reddit burst [{', '.join(uniq_terms)}]"
+        # <<<
+
         suffix = f" [{alerts}]" if alerts else ""
-        md.append(f"{s.get('key','?')} → ECE {ece:.02f}, BTC {btc_str}{suffix}")
+        md.append(f"{s.get('key','?')} → ECE {ece:.02f}, BTC {btc_str}{suffix}{burst_suffix}")
         lines += 1
     if lines == 0:
         md.append("_no data available_")
