@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # --- Checkout & Python toolchain ---
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -28,7 +27,6 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-dev.txt
 
-      # --- Run test suite (fast fail) ---
       - name: Run pytest suite
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -102,7 +100,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # --- Prepare dirs for summary ---
+      # --- Prepare & build CI demo summary ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
@@ -117,58 +115,59 @@ jobs:
           print("DEMO_MODE =", os.getenv("DEMO_MODE"))
           print("Has API key? ->", bool(os.getenv("MW_CG_API_KEY")))
           print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
-          print("MW_CG_RATE_LIMIT_PER_MIN =", os.getenv("MW_CG_RATE_LIMIT_PER_MIN"))
-          print("MW_CG_PACE_SLEEP =", os.getenv("MW_CG_PACE_SLEEP"))
-          print("MW_CG_TIMEOUT =", os.getenv("MW_CG_TIMEOUT"))
           PY
 
-      # --- Build CI demo summary ---
-      # We keep other sections demo-friendly but force Market Context to use live data.
-      - name: Build demo summary (with live market context)
+      # --- Build Market Context (live if possible, demo fallback inside code) ---
+      # This just runs the standard summary script; our market section will ingest as needed.
+      - name: Build demo summary (read-only)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-
-          # Summary toggles
-          DEMO_MODE: "true"               # other sections may use demo
-          MW_DEMO: "false"                # Market Context should use REAL data
-
-          # CoinGecko credentials + tuning
-          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
-          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"  # free-tier endpoint
+          DEMO_MODE: "true"              # keep other sections demo-friendly
+          MW_DEMO: "false"               # Market Context should try REAL data
+          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}   # may be empty; code falls back
+          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MW_CG_COINS: "bitcoin,ethereum,solana"
           MW_CG_VS_CURRENCY: "usd"
           MW_CG_LOOKBACK_H: "72"
-
-          # Rate-limit & pacing for free/beta keys (be conservative)
-          MW_CG_RATE_LIMIT_PER_MIN: "5"
-          MW_CG_PACE_SLEEP: "1.2"
-          MW_CG_TIMEOUT: "20"
-
-          # Enable inline diagnostics in the markdown on failure
-          MW_CG_DIAG: "1"
-
-          # Matplotlib headless
+          MW_CG_RATE_LIMIT_PER_MIN: "25"
           MPLBACKEND: "Agg"
-
-          # Other existing knobs
           DEMO_RICH_SCORES: "true"
+          # knobs for visibility in CI
           TL_DRIFT_Z_THRESHOLD: "0.5"
           TL_DRIFT_PER_FEATURE_PENALTY: "0.1"
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
-
+          # accuracy-by-version snapshot
           MW_ACCURACY_WINDOW_H: "72"
+          # calibration & reliability defaults
           MW_CAL_WINDOW_H: "72"
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
+          # enable per-origin section + align paths
           MW_CAL_PER_ORIGIN: "true"
-
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
         run: python scripts/mw_demo_summary.py
+
+      # --- Build Reddit Social Context (explicit) ---
+      # Runs after demo summary to guarantee social JSON/PNGs exist for the CI summary block.
+      - name: Build social reddit context
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_DEMO: "false"                          # set "true" for deterministic demo runs
+          MW_REDDIT_MODE: "rss"                     # rss | api
+          MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
+          MW_REDDIT_SORT: "new"                     # rss only
+          MW_REDDIT_LOOKBACK_H: "72"
+          MW_REDDIT_RATE_LIMIT_PER_MIN: "60"        # api mode only
+          MW_REDDIT_CLIENT_ID: ${{ secrets.MW_REDDIT_CLIENT_ID }}
+          MW_REDDIT_CLIENT_SECRET: ${{ secrets.MW_REDDIT_CLIENT_SECRET }}
+        run: |
+          python -m scripts.social.reddit_lite_ingest
 
       # --- Upload JSON artifacts produced by summary sections ---
       - name: Upload accuracy-by-version snapshot
@@ -300,7 +299,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- NEW: Market Context artifacts ---
+      # --- Market Context artifacts ---
       - name: Upload market context JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -318,6 +317,25 @@ jobs:
           path: |
             artifacts/market_trend_price_*.png
             artifacts/market_trend_returns_*.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- Reddit Social Context artifacts ---
+      - name: Upload social reddit context JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-reddit-context
+          path: models/social_reddit_context.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload reddit plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddit-plots
+          path: artifacts/reddit_*.png
           if-no-files-found: ignore
           retention-days: 14
 
