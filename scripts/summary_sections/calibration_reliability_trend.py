@@ -468,6 +468,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
         pass
 
     # Markdown
-    # If we enriched with both, use the combined suffix; else degrade gracefully.
-    suffix = "Market + Social"
-    _render_md(md, trend, window_h, title_suffix=suffix)
+    # Show "(demo)" in header when artifact or environment flags demo.
+    demo_flag = bool(trend.get("meta", {}).get("demo")) or bool(trend.get("demo")) or is_demo_mode()
+    hdr_suffix = "Market + Social" + (" (demo)" if demo_flag else "")
+    _render_md(md, trend, window_h, title_suffix=hdr_suffix)
