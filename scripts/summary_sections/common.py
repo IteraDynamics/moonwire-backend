@@ -6,7 +6,7 @@ Exports:
 - SummaryContext: lightweight context with sane defaults
 - ensure_dir(path): mkdir -p
 - _iso(dt): UTC ISO-8601 helper (Z)
-- parse_ts(x): parse ISO-8601 string or epoch seconds -> aware UTC datetime
+- parse_ts(x): parse ISO-8601 string or epoch seconds/millis/micros/nanos -> aware UTC datetime
 - is_demo_mode(): bool sourced from env (DEMO_MODE or MW_DEMO)
 - _load_jsonl(path): read JSONL -> list[dict]
 - _write_json(path, obj): write compact JSON with sorted keys
@@ -43,13 +43,31 @@ def _iso(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _epoch_to_dt_auto(val: float) -> datetime:
+    """
+    Convert a numeric epoch value in seconds/milliseconds/microseconds/nanoseconds
+    to an aware UTC datetime. Heuristic based on magnitude.
+    """
+    v = float(val)
+    # Typical magnitudes around 2025:
+    # seconds ~ 1.7e9, millis ~ 1.7e12, micros ~ 1.7e15, nanos ~ 1.7e18
+    if v > 1e17:          # nanoseconds
+        v /= 1e9
+    elif v > 1e14:        # microseconds
+        v /= 1e6
+    elif v > 1e11:        # milliseconds
+        v /= 1e3
+    # else: seconds
+    return datetime.fromtimestamp(v, tz=timezone.utc)
+
+
 def parse_ts(x: Union[str, int, float, datetime]) -> datetime:
     """
     Parse a timestamp into an aware UTC datetime.
 
     Accepts:
       - ISO-8601 strings (with/without 'Z')
-      - epoch seconds (int/float)
+      - numeric strings or numbers representing epoch seconds/millis/micros/nanos
       - datetime (naive -> assumed UTC; aware -> converted to UTC)
     """
     if isinstance(x, datetime):
@@ -58,11 +76,14 @@ def parse_ts(x: Union[str, int, float, datetime]) -> datetime:
         return x.astimezone(timezone.utc)
 
     if isinstance(x, (int, float)):
-        return datetime.fromtimestamp(float(x), tz=timezone.utc)
+        return _epoch_to_dt_auto(x)
 
     if isinstance(x, str):
         s = x.strip()
-        # Handle trailing Z
+        # numeric string? treat as epoch with auto-scale
+        if s.replace(".", "", 1).isdigit():
+            return _epoch_to_dt_auto(float(s))
+        # Handle ISO strings, including trailing Z
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         try:
@@ -72,12 +93,8 @@ def parse_ts(x: Union[str, int, float, datetime]) -> datetime:
             else:
                 dt = dt.astimezone(timezone.utc)
             return dt
-        except Exception:
-            # Fallback: try epoch string
-            try:
-                return datetime.fromtimestamp(float(x), tz=timezone.utc)
-            except Exception as e:
-                raise ValueError(f"Unsupported timestamp format: {x!r}") from e
+        except Exception as e:
+            raise ValueError(f"Unsupported timestamp format: {x!r}") from e
 
     raise ValueError(f"Unsupported timestamp type: {type(x)}")
 
