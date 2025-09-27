@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 # ---------------------------
 # Paths & filesystem helpers
@@ -83,9 +83,7 @@ def _write_jsonl(path: Union[str, Path], rows: Iterable[Dict[str, Any]]) -> None
 # Time utilities
 # ---------------------------
 
-ISO_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
-)
+ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 def _iso(dt: datetime) -> str:
     """Return ISO-8601 Z string for an aware datetime in UTC."""
@@ -102,7 +100,7 @@ def parse_ts(x: Union[str, int, float, datetime]) -> datetime:
     Accepts:
       - ISO-8601 strings (with/without 'Z')
       - epoch seconds (int/float)
-      - epoch milliseconds (heuristic: value > year ~ 3000 when converted)
+      - epoch milliseconds (heuristic or fallback)
       - datetime (naive -> assume UTC; aware -> convert to UTC)
     """
     if isinstance(x, datetime):
@@ -111,23 +109,18 @@ def parse_ts(x: Union[str, int, float, datetime]) -> datetime:
         return x.astimezone(timezone.utc)
 
     if isinstance(x, (int, float)):
-        # Heuristic: treat very large values as ms, otherwise seconds
         val = float(x)
         try:
             dt = datetime.fromtimestamp(val, tz=timezone.utc)
-            # If it's wildly in the future (bad seconds), try ms
             if dt.year > 3000:
                 dt = datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
             return dt
         except (OSError, OverflowError, ValueError):
-            # try ms fallback
             return datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
 
     if isinstance(x, str):
         s = x.strip()
-        # Epoch-like string?
         if s.isdigit() or re.fullmatch(r"\d+(\.\d+)?", s):
-            # Same heuristic path as numeric
             try:
                 val = float(s)
                 dt = datetime.fromtimestamp(val, tz=timezone.utc)
@@ -136,22 +129,16 @@ def parse_ts(x: Union[str, int, float, datetime]) -> datetime:
                 return dt
             except (OSError, OverflowError, ValueError):
                 return datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
-        # ISO-ish string
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         try:
             dt = datetime.fromisoformat(s)
         except Exception:
-            # very loose fallback: if matches an ISO-like start, attempt to trim
             if ISO_RE.match(x):
-                try:
-                    # remove subsecond and timezone if present
-                    base = x.split(".")[0]
-                    if base.endswith("Z"):
-                        base = base[:-1]
-                    dt = datetime.fromisoformat(base)
-                except Exception:
-                    raise
+                base = x.split(".")[0]
+                if base.endswith("Z"):
+                    base = base[:-1]
+                dt = datetime.fromisoformat(base)
             else:
                 raise
         if dt.tzinfo is None:
@@ -169,19 +156,39 @@ def is_demo_mode() -> bool:
     v = os.getenv("DEMO_MODE") or os.getenv("MW_DEMO") or ""
     return v.strip().lower() in ("1", "true", "yes", "y", "on")
 
+def generate_demo_yield_plan_if_needed(existing: Optional[List[dict]] = None):
+    """
+    Lightweight stub for sections that optionally request a demo 'yield plan'.
+    - If DEMO_MODE is off: return (existing or [], [])
+    - If DEMO_MODE is on and no existing plan: return a tiny synthetic plan + one demo event
+    The exact structure is intentionally loose; sections should tolerate empty results.
+    """
+    plan = list(existing or [])
+    events: List[dict] = []
+    if is_demo_mode() and not plan:
+        # minimal, deterministic placeholders
+        now = datetime.now(timezone.utc)
+        plan = [
+            {"origin": "reddit", "weight": 0.6, "ts": _iso(now)},
+            {"origin": "twitter", "weight": 0.5, "ts": _iso(now)},
+        ]
+        events.append({
+            "type": "demo_yield_plan_seeded",
+            "at": _iso(now),
+            "meta": {"version": "v0.0.1"}
+        })
+    return plan, events
+
 # ---------------------------
 # Small presentation helpers
 # ---------------------------
 
 def red(s: str) -> str:
     """Lightweight 'red' marker for plain-text markdown contexts."""
-    # Keep super simple to avoid ANSI in CI summaries
     return f"**{s}**"
 
 def weight_to_label(w: float) -> str:
-    """
-    Map a weight/score [0,1] to a coarse label used in some summaries.
-    """
+    """Map a weight/score [0,1] to a coarse label used in some summaries."""
     try:
         w = float(w)
     except Exception:
@@ -197,7 +204,7 @@ def weight_to_label(w: float) -> str:
     return "very low"
 
 # ---------------------------
-# Rolling / stats helpers (lightweight)
+# Rolling / stats helpers
 # ---------------------------
 
 def mean(xs: Iterable[float]) -> float:
@@ -275,6 +282,7 @@ __all__ = [
     "parse_ts",
     "_iso",
     "is_demo_mode",
+    "generate_demo_yield_plan_if_needed",
     "red",
     "weight_to_label",
     "mean",
