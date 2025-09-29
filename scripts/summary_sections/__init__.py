@@ -3,25 +3,37 @@ Summary sections registry + compatibility helpers.
 
 This module exposes:
 - build_all(ctx) -> List[str]  : assembles all enabled sections in the right order
-- Re-exports of section modules for direct use
+- Re-exports of section modules (market_context, calibration_reliability_trend, drift_response)
 """
 
 from typing import List, Callable, Optional, Any
 
+# Always import common types
 from .common import SummaryContext
 
-# Import sections (guarded)
-def _try_import(name: str) -> Any:
-    try:
-        return __import__(f"{__name__}.{name}", fromlist=["*"])
-    except Exception:
-        return None
+# Section modules (guarded imports keep older branches working)
+try:
+    from . import market_context  # must provide append(md, ctx)
+except Exception:
+    market_context = None  # type: ignore
 
-market_context = _try_import("market_context")
-social_context_reddit = _try_import("social_context_reddit")
-calibration_reliability_trend = _try_import("calibration_reliability_trend")
+try:
+    from . import calibration_reliability_trend  # must provide append(md, ctx)
+except Exception:
+    calibration_reliability_trend = None  # type: ignore
 
-OPTIONAL_SECTIONS: List[Any] = []
+try:
+    from . import social_context_reddit
+except Exception:
+    social_context_reddit = None  # type: ignore
+
+try:
+    from . import drift_response  # NEW: automated governance
+except Exception:
+    drift_response = None  # type: ignore
+
+# Optional sections that may exist in your repo
+OPTIONAL_SECTIONS = []
 for _modname in (
     "accuracy_by_version",
     "signal_quality",
@@ -34,10 +46,14 @@ for _modname in (
     "threshold_recommendations",
     "threshold_backtest",
     "threshold_auto_apply",
+    "header_overview",
+    "source_yield_plan",
 ):
-    m = _try_import(_modname)
-    if m is not None:
-        OPTIONAL_SECTIONS.append(m)
+    try:
+        _mod = __import__(f"{__name__}.{_modname}", fromlist=["*"])
+        OPTIONAL_SECTIONS.append(_mod)
+    except Exception:
+        pass
 
 
 def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -> None:
@@ -55,17 +71,28 @@ def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -
 
 
 def build_all(ctx: SummaryContext) -> List[str]:
+    """
+    Build sections in recommended order.
+    """
     md: List[str] = []
-    # 1) Market Context (live)
+
+    # 1) Market context
     _maybe_append(market_context, md, ctx, "Market Context")
-    # 2) Social (Reddit) — runs after market so it can reference timing if needed
+
+    # 2) Social context (Reddit)
     _maybe_append(social_context_reddit, md, ctx, "Social Context — Reddit")
-    # 3) Calibration vs Market Regimes
-    _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market Regimes")
-    # 4) Optional sections
+
+    # 3) Calibration trend w/ regimes + social overlays
+    _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market + Social")
+
+    # 4) Automated Drift Response (uses calibration+overlays)
+    _maybe_append(drift_response, md, ctx, "Automated Drift Response")
+
+    # 5) Any remaining optional sections
     for _mod in OPTIONAL_SECTIONS:
         _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
         _maybe_append(_mod, md, ctx, _title)
+
     return md
 
 
@@ -75,4 +102,5 @@ __all__ = [
     "market_context",
     "social_context_reddit",
     "calibration_reliability_trend",
+    "drift_response",
 ]
