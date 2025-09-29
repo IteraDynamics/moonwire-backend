@@ -1,95 +1,119 @@
 # scripts/summary_sections/market_context.py
 from __future__ import annotations
 
+import json
 import os
-from typing import Dict, List, Any
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from .common import SummaryContext, _write_json  # ensure_dir implied via _write_json
-from scripts.market.ingest_market import build_market_context
-
-
-def _fmt_money(v: float, vs: str) -> str:
-    """Format price with a leading currency sign when vs=='usd', else '123.45 vs'."""
-    if v is None:
-        return "—"
-    if vs.lower() == "usd":
-        return f"${float(v):,.2f}"
-    return f"{float(v):,.2f} {vs.lower()}"
+# We only import ingest functions at runtime (inside append) so that
+# a bad import won't poison the module and break the guarded import in __init__.
 
 
-def _pct_str(x: float) -> str:
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
-        return f"{x*100:+.1f}%"
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return "—"
+        return None
+    return None
 
 
-def _ticker_from_coin(coin: str) -> str:
-    mapping = {
-        "bitcoin": "BTC",
-        "ethereum": "ETH",
-        "solana": "SOL",
-    }
-    return mapping.get(coin.lower().strip(), coin.upper())
+def _fmt_pct(x: Optional[float]) -> str:
+    try:
+        return f"{x:+.1%}"
+    except Exception:
+        return "n/a"
 
 
-def _summarize(ctx_data: Dict[str, Any]) -> List[str]:
-    """
-    Build short markdown lines summarizing the market context.
-    Example:
-      📈 Market Context (CoinGecko, 72h) (demo)
-      • BTC → $65,100.14 | h1 +1.0% | h24 -2.0% | h72 +8.7%
-      — Data via CoinGecko API; subject to plan rate limits.
-    """
-    lines: List[str] = []
+def _fmt_price(x: Optional[float]) -> str:
+    try:
+        return f"${x:,.2f}"
+    except Exception:
+        return "n/a"
 
-    hours = ctx_data.get("window_hours") or ctx_data.get("lookback_h") or 72
-    demo = bool(ctx_data.get("demo"))
-    vs = (ctx_data.get("vs") or "usd").lower()
-    returns: Dict[str, Dict[str, float]] = ctx_data.get("returns") or {}
-    series: Dict[str, List[Dict[str, Any]]] = ctx_data.get("series") or {}
-    coins: List[str] = ctx_data.get("coins") or []
 
-    title = f"📈 Market Context (CoinGecko, {hours}h)"
-    if demo:
-        title += " (demo)"
-    lines.append(title)
+def _last_price(series: List[Dict[str, Any]]) -> Optional[float]:
+    if not series:
+        return None
+    try:
+        return float(series[-1]["price"])
+    except Exception:
+        return None
 
-    # One bullet per coin
+
+def _summarize_market(mc: Dict[str, Any]) -> List[str]:
+    vs = mc.get("vs", "usd").upper()
+    coins = mc.get("coins", [])
+    window_h = mc.get("window_hours", 72)
+    lines: List[str] = [f"📈 Market Context (CoinGecko, {window_h}h)"]
+
+    series = mc.get("series", {})
+    returns = mc.get("returns", {})
+
     for coin in coins:
-        arr = series.get(coin) or []
-        last_px = (arr[-1]["price"] if arr else None)
-        r = returns.get(coin) or {}
-        h1 = _pct_str(r.get("h1", 0.0))
-        h24 = _pct_str(r.get("h24", 0.0))
-        h72 = _pct_str(r.get("h72", 0.0))
-        ticker = _ticker_from_coin(coin)
-        money = _fmt_money(last_px, vs)
-        lines.append(f"• {ticker} → {money} | h1 {h1} | h24 {h24} | h72 {h72}")
-
-    # Attribution + reason if demo
-    attr = "— Data via CoinGecko API; subject to plan rate limits."
-    demo_reason = ctx_data.get("demo_reason")
-    if demo and demo_reason:
-        attr += f" [{demo_reason}]"
-    lines.append(attr)
-
+        ser = series.get(coin, [])
+        px = _last_price(ser)
+        r = returns.get(coin, {})
+        h1 = r.get("h1")
+        h24 = r.get("h24")
+        h72 = r.get("h72")
+        lines.append(
+            f"• {coin.upper()} → {_fmt_price(px)} | h1 {_fmt_pct(h1)} | h24 {_fmt_pct(h24)} | h72 {_fmt_pct(h72)}"
+        )
+    lines.append("— Data via CoinGecko API; subject to plan rate limits.")
     return lines
 
 
-def append(md: List[str], ctx: SummaryContext) -> None:
+def append(md: List[str], ctx) -> None:
     """
-    Build market context (live or demo) and append a short markdown section
-    to the provided md list. Also writes models/market_context.json so the
-    rest of the pipeline (and tests) can find it.
+    Build/refresh market context artifacts (demo-friendly) and append a short summary block.
+    This function never raises; it writes a helpful message to md on failure.
     """
-    # Respect MW_DEMO environment variable as the ingest does
-    # (build_market_context reads MW_DEMO / MW_CG_* knobs internally).
-    ctx_data = build_market_context()
+    # Resolve dirs from ctx (SummaryContext-compatible)
+    try:
+        logs_dir = Path(getattr(ctx, "logs_dir", Path("logs")))
+        models_dir = Path(getattr(ctx, "models_dir", Path("models")))
+        artifacts_dir = Path(getattr(ctx, "artifacts_dir", Path("artifacts")))
+    except Exception:
+        md.append("> ⚠️ Market Context: invalid context paths.\n")
+        return
 
-    # Persist JSON artifact for tests and downstream steps
-    out_json = ctx.models_dir / "market_context.json"
-    _write_json(out_json, ctx_data)
+    # Ensure dirs exist
+    for d in (logs_dir, models_dir, artifacts_dir):
+        d.mkdir(parents=True, exist_ok=True)
 
-    # Append markdown lines
-    md.extend(_summarize(ctx_data))
+    # Try to run ingest (demo or live depending on env)
+    try:
+        from scripts.market.ingest_market import run_ingest, IngestPaths  # local import to avoid import-time failure
+
+        paths = IngestPaths(logs_dir=logs_dir, models_dir=models_dir, artifacts_dir=artifacts_dir)
+        run_ingest(paths=paths)
+    except Exception as e:
+        # Even if ingest fails, try to summarize whatever (if anything) is already on disk.
+        md.append(f"> ⚠️ Market Context ingest failed: `{type(e).__name__}: {e}`\n")
+
+    # Load artifact (created either now or previously)
+    mc_path = models_dir / "market_context.json"
+    mc = _read_json(mc_path)
+    if not mc:
+        md.append("> ⚠️ Market Context: artifact missing.\n")
+        return
+
+    # Compose markdown block
+    demo_flag = mc.get("demo")
+    demo_suffix = " (demo)" if demo_flag else ""
+    md.append(f"### MoonWire CI Demo Summary{'' if os.getenv('GITHUB_ACTIONS') else ''}")
+    lines = _summarize_market(mc)
+    if lines:
+        lines[0] = lines[0] + demo_suffix
+    md.extend(lines)
+    md.append("")  # trailing newline for spacing
+
+
+__all__ = ["append"]

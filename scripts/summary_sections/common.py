@@ -1,305 +1,290 @@
 # scripts/summary_sections/common.py
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
-from typing import Any
-import os, json, hashlib, random, uuid
+from typing import Any, Dict, Iterable, List, Optional, Union
 
-# ---- Context passed to every section ----
-@dataclass
-class SummaryContext:
-    logs_dir: Path
-    models_dir: Path
-    is_demo: bool
-    origins_rows: list = field(default_factory=list)
-    yield_data: dict | None = None
-    candidates: list[str] = field(default_factory=list)
-    caches: dict = field(default_factory=dict)   # sections may reuse/store computed data
+# ---------------------------
+# Paths & filesystem helpers
+# ---------------------------
 
+def ensure_dir(p: Union[str, Path]) -> Path:
+    """Create directory if missing and return it as Path."""
+    d = Path(p)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
-# ---- Generic helpers (moved out of mw_demo_summary) ----
-def is_demo_mode() -> bool:
-    return os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
+def _read_text(path: Union[str, Path], default: str = "") -> str:
+    p = Path(path)
+    if not p.exists():
+        return default
+    return p.read_text(encoding="utf-8")
 
+def _write_text(path: Union[str, Path], text: str) -> None:
+    p = Path(path)
+    ensure_dir(p.parent)
+    p.write_text(text, encoding="utf-8")
 
-def red(s: str) -> str:
-    return "000000" if not s else hashlib.sha1(s.encode()).hexdigest()[:6]
-
-# Added for modules that import these color helpers; no-ops for plaintext CI.
-def green(s: str) -> str:  # NEW
-    return s
-
-def yellow(s: str) -> str:  # NEW
-    return s
-
-
-def band_weight_from_score(score):
-    if score is None:
-        return 1.0
-    if score >= 0.75:
-        return 1.25
-    if score >= 0.50:
-        return 1.0
-    return 0.75
-
-
-def weight_to_label(w: float) -> str:
-    if w >= 1.20:
-        return "High"
-    if w >= 0.90:
-        return "Med"
-    return "Low"
-
-
-def parse_ts(val):
-    if val is None:
-        return None
+def _read_json(path: Union[str, Path], default: Any = None) -> Any:
+    p = Path(path)
+    if not p.exists():
+        return default
     try:
-        ts = float(val)
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
+        return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
-        pass
-    try:
-        s = str(val)
-        s = s[:-1] + "+00:00" if s.endswith("Z") else s
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception:
-        return None
+        return default
 
+def _write_json(path: Union[str, Path], obj: Any, pretty: bool = True) -> None:
+    ensure_dir(Path(path).parent)
+    if pretty:
+        s = json.dumps(obj, indent=2, sort_keys=False)
+    else:
+        s = json.dumps(obj, separators=(",", ":"), sort_keys=False)
+    Path(path).write_text(s, encoding="utf-8")
+
+def _load_jsonl(path: Union[str, Path]) -> List[Dict[str, Any]]:
+    """Load a JSONL file into a list of dicts. Missing file -> empty list."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                out.append(obj)
+        except Exception:
+            # Skip malformed lines
+            pass
+    return out
+
+def _write_jsonl(path: Union[str, Path], rows: Iterable[Dict[str, Any]]) -> None:
+    """Append rows to JSONL file (creating parent dir)."""
+    p = Path(path)
+    ensure_dir(p.parent)
+    with p.open("a", encoding="utf-8") as f:
+        for r in rows:
+            try:
+                f.write(json.dumps(r, separators=(",", ":"), sort_keys=False) + "\n")
+            except Exception:
+                # Skip un-serializable rows
+                continue
+
+# ---------------------------
+# Time utilities
+# ---------------------------
+
+ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 def _iso(dt: datetime) -> str:
-    """UTC ISO-8601 with 'Z' and no microseconds, e.g. 2025-09-16T12:34:56Z."""
-    return (
-        dt.astimezone(timezone.utc)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z")
-    )
+    """Return ISO-8601 Z string for an aware datetime in UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-# Small math helper some sections import.
-def _safe_div(n: float, d: float) -> float:  # NEW
-    try:
-        return float(n) / float(d) if d else 0.0
-    except Exception:
-        return 0.0
-
-
-def pick_candidate_origins(
-    origins_rows, yield_data=None, top=3, default=("twitter", "reddit", "rss_news")
-):
-    seen, out = set(), []
-    if yield_data:
-        for item in yield_data.get("budget_plan", []) or []:
-            o = item.get("origin")
-            if o and o != "unknown" and o not in seen:
-                out.append(o)
-                seen.add(o)
-                if len(out) >= top:
-                    return out
-    for row in origins_rows or []:
-        o = row.get("origin")
-        if o and o != "unknown" and o not in seen:
-            out.append(o)
-            seen.add(o)
-            if len(out) >= top:
-                return out
-    for o in default:
-        if o not in seen:
-            out.append(o)
-            seen.add(o)
-            if len(out) >= top:
-                break
-    return out[:top]
-
-
-# --- DEMO seeders used by a few sections ---
-def generate_demo_data_if_needed(reviewers, flag_times=None):
-    flag_times = flag_times or []
-    if not is_demo_mode() or reviewers:
-        return reviewers, []
-    now = datetime.now(timezone.utc)
-    n = random.randint(3, 5)
-    choices = [0.75, 1.0, 1.25]
-    seeded, display = [], []
-    for _ in range(n):
-        rid = f"demo-{uuid.uuid4().hex[:8]}"
-        w = random.choice(choices)
-        ts = (now - timedelta(minutes=random.randint(2, 55)))
-        seeded.append({"id": rid, "weight": w, "timestamp": ts.isoformat()})
-        display.append({"id": rid, "weight": w})
-        flag_times.append(ts)
-    return display, seeded
-
-
-def generate_demo_yield_plan_if_needed(yield_data: dict | None, origins_rows=None, **_: Any) -> dict | None:
+def parse_ts(x: Union[str, int, float, datetime]) -> datetime:
     """
-    Provide a synthetic yield plan when running in DEMO_MODE and no real plan exists.
-    Structure expected by source_yield_plan.py:
-      {
-        "budget_plan": [{"origin":"twitter","percent":47.4}, ...],
-        "raw_stats": [{"origin":"twitter","flags":10,"triggers":3,"score":0.30}, ...],
-        "demo": True
-      }
+    Parse a timestamp into an aware UTC datetime.
+
+    Accepts:
+      - ISO-8601 strings (with/without 'Z')
+      - epoch seconds (int/float)
+      - epoch milliseconds (heuristic or fallback)
+      - datetime (naive -> assume UTC; aware -> convert to UTC)
     """
-    if not is_demo_mode():
-        return yield_data
+    if isinstance(x, datetime):
+        if x.tzinfo is None:
+            return x.replace(tzinfo=timezone.utc)
+        return x.astimezone(timezone.utc)
 
-    if isinstance(yield_data, dict) and isinstance(yield_data.get("budget_plan"), list) and yield_data["budget_plan"]:
-        return yield_data
+    if isinstance(x, (int, float)):
+        val = float(x)
+        try:
+            dt = datetime.fromtimestamp(val, tz=timezone.utc)
+            if dt.year > 3000:
+                dt = datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
+            return dt
+        except (OSError, OverflowError, ValueError):
+            return datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
 
-    # Derive candidate origins from recent rows if available; otherwise default.
-    origins = []
-    if origins_rows:
-        seen = set()
-        for r in origins_rows:
-            o = r.get("origin")
-            if o and o not in seen and o != "unknown":
-                origins.append(o)
-                seen.add(o)
-                if len(origins) >= 3:
-                    break
-    if not origins:
-        origins = ["twitter", "reddit", "rss_news"]
+    if isinstance(x, str):
+        s = x.strip()
+        if s.isdigit() or re.fullmatch(r"\d+(\.\d+)?", s):
+            try:
+                val = float(s)
+                dt = datetime.fromtimestamp(val, tz=timezone.utc)
+                if dt.year > 3000:
+                    dt = datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
+                return dt
+            except (OSError, OverflowError, ValueError):
+                return datetime.fromtimestamp(val / 1000.0, tz=timezone.utc)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+        except Exception:
+            if ISO_RE.match(x):
+                base = x.split(".")[0]
+                if base.endswith("Z"):
+                    base = base[:-1]
+                dt = datetime.fromisoformat(base)
+            else:
+                raise
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
 
-    # Random but plausible percentages summing ~100
-    weights = [random.uniform(0.2, 1.0) for _ in origins]
-    total = sum(weights) or 1.0
-    percents = [round(100.0 * w / total, 1) for w in weights]
+    raise TypeError(f"Unsupported timestamp type: {type(x)}")
 
-    budget_plan = [{"origin": o, "percent": p} for o, p in zip(origins, percents)]
+# ---------------------------
+# Env + demo helpers
+# ---------------------------
 
-    # Raw stats: flags & triggers with a rough score ratio
-    raw_stats = []
-    for o in origins:
-        flags = random.randint(5, 15)
-        triggers = max(0, min(flags, int(round(flags * random.uniform(0.05, 0.35)))))
-        score = round((triggers / flags) if flags else 0.0, 3)
-        raw_stats.append({
-            "origin": o,
-            "flags": flags,
-            "triggers": triggers,
-            "score": score,
+def is_demo_mode() -> bool:
+    """Read demo mode from environment."""
+    v = os.getenv("DEMO_MODE") or os.getenv("MW_DEMO") or ""
+    return v.strip().lower() in ("1", "true", "yes", "y", "on")
+
+def generate_demo_yield_plan_if_needed(existing: Optional[List[dict]] = None):
+    """
+    Lightweight stub for sections that optionally request a demo 'yield plan'.
+    - If DEMO_MODE is off: return (existing or [], [])
+    - If DEMO_MODE is on and no existing plan: return a tiny synthetic plan + one demo event
+    The exact structure is intentionally loose; sections should tolerate empty results.
+    """
+    plan = list(existing or [])
+    events: List[dict] = []
+    if is_demo_mode() and not plan:
+        # minimal, deterministic placeholders
+        now = datetime.now(timezone.utc)
+        plan = [
+            {"origin": "reddit", "weight": 0.6, "ts": _iso(now)},
+            {"origin": "twitter", "weight": 0.5, "ts": _iso(now)},
+        ]
+        events.append({
+            "type": "demo_yield_plan_seeded",
+            "at": _iso(now),
+            "meta": {"version": "v0.0.1"}
         })
+    return plan, events
 
-    return {
-        "budget_plan": budget_plan,
-        "raw_stats": raw_stats,
-        "demo": True,
-    }
+# ---------------------------
+# Small presentation helpers
+# ---------------------------
 
+def red(s: str) -> str:
+    """Lightweight 'red' marker for plain-text markdown contexts."""
+    return f"**{s}**"
 
-def generate_demo_origins_if_needed(rows: list | None) -> list:
-    """
-    Provide a minimal synthetic 'origin breakdown' when in DEMO_MODE and rows are empty.
-    Returns a list of dict rows with at least origin + counts that downstream users can read.
-    """
-    if not is_demo_mode() or (rows and len(rows) > 0):
-        return rows or []
-    origins = ["twitter", "reddit", "rss_news"]
-    out = []
-    for o in origins:
-        flags = random.randint(1, 5)
-        triggers = random.randint(0, flags)
-        out.append({"origin": o, "flags": flags, "triggers": triggers})
-    return out
-
-
-def generate_demo_origin_trends_if_needed(trend_rows: list | None, days: int = 7, **_: Any) -> list:
-    """
-    Provide synthetic per-day trend rows for each origin when in DEMO_MODE and no real rows.
-    Expected by origin_trends.py as a flat list of rows:
-      {"origin":"reddit","date":"YYYY-MM-DD","flags":N,"triggers":M}
-    """
-    if not is_demo_mode() or (trend_rows and len(trend_rows) > 0):
-        return trend_rows or []
-
-    origins = ["reddit", "rss_news", "twitter"]
-    today = datetime.now(timezone.utc).date()
-    dates = [(today - timedelta(days=i)).isoformat() for i in range(days, 0, -1)]
-
-    out = []
-    for o in origins:
-        base = random.randint(2, 8)
-        for d in dates:
-            # Make it vaguely wavy
-            flags = max(0, int(round(base + random.uniform(-2, 4))))
-            triggers = max(0, int(round(flags * random.uniform(0.0, 0.6))))
-            out.append({"origin": o, "date": d, "flags": flags, "triggers": triggers})
-    return out
-
-
-# ---- Light I/O helpers some newer sections import ----
-def ensure_dir(p: Path) -> Path:  # NEW
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _load_jsonl(path: Path) -> list[dict]:  # NEW
-    rows: list[dict] = []
-    if not path.exists():
-        return rows
+def weight_to_label(w: float) -> str:
+    """Map a weight/score [0,1] to a coarse label used in some summaries."""
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, dict):
-                        rows.append(obj)
-                except Exception:
-                    continue
+        w = float(w)
     except Exception:
-        pass
-    return rows
+        return "unknown"
+    if w >= 0.85:
+        return "very high"
+    if w >= 0.70:
+        return "high"
+    if w >= 0.55:
+        return "medium"
+    if w >= 0.40:
+        return "low"
+    return "very low"
 
+# ---------------------------
+# Rolling / stats helpers
+# ---------------------------
 
-def _write_json(path: Path, data: dict) -> None:  # NEW
-    ensure_dir(path.parent)
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+def mean(xs: Iterable[float]) -> float:
+    xs = list(xs)
+    if not xs:
+        return float("nan")
+    return sum(xs) / float(len(xs))
 
+def stdev(xs: Iterable[float]) -> float:
+    xs = list(xs)
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    m = mean(xs)
+    var = sum((x - m) ** 2 for x in xs) / (n - 1)
+    return math.sqrt(max(0.0, var))
 
-def _append_jsonl(path: Path, rows: list[dict]) -> None:  # NEW
-    ensure_dir(path.parent)
-    with path.open("a", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+# ---------------------------
+# Context object
+# ---------------------------
 
-
-def _load_candidates_from_logs(logs_dir: Path) -> list[dict]:  # NEW
+@dataclass
+class SummaryContext:
     """
-    Read any *.jsonl in logs_dir; keep dict rows that have origin+timestamp.
-    Tests typically write logs/candidates.jsonl.
+    Lightweight, tolerant context object shared by summary sections.
+
+    If any of the dirs are omitted (or None), we default to conventional
+    relative paths: ./logs, ./models, ./artifacts
     """
-    out: list[dict] = []
-    if not logs_dir.exists():
-        return out
-    for p in sorted(logs_dir.glob("*.jsonl")):
-        for r in _load_jsonl(p):
-            if isinstance(r, dict) and "origin" in r and "timestamp" in r:
-                out.append(r)
-    return out
+    logs_dir: Optional[Path] = None
+    models_dir: Optional[Path] = None
+    artifacts_dir: Optional[Path] = None
+    is_demo: bool = False
 
+    # Optional extras used by some sections; kept for backward compatibility
+    origins_rows: List[Dict[str, Any]] = field(default_factory=list)
+    yield_data: Any = None
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+    caches: Dict[str, Any] = field(default_factory=dict)
 
-# Optional explicit export list (helps tests that import specific names)
+    def __post_init__(self):
+        if self.logs_dir is None:
+            self.logs_dir = Path("logs")
+        else:
+            self.logs_dir = Path(self.logs_dir)
+
+        if self.models_dir is None:
+            self.models_dir = Path("models")
+        else:
+            self.models_dir = Path(self.models_dir)
+
+        if self.artifacts_dir is None:
+            self.artifacts_dir = Path("artifacts")
+        else:
+            self.artifacts_dir = Path(self.artifacts_dir)
+
+        # Ensure dirs exist for sections that write
+        ensure_dir(self.logs_dir)
+        ensure_dir(self.models_dir)
+        ensure_dir(self.artifacts_dir)
+
+# ---------------------------
+# Public exports
+# ---------------------------
+
 __all__ = [
     "SummaryContext",
-    "is_demo_mode",
-    "red", "green", "yellow",
-    "band_weight_from_score",
-    "weight_to_label",
+    "ensure_dir",
+    "_read_text",
+    "_write_text",
+    "_read_json",
+    "_write_json",
+    "_load_jsonl",
+    "_write_jsonl",
     "parse_ts",
     "_iso",
-    "_safe_div",
-    "ensure_dir",
-    "_load_jsonl",
-    "_write_json",
-    "_append_jsonl",
-    "_load_candidates_from_logs",
-    "pick_candidate_origins",
-    "generate_demo_data_if_needed",
+    "is_demo_mode",
     "generate_demo_yield_plan_if_needed",
-    "generate_demo_origins_if_needed",
-    "generate_demo_origin_trends_if_needed",
+    "red",
+    "weight_to_label",
+    "mean",
+    "stdev",
 ]
