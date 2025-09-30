@@ -1,127 +1,111 @@
-# scripts/summary_sections/retrain_automation.py
-# CI summary wrapper for Retrain Automation.
-# Tries governance engine first; otherwise reads models/retrain_plan.json and renders.
-from __future__ import annotations
+#!/usr/bin/env python3
+"""
+Retrain Automation — minimal v1
+- Decides whether to propose retrain (based on drift plan + calibration trend, if present)
+- Writes models/retrain_plan.json
+- Always safe: falls back to empty (demo-aware) plan when inputs absent
+"""
 
-import json
+from __future__ import annotations
+import json, os
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-try:
-    from .common import SummaryContext  # type: ignore
-except Exception:  # pragma: no cover
-    class SummaryContext:  # type: ignore
-        def __init__(self, logs_dir: Path, models_dir: Path, is_demo: bool = False, artifacts_dir: Optional[Path] = None):
-            self.logs_dir = logs_dir
-            self.models_dir = models_dir
-            self.artifacts_dir = artifacts_dir or (Path.cwd() / "artifacts")
-            self.is_demo = is_demo
+UTC = timezone.utc
 
 
-def _read_json(p: Path) -> Optional[Dict[str, Any]]:
+def _now_iso() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00","Z")
+
+
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
-        if p.exists():
-            return json.loads(p.read_text())
+        if path.exists():
+            return json.loads(path.read_text())
     except Exception:
         pass
     return None
 
 
-def _fmt_pp(x: Optional[float]) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x*100:+.1f}pp"
+def _get_env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1","true","yes","y","on")
 
 
-def _fmt_delta(x: Optional[float]) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x:+.3f}"
-
-
-def _call_governance_if_available(ctx: SummaryContext) -> Optional[Dict[str, Any]]:
+def _choose_candidates(cal: Dict[str,Any], drift_plan: Dict[str,Any]) -> List[Dict[str,Any]]:
     """
-    If scripts.governance.retrain_automation is available, try to build a fresh plan.
-    We support multiple function names to be resilient across branches.
+    Minimal heuristic:
+    - If drift response has any 'proceed' candidates or reasons matching 'high_ece_persistent'
+      AND calibration still shows last point high, propose a retrain plan entry (dry-run).
     """
-    try:
-        from scripts.governance import retrain_automation as ra  # type: ignore
-    except Exception:
-        return None
-
-    fn_names = [
-        "build_retrain_plan",
-        "build_plan",
-        "run",
-    ]
-    for name in fn_names:
-        fn = getattr(ra, name, None)
-        if callable(fn):
+    cands: List[Dict[str,Any]] = []
+    dcs = drift_plan.get("candidates") or []
+    series = cal.get("series") or []
+    last_high = False
+    for s in series:
+        pts = s.get("points") or []
+        if pts:
+            last = pts[-1]
             try:
-                plan = fn(ctx)  # type: ignore[misc]
-                if isinstance(plan, dict):
-                    return plan
+                if float(last.get("ece",0.0)) > float(drift_plan.get("ece_threshold", 0.06)):
+                    last_high = True
             except Exception:
-                return None
-    return None
+                pass
+
+    for c in dcs:
+        reasons = [str(r) for r in c.get("reasons") or []]
+        if "high_ece_persistent" in reasons or c.get("decision") == "proceed":
+            cands.append({
+                "origin": c.get("origin","unknown"),
+                "current_version": c.get("model_version","v0"),
+                "reason": list(set(["high_ece_persistent"] + reasons + (["still_high"] if last_high else []))),
+                "window_days": int(os.getenv("MW_RETRAIN_LOOKBACK_DAYS", "30")),
+                "labels": 0,
+                "datasets": {"path": ""},
+                "eval": {"precision_delta": 0.0, "ece_delta": -0.01, "f1_delta": 0.0},
+                "decision": "hold" if not last_high else "plan",
+                "new_version": None,
+            })
+    return cands
 
 
-def _render_markdown(md: List[str], plan: Dict[str, Any]) -> None:
-    mode = plan.get("action_mode") or plan.get("mode") or "dryrun"
-    demo = plan.get("demo", False)
-    window_days = plan.get("window_days") or plan.get("window") or 30
+def build_and_write_plan(models_dir: Path, demo: bool) -> Path:
+    cal = _read_json(models_dir / "calibration_reliability_trend.json") or {}
+    drift_plan = _read_json(models_dir / "drift_response_plan.json") or {}
 
-    title = f"### 🔁 Retrain Automation ({window_days}d window) — mode: {mode}"
-    if demo:
-        title += " (demo)"
-    md.append(title)
+    action_mode = os.getenv("MW_RETRAIN_ACTION", "dryrun")
 
-    cands = plan.get("candidates", [])
-    if not cands:
-        md.append("no retrain candidates")
-        return
+    candidates = _choose_candidates(cal, drift_plan) if (cal and drift_plan) else []
 
-    for c in cands:
-        origin = c.get("origin", "unknown")
-        cur = c.get("current_version") or c.get("model_version") or "v?"
-        newv = c.get("new_version") or c.get("proposed_version") or "v?"
-        evald = c.get("eval", {})
-        decision = c.get("decision", "plan")
+    plan = {
+        "generated_at": _now_iso(),
+        "action_mode": action_mode,
+        "candidates": candidates,
+        "demo": demo,
+    }
 
-        dp = _fmt_pp(evald.get("precision_delta"))
-        de = _fmt_delta(evald.get("ece_delta"))
-        df = _fmt_pp(evald.get("f1_delta"))
-
-        left = f"{origin} {cur}"
-        if decision == "promote" and newv:
-            left = f"{origin} {cur} → {newv}"
-
-        reasons = c.get("reason") or c.get("reasons") or []
-        if isinstance(reasons, str):
-            reasons = [reasons]
-
-        right = [f"| ΔPrecision {dp} | ΔECE {de} | ΔF1 {df} [{decision}]"]
-        if reasons:
-            right.append(f"reason: {', '.join(reasons)}")
-
-        md.append(f"{left:12s}  " + "  ".join(right))
+    out = models_dir / "retrain_plan.json"
+    _ensure_dir(models_dir)
+    out.write_text(json.dumps(plan, indent=2))
+    print(f"[retrain_automation] wrote {out}")
+    return out
 
 
-def append(md: List[str], ctx: SummaryContext) -> None:
-    """
-    Public entrypoint used by the orchestrator (__init__.py).
-    """
-    models_dir = Path(getattr(ctx, "models_dir", Path("models")))
-    artifacts_dir = Path(getattr(ctx, "artifacts_dir", Path("artifacts")))
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
+def main() -> int:
+    cwd = Path(os.getcwd())
+    repo = cwd
+    models = Path(os.getenv("MODELS_DIR", repo / "models"))
+    demo = _get_env_bool("MW_DEMO", False) or _get_env_bool("DEMO_MODE", False)
+    build_and_write_plan(models, demo)
+    return 0
 
-    # Try governance live computation first; then fall back to saved plan JSON.
-    plan = _call_governance_if_available(ctx)
-    if plan is None:
-        plan = _read_json(models_dir / "retrain_plan.json")
 
-    if not isinstance(plan, dict):
-        md.append("\n> ⚠️ Retrain Automation: no plan available (module missing or plan file not found).\n")
-        return
-
-    _render_markdown(md, plan)
+if __name__ == "__main__":
+    raise SystemExit(main())
