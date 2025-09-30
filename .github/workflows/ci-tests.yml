@@ -9,7 +9,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -32,9 +31,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
 
-      # -------------------------------
-      # Train trigger likelihood models
-      # -------------------------------
+      # --- Train trigger likelihood model(s) ---
       - name: Train trigger likelihood models (logistic)
         if: ${{ success() }}
         env:
@@ -45,12 +42,14 @@ jobs:
           echo "Models in ./models:"
           ls -lah models || true
 
+      # --- Assert logistic artifacts exist (fail early if missing) ---
       - name: Assert logistic artifacts exist
         if: ${{ success() }}
         run: |
           test -f models/trigger_likelihood_v0.joblib    || (echo "missing logistic model" && exit 1)
           test -f models/trigger_likelihood_v0.meta.json || (echo "missing logistic meta"  && exit 1)
 
+      # --- Upload logistic artifacts (non-versioned) ---
       - name: Upload logistic model artifacts
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -62,9 +61,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # -------------------------------
-      # Build/refresh training_data.jsonl
-      # -------------------------------
+      # --- Build/refresh training_data.jsonl by joining trigger history + feedback ---
       - name: Build training data from logs (join)
         if: ${{ success() }}
         env:
@@ -77,6 +74,7 @@ jobs:
           wc -l models/training_data.jsonl || true
           tail -n 3 models/training_data.jsonl || true
 
+      # --- Retrain from training_data.jsonl (versioned artifacts) ---
       - name: Retrain from training data (v0.5.1)
         if: ${{ success() }}
         env:
@@ -90,6 +88,7 @@ jobs:
           ls -lah models || true
           ls -lah "models/$MODEL_VERSION" || true
 
+      # --- Upload retrained artifacts (versioned) ---
       - name: Upload retrained model artifacts (v0.5.1)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -100,103 +99,32 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # -------------------------------
-      # Prep artifacts dir
-      # -------------------------------
+      # --- Prepare & build CI demo summary ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
 
-      # -------------------------------
-      # Debug env (no secrets printed)
-      # -------------------------------
-      - name: Debug env for context steps
+      # --- Debug market env (no secrets printed) ---
+      - name: Debug market env
         if: ${{ success() }}
         run: |
           python - <<'PY'
           import os
-          print("MW_DEMO         =", os.getenv("MW_DEMO"))
-          print("DEMO_MODE       =", os.getenv("DEMO_MODE"))
-          print("MW_CG_BASE_URL  =", os.getenv("MW_CG_BASE_URL"))
-          print("Has PRO key?    =", bool(os.getenv("MW_CG_API_KEY")))
-          print("Has DEMO key?   =", bool(os.getenv("MW_CG_DEMO_API_KEY")))
-          print("MW_REDDIT_MODE  =", os.getenv("MW_REDDIT_MODE"))
-          print("MW_REDDIT_SUBS  =", os.getenv("MW_REDDIT_SUBS"))
+          print("MW_DEMO =", os.getenv("MW_DEMO"))
+          print("DEMO_MODE =", os.getenv("DEMO_MODE"))
+          print("Has API key? ->", bool(os.getenv("MW_CG_API_KEY")))
+          print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
           PY
 
-      # -------------------------------
-      # Build Market Context artifacts
-      # -------------------------------
-      - name: Build Market Context (CoinGecko)
+      # --- Build demo summary (read-only orchestrator) ---
+      - name: Build demo summary (read-only)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          # Use demo-friendly path by default; switch to live by setting MW_DEMO="false" and adding keys.
-          MW_DEMO: "false"
-          # If you only have demo key: set MW_CG_DEMO_API_KEY repo secret. Leave MW_CG_API_KEY empty.
+          # Keep most sections demo-friendly unless real creds exist
+          DEMO_MODE: "true"
+          MW_DEMO: "false"               # Market Context should use REAL data when key present
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
-          MW_CG_DEMO_API_KEY: ${{ secrets.MW_CG_DEMO_API_KEY }}
-          MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
-          MW_CG_COINS: "bitcoin,ethereum,solana"
-          MW_CG_VS_CURRENCY: "usd"
-          MW_CG_LOOKBACK_H: "72"
-          MW_CG_RATE_LIMIT_PER_MIN: "25"
-          MPLBACKEND: "Agg"
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          from scripts.market import ingest_market as ing
-          paths = ing.IngestPaths(
-              logs_dir=Path("logs"),
-              models_dir=Path("models"),
-              artifacts_dir=Path("artifacts"),
-          )
-          out = ing.run_ingest(paths=paths)
-          print("Market Context build:", out)
-          PY
-
-      # -------------------------------
-      # Build Reddit Social Context artifacts
-      # -------------------------------
-      - name: Build Social Context — Reddit (lite)
-        if: ${{ success() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"                       # demo-safe by default; flip to false to hit network
-          MW_REDDIT_MODE: "rss"                   # rss|api
-          MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
-          MW_REDDIT_SORT: "new"
-          MW_REDDIT_LOOKBACK_H: "72"
-          MW_REDDIT_RATE_LIMIT_PER_MIN: "60"
-          # Optional for API mode:
-          MW_REDDIT_CLIENT_ID: ${{ secrets.MW_REDDIT_CLIENT_ID }}
-          MW_REDDIT_CLIENT_SECRET: ${{ secrets.MW_REDDIT_CLIENT_SECRET }}
-          MPLBACKEND: "Agg"
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          from scripts.social import reddit_lite_ingest as rli
-          paths = rli.IngestPaths(
-              logs_dir=Path("logs"),
-              models_dir=Path("models"),
-              artifacts_dir=Path("artifacts"),
-          )
-          out = rli.run_ingest(paths=paths)
-          print("Reddit Social Context build:", out)
-          PY
-
-      # -------------------------------
-      # Build CI demo summary (markdown)
-      # -------------------------------
-      - name: Build CI summary markdown
-        if: ${{ success() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"              # keep other sections seed-friendly for CI
-          # Keep market live/demo behavior from earlier step:
-          MW_DEMO: "false"
-          MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
-          MW_CG_DEMO_API_KEY: ${{ secrets.MW_CG_DEMO_API_KEY }}
           MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
@@ -214,20 +142,32 @@ jobs:
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
-          # calibration trend: dim + window/bucket knobs
-          MW_CAL_TREND_WINDOW_H: "72"
-          MW_CAL_TREND_BUCKET_MIN: "120"
-          MW_CAL_TREND_DIM: "origin"
+          # enable per-origin section + align paths
+          MW_CAL_PER_ORIGIN: "true"
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
-          # Reddit again for summary module (reads models/social_reddit_context.json)
+          # CoinGecko knobs (safe defaults)
+          MW_CG_COINS: "bitcoin,ethereum,solana"
+          MW_CG_VS_CURRENCY: "usd"
+          MW_CG_LOOKBACK_H: "72"
+          MW_CG_RATE_LIMIT_PER_MIN: "25"
+          # Reddit lite ingest knobs (RSS mode by default)
           MW_REDDIT_MODE: "rss"
           MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
+          MW_REDDIT_SORT: "new"
           MW_REDDIT_LOOKBACK_H: "72"
+          # --- NEW: Drift Response knobs (ensure section runs & renders) ---
+          MW_DRIFT_ECE_THRESH: "0.06"
+          MW_DRIFT_MIN_BUCKETS: "3"
+          MW_DRIFT_GRACE_H: "6"
+          MW_DRIFT_REQUIRE_OVERLAP: "false"
+          MW_DRIFT_ACTION: "dryrun"            # render plan without applying
+          MW_DRIFT_COOLDOWN_H: "12"
+          MW_THRESHOLD_MAX_SHIFT: "0.10"
+          MW_THRESHOLD_MIN_PRECISION: "0.75"
+          MW_THRESHOLD_MIN_LABELS: "10"
         run: python scripts/mw_demo_summary.py
 
-      # -------------------------------
-      # Upload JSON artifacts (selected)
-      # -------------------------------
+      # --- Upload JSON artifacts produced by summary sections (existing) ---
       - name: Upload accuracy-by-version snapshot
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -282,51 +222,37 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload suppression rate per origin
+      # --- NEW uploads for Drift Response ---
+      - name: Upload drift response plan
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: suppression-rate-per-origin
-          path: models/suppression_rate_per_origin.json
+          name: drift-response-plan
+          path: models/drift_response_plan.json
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload threshold quality per origin
+      - name: Upload governance actions log
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: threshold-quality-per-origin
-          path: models/threshold_quality_per_origin.json
+          name: governance-actions-log
+          path: logs/governance_actions.jsonl
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload threshold recommendations
+      - name: Upload drift response plots
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: threshold-recommendations
-          path: models/threshold_recommendations.json
+          name: drift-response-plots
+          path: |
+            artifacts/drift_response_timeline.png
+            artifacts/drift_response_backtest_*.png
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload threshold backtest
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: threshold-backtest
-          path: models/threshold_backtest.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload threshold auto-apply audit
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: threshold-auto-apply
-          path: models/threshold_auto_apply.json
-          if-no-files-found: ignore
-          retention-days: 14
-
+      # --- Calibration & Reliability (existing per-version) ---
       - name: Upload calibration reliability JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -336,36 +262,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload calibration trend JSON (enriched w/ market + social)
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: calibration-trend
-          path: models/calibration_reliability_trend.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload market context JSON
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: market-context
-          path: models/market_context.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload social Reddit context JSON
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: social-reddit-context
-          path: models/social_reddit_context.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # -------------------------------
-      # Upload plot artifacts
-      # -------------------------------
       - name: Upload calibration reliability plots
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -375,14 +271,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload calibration trend plots (with overlays)
+      - name: Upload calibration per-origin JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: calibration-trend-plots
-          path: |
-            artifacts/calibration_trend_ece.png
-            artifacts/calibration_trend_brier.png
+          name: calibration-per-origin
+          path: models/calibration_per_origin.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- Market Context artifacts ---
+      - name: Upload market context JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-context
+          path: models/market_context.json
           if-no-files-found: ignore
           retention-days: 14
 
@@ -397,20 +301,28 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload Reddit activity/bursts charts
+      # --- Social Context artifacts ---
+      - name: Upload reddit social context JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: reddit-trends
+          name: social-reddit-context
+          path: models/social_reddit_context.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload reddit plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddit-plots
           path: |
             artifacts/reddit_activity_*.png
             artifacts/reddit_bursts_*.png
           if-no-files-found: ignore
           retention-days: 14
 
-      # -------------------------------
-      # Show artifacts & publish summary
-      # -------------------------------
+      # --- Show artifacts & publish summary ---
       - name: Show artifacts (debug)
         if: ${{ success() }}
         run: |
