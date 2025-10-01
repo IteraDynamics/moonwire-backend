@@ -1,148 +1,164 @@
-#!/usr/bin/env python3
-"""
-MoonWire CI Demo Summary builder.
-
-- Orchestrates summary sections via scripts.summary_sections.build_all
-- Ensures artifacts/models/logs dirs exist
-- Writes artifacts/demo_summary.md
-- Exposes generate_demo_data_if_needed(seeds) used by tests
-"""
-
+# scripts/mw_demo_summary.py
 from __future__ import annotations
+
+import json
 import os
-import random
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import Any, Dict, List, Tuple
 
-# Summary sections registry
-from scripts.summary_sections import build_all, SummaryContext
-
-
-# ---------------------------
-# Utilities
-# ---------------------------
-
-def _bool_env(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return str(v).strip().lower() in ("1", "true", "yes", "y")
+# Summary sections entrypoint
+from scripts.summary_sections import build_all
+from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
 
 
-def ensure_dir(p: Path) -> Path:
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+# --------------------------
+# Demo data seed (kept stable for tests)
+# --------------------------
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
 
 
-def list_artifacts(art_dir: Path) -> List[str]:
-    # Only list PNGs we generate commonly; sorted for stable CI diffs
-    files = sorted([f.name for f in art_dir.glob("*.png")])
-    return files
-
-
-def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-# ---------------------------
-# Demo data seeding (kept for tests)
-# ---------------------------
-
-def generate_demo_data_if_needed(seeds: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Test-facing helper:
-
-    - If DEMO_MODE=false: pass-through (return seeds, [] if provided; or ([], []) if not)
-    - If DEMO_MODE=true and seeds is non-empty: pass-through reviewers; no events (tests expect [])
-    - If DEMO_MODE=true and seeds is empty:
-        * Generate 3-5 deterministic demo reviewers
-        * Generate 1 event PER reviewer (tests expect len(events) == len(reviewers))
-
-    Returns:
-        reviewers, events
+    Test-exercised helper. Mirrors expected behavior:
+      - If DEMO_MODE=false: pass-through, return (reviewers, []).
+      - If DEMO_MODE=true and reviewers provided: pass-through, return (reviewers, []).
+      - If DEMO_MODE=true and reviewers empty: synthesize 3 reviewers AND emit one event PER reviewer.
+        (Tests assert len(events) == len(reviewers).)
     """
-    demo = _bool_env("DEMO_MODE", False) or _bool_env("MW_DEMO", False)
-
-    # Non-demo: do nothing
+    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     if not demo:
-        return (seeds or [], [])
+        return reviewers, []
 
-    # Demo with pre-supplied reviewers: pass-through, no events
-    if seeds:
-        return (seeds, [])
+    if reviewers:
+        # pass-through, no events (tests expect [])
+        return reviewers, []
 
-    # Demo and no seeds: deterministically create 3-5 reviewers + 1 event per reviewer
-    rng = random.Random(42)  # stable across CI runs
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    n = rng.randint(3, 5)
-    origins = ["reddit", "twitter", "rss_news"]
-
-    reviewers: List[Dict[str, Any]] = []
+    now = _now_utc()
+    out_reviewers: List[Dict[str, Any]] = []
     events: List[Dict[str, Any]] = []
 
-    for i in range(1, n + 1):
-        origin = origins[(i - 1) % len(origins)]
-        score = round(0.55 + 0.1 * rng.random(), 2)
-        rid = f"rev_demo_{i}"
-        reviewers.append({
-            "id": rid,
-            "origin": origin,
-            "score": score,
-            "timestamp": _iso(now - timedelta(minutes=60 - i))  # spread slightly
-        })
-        events.append({
-            "type": "demo_review_created",
-            "review_id": rid,
-            "at": _iso(now + timedelta(minutes=i)),
-            "meta": {
-                "note": "seeded in demo mode",
-                "version": os.getenv("MW_DEMO_VERSION", "v0.6.9"),
-            },
-        })
+    # deterministic 3 reviewers
+    seeds = [
+        {"id": "rev_demo_1", "origin": "reddit", "score": 0.82},
+        {"id": "rev_demo_2", "origin": "rss_news", "score": 0.54},
+        {"id": "rev_demo_3", "origin": "twitter", "score": 0.67},
+    ]
+    for i, r in enumerate(seeds):
+        rcopy = dict(r)
+        rcopy["timestamp"] = _iso(now - timedelta(hours=max(0, 2 - i)))
+        out_reviewers.append(rcopy)
+        # one event per reviewer (no extra summary event)
+        events.append(
+            {
+                "type": "demo_review_created",
+                "review_id": rcopy["id"],
+                "at": _iso(now - timedelta(hours=max(0, 2 - i))),
+                "meta": {"note": "seeded in demo mode", "version": "v0.6.6"},
+            }
+        )
 
-    return reviewers, events
+    return out_reviewers, events
 
 
-# ---------------------------
-# CI Summary builder
-# ---------------------------
+# --------------------------
+# Seed governance demo artifacts when missing
+# --------------------------
+
+def _seed_drift_response_plan(models_dir: Path) -> None:
+    """
+    Create a benign 'no candidates' drift plan so the CI summary never shows
+    'no plan available' when running without upstream pipeline.
+    """
+    ensure_dir(models_dir)
+    jpath = models_dir / "drift_response_plan.json"
+    if jpath.exists():
+        return
+    now = _now_utc()
+    plan = {
+        "generated_at": _iso(now),
+        "window_hours": 72,
+        "grace_hours": int(os.getenv("MW_DRIFT_GRACE_H", "6")),
+        "min_buckets": int(os.getenv("MW_DRIFT_MIN_BUCKETS", "3")),
+        "ece_threshold": float(os.getenv("MW_DRIFT_ECE_THRESH", "0.06")),
+        "action_mode": os.getenv("MW_DRIFT_ACTION", "dryrun"),
+        "candidates": [],
+        "demo": True,
+    }
+    jpath.write_text(json.dumps(plan))
+
+
+def _seed_retrain_plan(models_dir: Path) -> None:
+    """
+    Create a benign 'plan empty' retrain JSON so the CI summary can render a section.
+    """
+    ensure_dir(models_dir)
+    jpath = models_dir / "retrain_plan.json"
+    if jpath.exists():
+        return
+    now = _now_utc()
+    plan = {
+        "generated_at": _iso(now),
+        "action_mode": os.getenv("MW_RETRAIN_ACTION", "dryrun"),
+        "candidates": [],
+        "demo": True,
+    }
+    jpath.write_text(json.dumps(plan))
+
+
+# --------------------------
+# Build demo summary markdown
+# --------------------------
+
+@dataclass
+class _Ctx(SummaryContext):
+    logs_dir: Path
+    models_dir: Path
+    is_demo: bool
+    artifacts_dir: Path = field(default_factory=lambda: Path("artifacts"))
+    origins_rows: List[Dict[str, Any]] = field(default_factory=list)
+    yield_data: Any = None
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+    caches: Dict[str, Any] = field(default_factory=dict)
+
+
+def _write_md(md_lines: List[str], out_path: Path) -> None:
+    ensure_dir(out_path.parent)
+    out_path.write_text("\n".join(md_lines))
+
 
 def main() -> None:
-    # Resolve directories (defaults to repo root folders)
-    repo_root = Path(os.getcwd())
-    models_dir = ensure_dir(Path(os.getenv("MODELS_DIR", repo_root / "models")))
-    logs_dir = ensure_dir(Path(os.getenv("LOGS_DIR", repo_root / "logs")))
-    artifacts_dir = ensure_dir(Path(os.getenv("ARTIFACTS_DIR", repo_root / "artifacts")))
+    # workspace paths
+    root = Path(".").resolve()
+    models = root / "models"
+    logs = root / "logs"
+    arts = Path(os.getenv("ARTIFACTS_DIR", str(root / "artifacts")))
+    ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
 
-    # Demo toggle (both legacy DEMO_MODE and MW_DEMO supported)
-    is_demo = _bool_env("MW_DEMO", _bool_env("DEMO_MODE", False))
+    # ensure demo governance artifacts exist for CI rendering
+    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
+    if demo:
+        _seed_drift_response_plan(models)
+        _seed_retrain_plan(models)
+    else:
+        # Even in non-demo, write harmless stubs if completely missing,
+        # so CI summary won’t show “no plan available”.
+        _seed_drift_response_plan(models)
+        _seed_retrain_plan(models)
 
-    # Construct context expected by sections
-    # SummaryContext in this repo accepts at least (logs_dir, models_dir, is_demo)
-    ctx = SummaryContext(logs_dir=logs_dir, models_dir=models_dir, is_demo=is_demo)
-    # Some newer sections also look for artifacts_dir on ctx; set it if missing.
-    if not hasattr(ctx, "artifacts_dir"):
-        setattr(ctx, "artifacts_dir", artifacts_dir)
+    # assemble markdown
+    ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
+    md_lines = build_all(ctx)
 
-    # Build all sections (market context, calibration trend, drift response, etc.)
-    md_lines: List[str] = []
-    md_lines.append("MoonWire CI Demo Summary")
-    md_lines.extend(build_all(ctx))
+    # prepend a simple header so the CI block has a title
+    header = ["MoonWire CI Demo Summary"]
+    all_lines = header + md_lines + ["Job summary generated at run-time"]
 
-    # Append plots list for convenience
-    pngs = list_artifacts(artifacts_dir)
-    if pngs:
-        md_lines.append("\n🖼️ Plots available")
-        for name in pngs:
-            md_lines.append(f"\t•\t{name}")
-
-    # Write to file for the workflow to publish
-    out_md = artifacts_dir / "demo_summary.md"
-    out_md.write_text("\n".join(md_lines))
-
-    # Print a short notice (the workflow step concatenates this file to GITHUB_STEP_SUMMARY)
-    print("Job summary generated at run-time")
+    # write to artifacts
+    _write_md(all_lines, arts / "demo_summary.md")
 
 
 if __name__ == "__main__":

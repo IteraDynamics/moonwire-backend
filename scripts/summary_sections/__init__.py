@@ -3,35 +3,29 @@ Summary sections registry + compatibility helpers.
 
 This module exposes:
 - build_all(ctx) -> List[str]  : assembles all enabled sections in the right order
-- Re-exports of section modules (market_context, calibration_reliability_trend, drift_response) for direct use
+- Re-exports of section modules for direct use
 """
 
 from typing import List, Callable, Optional, Any
 
 # Always import common types
-from .common import SummaryContext
+from .common import SummaryContext  # noqa: F401
 
-# --- Core sections (import guarded so repo remains tolerant to partial checkouts) ---
+# Core sections (import guarded so repo remains tolerant to partial checkouts)
+def _try_import(modname: str):
+    try:
+        return __import__(f"{__name__}.{modname}", fromlist=["*"])
+    except Exception:
+        return None
 
-try:
-    from . import market_context  # must provide append(md, ctx)
-except Exception:
-    market_context = None  # type: ignore
-
-try:
-    from . import calibration_reliability_trend  # must provide append(md, ctx)
-except Exception:
-    calibration_reliability_trend = None  # type: ignore
-
-# NEW: Automated Drift Response (v0.6.10+)
-try:
-    from . import drift_response  # must provide append(md, ctx)
-except Exception:
-    drift_response = None  # type: ignore
+market_context = _try_import("market_context")
+calibration_reliability_trend = _try_import("calibration_reliability_trend")
+drift_response = _try_import("drift_response")
+retrain_automation = _try_import("retrain_automation")
 
 # (Optional) Other sections that may exist in your repo. We import guarded so older
 # pipelines keep running even if some sections are missing in this branch.
-OPTIONAL_SECTIONS: List[Any] = []
+OPTIONAL_SECTIONS: list[Any] = []
 for _modname in (
     "accuracy_by_version",
     "signal_quality",
@@ -44,13 +38,12 @@ for _modname in (
     "threshold_recommendations",
     "threshold_backtest",
     "threshold_auto_apply",
+    "header_overview",
+    "source_yield_plan",
 ):
-    try:
-        _mod = __import__(f"{__name__}.{_modname}", fromlist=["*"])
+    _mod = _try_import(_modname)
+    if _mod is not None:
         OPTIONAL_SECTIONS.append(_mod)
-    except Exception:
-        # silently skip if not present in this branch
-        pass
 
 
 def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -> None:
@@ -79,16 +72,19 @@ def build_all(ctx: SummaryContext) -> List[str]:
     """
     md: List[str] = []
 
-    # 1) Market Context first (ensures artifacts exist for later sections)
+    # 1) Market Context first (ensures its artifacts exist for later sections)
     _maybe_append(market_context, md, ctx, "Market Context")
 
-    # 2) Calibration trend with market & social overlays
+    # 2) Calibration trend with market + social overlays (v0.6.9+)
     _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market + Social")
 
-    # 3) Automated Drift Response (acts on calibration artifacts)
+    # 3) Automated Drift Response (v0.7.0)
     _maybe_append(drift_response, md, ctx, "Automated Drift Response")
 
-    # 4) Any optional sections present in this repo
+    # 4) Retrain Automation (v0.7.1)
+    _maybe_append(retrain_automation, md, ctx, "Retrain Automation")
+
+    # 5) Any optional sections present in this repo
     for _mod in OPTIONAL_SECTIONS:
         _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
         _maybe_append(_mod, md, ctx, _title)
@@ -102,4 +98,5 @@ __all__ = [
     "market_context",
     "calibration_reliability_trend",
     "drift_response",
+    "retrain_automation",
 ]

@@ -36,20 +36,18 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"          # seed-friendly for CI
+          DEMO_MODE: "true"
         run: |
           python -m src.ml.train_trigger_model --days 14 --interval hour
           echo "Models in ./models:"
           ls -lah models || true
 
-      # --- Assert logistic artifacts exist (fail early if missing) ---
       - name: Assert logistic artifacts exist
         if: ${{ success() }}
         run: |
           test -f models/trigger_likelihood_v0.joblib    || (echo "missing logistic model" && exit 1)
           test -f models/trigger_likelihood_v0.meta.json || (echo "missing logistic meta"  && exit 1)
 
-      # --- Upload logistic artifacts (non-versioned) ---
       - name: Upload logistic model artifacts
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -61,20 +59,19 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # --- Build/refresh training_data.jsonl by joining trigger history + feedback ---
+      # --- Build/refresh training_data.jsonl ---
       - name: Build training data from logs (join)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"              # seed demo rows if logs empty
-          TRAINING_JOIN_WINDOW_MIN: "5"  # ±5 min join window
+          DEMO_MODE: "true"
+          TRAINING_JOIN_WINDOW_MIN: "5"
         run: |
           python -m src.ml.training_data
           echo "Training data status:"
           wc -l models/training_data.jsonl || true
           tail -n 3 models/training_data.jsonl || true
 
-      # --- Retrain from training_data.jsonl (versioned artifacts) ---
       - name: Retrain from training data (v0.5.1)
         if: ${{ success() }}
         env:
@@ -88,7 +85,6 @@ jobs:
           ls -lah models || true
           ls -lah "models/$MODEL_VERSION" || true
 
-      # --- Upload retrained artifacts (versioned) ---
       - name: Upload retrained model artifacts (v0.5.1)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -104,7 +100,6 @@ jobs:
         if: ${{ success() }}
         run: mkdir -p artifacts
 
-      # --- Debug market env (no secrets printed) ---
       - name: Debug market env
         if: ${{ success() }}
         run: |
@@ -116,113 +111,58 @@ jobs:
           print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
           PY
 
-      # --- Build demo summary (read-only orchestrator) ---
       - name: Build demo summary (read-only)
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          # Keep most sections demo-friendly unless real creds exist
           DEMO_MODE: "true"
-          MW_DEMO: "false"               # Market Context should use REAL data when key present
+          MW_DEMO: "false"
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
           MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
-          # knobs for visibility in CI
           TL_DRIFT_Z_THRESHOLD: "0.5"
           TL_DRIFT_PER_FEATURE_PENALTY: "0.1"
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
-          # accuracy-by-version snapshot
           MW_ACCURACY_WINDOW_H: "72"
-          # calibration & reliability defaults
           MW_CAL_WINDOW_H: "72"
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
-          # enable per-origin section + align paths
           MW_CAL_PER_ORIGIN: "true"
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
-          # CoinGecko knobs (safe defaults)
           MW_CG_COINS: "bitcoin,ethereum,solana"
           MW_CG_VS_CURRENCY: "usd"
           MW_CG_LOOKBACK_H: "72"
           MW_CG_RATE_LIMIT_PER_MIN: "25"
-          # Reddit lite ingest knobs (RSS mode by default)
           MW_REDDIT_MODE: "rss"
           MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
           MW_REDDIT_SORT: "new"
           MW_REDDIT_LOOKBACK_H: "72"
-          # --- NEW: Drift Response knobs (ensure section runs & renders) ---
+          # --- Drift Response knobs ---
           MW_DRIFT_ECE_THRESH: "0.06"
           MW_DRIFT_MIN_BUCKETS: "3"
           MW_DRIFT_GRACE_H: "6"
           MW_DRIFT_REQUIRE_OVERLAP: "false"
-          MW_DRIFT_ACTION: "dryrun"            # render plan without applying
+          MW_DRIFT_ACTION: "dryrun"
           MW_DRIFT_COOLDOWN_H: "12"
           MW_THRESHOLD_MAX_SHIFT: "0.10"
           MW_THRESHOLD_MIN_PRECISION: "0.75"
           MW_THRESHOLD_MIN_LABELS: "10"
+          # --- Retrain Automation knobs ---
+          MW_RETRAIN_ACTION: "dryrun"
+          MW_RETRAIN_MIN_LABELS: "300"
+          MW_RETRAIN_LOOKBACK_DAYS: "30"
+          MW_RETRAIN_COOLDOWN_H: "24"
+          MW_RETRAIN_EVAL_HOLDOUT_DAYS: "7"
+          MW_RETRAIN_PROMOTION_CRITERIA: "precision_delta_min=0.01,ece_delta_max=-0.01,f1_delta_min=0"
+          MW_RETRAIN_MAX_CANDIDATES: "3"
         run: python scripts/mw_demo_summary.py
 
-      # --- Upload JSON artifacts produced by summary sections (existing) ---
-      - name: Upload accuracy-by-version snapshot
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: accuracy-by-version
-          path: models/accuracy_by_version.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload signal quality summary
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: signal-quality-summary
-          path: models/signal_quality_summary.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload per-origin signal quality
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: signal-quality-per-origin
-          path: models/signal_quality_per_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload per-version signal quality
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: signal-quality-per-version
-          path: models/signal_quality_per_version.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload trigger coverage per origin
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trigger-coverage-per-origin
-          path: models/trigger_coverage_per_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      - name: Upload trigger precision by origin
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trigger-precision-by-origin
-          path: models/trigger_precision_by_origin.json
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # --- NEW uploads for Drift Response ---
+      # --- Upload artifacts ---
       - name: Upload drift response plan
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -252,7 +192,37 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- Calibration & Reliability (existing per-version) ---
+      # --- NEW: Retrain Automation artifacts ---
+      - name: Upload retrain plan
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrain-plan
+          path: models/retrain_plan.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload retrain plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrain-plots
+          path: |
+            artifacts/retrain_eval_*.png
+            artifacts/retrain_reliability_*.png
+            artifacts/retrain_confusion_*.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload model registry
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-registry
+          path: models/model_registry.json
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upload calibration reliability JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -280,7 +250,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- Market Context artifacts ---
       - name: Upload market context JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -301,8 +270,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- Social Context artifacts ---
-      - name: Upload reddit social context JSON
+      - name: Upload social reddit context
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
@@ -322,7 +290,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- Show artifacts & publish summary ---
       - name: Show artifacts (debug)
         if: ${{ success() }}
         run: |
