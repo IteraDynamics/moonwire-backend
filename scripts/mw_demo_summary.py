@@ -27,7 +27,7 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
       - If DEMO_MODE=false: pass-through, return (reviewers, []).
       - If DEMO_MODE=true and reviewers provided: pass-through, return (reviewers, []).
       - If DEMO_MODE=true and reviewers empty: synthesize 3 reviewers AND emit one event PER reviewer.
-        (Tests assert len(events) == len(reviewers) in this branch.)
+        (Tests assert len(events) == len(reviewers).)
     """
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     if not demo:
@@ -51,6 +51,7 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
         rcopy = dict(r)
         rcopy["timestamp"] = _iso(now - timedelta(hours=max(0, 2 - i)))
         out_reviewers.append(rcopy)
+        # one event per reviewer (no extra summary event)
         events.append(
             {
                 "type": "demo_review_created",
@@ -60,20 +61,11 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
             }
         )
 
-    # Also append a single summary event (kept for backward compatibility with older logs)
-    events.append(
-        {
-            "type": "demo_summary_generated",
-            "at": _iso(now),
-            "meta": {"note": "seeded in demo mode", "version": "v0.6.6"},
-        }
-    )
-
     return out_reviewers, events
 
 
 # --------------------------
-# New: seed governance demo artifacts when missing
+# Seed governance demo artifacts when missing
 # --------------------------
 
 def _seed_drift_response_plan(models_dir: Path) -> None:
