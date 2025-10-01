@@ -22,6 +22,7 @@ market_context = _try_import("market_context")
 calibration_reliability_trend = _try_import("calibration_reliability_trend")
 drift_response = _try_import("drift_response")
 retrain_automation = _try_import("retrain_automation")
+trigger_explainability = _try_import("trigger_explainability")  # ← ensure present
 
 # (Optional) Other sections that may exist in your repo. We import guarded so older
 # pipelines keep running even if some sections are missing in this branch.
@@ -40,7 +41,8 @@ for _modname in (
     "threshold_auto_apply",
     "header_overview",
     "source_yield_plan",
-    "trigger_explainability",  # ← added
+    # do NOT list trigger_explainability here to avoid duplicate rendering;
+    # we call it explicitly in the main flow for stable ordering.
 ):
     _mod = _try_import(_modname)
     if _mod is not None:
@@ -85,7 +87,10 @@ def build_all(ctx: SummaryContext) -> List[str]:
     # 4) Retrain Automation (v0.7.1)
     _maybe_append(retrain_automation, md, ctx, "Retrain Automation")
 
-    # 5) Any optional sections present in this repo
+    # 5) Trigger Explainability (v0.7.2)
+    _maybe_append(trigger_explainability, md, ctx, "Trigger Explainability")
+
+    # 6) Any other optional sections present in this repo
     for _mod in OPTIONAL_SECTIONS:
         _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
         _maybe_append(_mod, md, ctx, _title)
@@ -100,4 +105,5 @@ __all__ = [
     "calibration_reliability_trend",
     "drift_response",
     "retrain_automation",
+    "trigger_explainability",
 ]
