@@ -5,26 +5,27 @@ This module exposes:
 - build_all(ctx) -> List[str]  : assembles all enabled sections in the right order
 - Re-exports of section modules for direct use
 """
-
 from typing import List, Callable, Optional, Any
 
 # Always import common types
 from .common import SummaryContext  # noqa: F401
 
-# Core sections (import guarded so repo remains tolerant to partial checkouts)
+
 def _try_import(modname: str):
     try:
         return __import__(f"{__name__}.{modname}", fromlist=["*"])
     except Exception:
         return None
 
+
+# Core sections (guarded)
 market_context = _try_import("market_context")
 calibration_reliability_trend = _try_import("calibration_reliability_trend")
 drift_response = _try_import("drift_response")
 retrain_automation = _try_import("retrain_automation")
+trigger_explainability = _try_import("trigger_explainability")
 
-# (Optional) Other sections that may exist in your repo. We import guarded so older
-# pipelines keep running even if some sections are missing in this branch.
+# Optional legacy/extended sections
 OPTIONAL_SECTIONS: list[Any] = []
 for _modname in (
     "accuracy_by_version",
@@ -40,6 +41,7 @@ for _modname in (
     "threshold_auto_apply",
     "header_overview",
     "source_yield_plan",
+    "social_context_reddit",
 ):
     _mod = _try_import(_modname)
     if _mod is not None:
@@ -49,8 +51,7 @@ for _modname in (
 def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -> None:
     """
     Call module.append(md, ctx) if available.
-    On failure, record an inline, human-friendly error in the markdown
-    (don’t crash the entire summary).
+    On failure, record an inline, human-friendly error in the markdown.
     """
     if module is None:
         md.append(f"\n> ⚠️ Skipping **{title}** (module not available in this branch).\n")
@@ -68,23 +69,26 @@ def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -
 def build_all(ctx: SummaryContext) -> List[str]:
     """
     Build all sections in the recommended order.
-    Returns a list of markdown lines (paragraphs) that can be joined with newlines.
+    Returns a list of markdown lines.
     """
     md: List[str] = []
 
-    # 1) Market Context first (ensures its artifacts exist for later sections)
+    # 1) Market Context first
     _maybe_append(market_context, md, ctx, "Market Context")
 
-    # 2) Calibration trend with market + social overlays (v0.6.9+)
+    # 2) Calibration trend with market + social overlays
     _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market + Social")
 
-    # 3) Automated Drift Response (v0.7.0)
+    # 3) Automated Drift Response
     _maybe_append(drift_response, md, ctx, "Automated Drift Response")
 
-    # 4) Retrain Automation (v0.7.1)
+    # 4) Retrain Automation
     _maybe_append(retrain_automation, md, ctx, "Retrain Automation")
 
-    # 5) Any optional sections present in this repo
+    # 5) NEW: Trigger Explainability (lite)
+    _maybe_append(trigger_explainability, md, ctx, "Trigger Explainability")
+
+    # 6) Any optional sections present in this repo
     for _mod in OPTIONAL_SECTIONS:
         _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
         _maybe_append(_mod, md, ctx, _title)
@@ -99,4 +103,5 @@ __all__ = [
     "calibration_reliability_trend",
     "drift_response",
     "retrain_automation",
+    "trigger_explainability",
 ]
