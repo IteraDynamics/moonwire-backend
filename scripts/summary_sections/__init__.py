@@ -5,12 +5,12 @@ This module exposes:
 - build_all(ctx) -> List[str]  : assembles all enabled sections in the right order
 - Re-exports of section modules for direct use
 """
-from __future__ import annotations
 
 from typing import List, Callable, Optional, Any
 
 # Always import common types
 from .common import SummaryContext  # noqa: F401
+
 
 def _try_import(modname: str):
     try:
@@ -18,16 +18,22 @@ def _try_import(modname: str):
     except Exception:
         return None
 
-# Core sections imported explicitly so we can control ordering
+
+# Core sections (import guarded so repo remains tolerant to partial checkouts)
 market_context = _try_import("market_context")
+# Social blocks (reddit/twitter) — guard-imported
 social_context_reddit = _try_import("social_context_reddit")
 social_context_twitter = _try_import("social_context_twitter")
+# Correlation (new)
+cross_origin_correlation = _try_import("cross_origin_correlation")
+# Calibration & governance
 calibration_reliability_trend = _try_import("calibration_reliability_trend")
 drift_response = _try_import("drift_response")
 retrain_automation = _try_import("retrain_automation")
+# Explainability (optional)
 trigger_explainability = _try_import("trigger_explainability")
 
-# Optional sections remain discoverable but unordered
+# (Optional) Other sections that may exist in your repo.
 OPTIONAL_SECTIONS: list[Any] = []
 for _modname in (
     "accuracy_by_version",
@@ -50,11 +56,7 @@ for _modname in (
 
 
 def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -> None:
-    """
-    Call module.append(md, ctx) if available.
-    On failure, record an inline, human-friendly error in the markdown
-    (don’t crash the entire summary).
-    """
+    """Call module.append(md, ctx) if available; on failure, log inline error (don’t crash)."""
     if module is None:
         md.append(f"\n> ⚠️ Skipping **{title}** (module not available in this branch).\n")
         return
@@ -69,30 +71,30 @@ def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -
 
 
 def build_all(ctx: SummaryContext) -> List[str]:
-    """
-    Build all sections in the recommended order.
-    Returns a list of markdown lines (paragraphs) that can be joined with newlines.
-    """
+    """Build all sections in the recommended order."""
     md: List[str] = []
 
-    # 1) Market Context
+    # 1) Market Context first (ensures artifacts for later)
     _maybe_append(market_context, md, ctx, "Market Context")
 
-    # 2) Social Context (Reddit then Twitter) so downstream sections can use cached social signals
+    # 2) Social context blocks
     _maybe_append(social_context_reddit, md, ctx, "Social Context — Reddit")
     _maybe_append(social_context_twitter, md, ctx, "Social Context — Twitter")
 
-    # 3) Calibration trend with market + social overlays (v0.6.9+)
+    # 3) Cross-Origin Correlations (new, v0.7.4)
+    _maybe_append(cross_origin_correlation, md, ctx, "Cross-Origin Correlations")
+
+    # 4) Calibration trend with market + social overlays
     _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market + Social")
 
-    # 4) Governance: Drift Response and Retrain Automation
+    # 5) Governance
     _maybe_append(drift_response, md, ctx, "Automated Drift Response")
     _maybe_append(retrain_automation, md, ctx, "Retrain Automation")
 
-    # 5) Trigger Explainability (v0.7.2)
+    # 6) Explainability (lite)
     _maybe_append(trigger_explainability, md, ctx, "Trigger Explainability")
 
-    # 6) Any optional sections present in this repo
+    # 7) Any optional sections present in this repo
     for _mod in OPTIONAL_SECTIONS:
         _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
         _maybe_append(_mod, md, ctx, _title)
@@ -106,6 +108,7 @@ __all__ = [
     "market_context",
     "social_context_reddit",
     "social_context_twitter",
+    "cross_origin_correlation",
     "calibration_reliability_trend",
     "drift_response",
     "retrain_automation",
