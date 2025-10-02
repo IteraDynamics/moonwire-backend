@@ -4,405 +4,360 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Dict, List, Tuple, Any, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Tuple, Optional
 
-import numpy as np
 import matplotlib
-matplotlib.use("Agg")  # CI-safe
-import matplotlib.pyplot as plt
+matplotlib.use("Agg")  # headless in CI
+import matplotlib.pyplot as plt  # noqa: E402
 
-from .common import SummaryContext  # lightweight dependency only
+# --- Common helpers (best-effort import; fallbacks keep CI resilient) ---
+try:
+    from .common import (
+        SummaryContext,
+        ensure_dir,
+        _iso,
+        _load_jsonl,
+        _write_json,
+    )
+except Exception:
+    # Minimal fallbacks so the section still runs in isolation.
+    @dataclass
+    class SummaryContext:  # type: ignore
+        logs_dir: Optional[os.PathLike] = None
+        models_dir: Optional[os.PathLike] = None
+        artifacts_dir: Optional[os.PathLike] = None
+        is_demo: bool = False
+        caches: Dict = None
+        candidates: List[str] = None
+        origins_rows: List[Dict] = None
+        yield_data: Dict = None
+
+    def ensure_dir(p):
+        os.makedirs(p, exist_ok=True)
+
+    def _iso(dt: datetime) -> str:
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _load_jsonl(path) -> List[Dict]:
+        if not os.path.exists(path):
+            return []
+        out = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+        return out
+
+    def _write_json(path, obj) -> None:
+        ensure_dir(os.path.dirname(str(path)))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, sort_keys=True)
 
 
-# -------------------------
-# Small utils (local-only)
-# -------------------------
-def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+# ------------------------------ Utilities ------------------------------------
 
 
-def _parse_ts(ts: Any) -> Optional[datetime]:
-    # Supports ISO strings; safe fallback returns None
-    if isinstance(ts, str):
-        try:
-            # Accept ...Z or with offset
-            if ts.endswith("Z"):
-                ts = ts[:-1] + "+00:00"
-            return datetime.fromisoformat(ts).astimezone(timezone.utc)
-        except Exception:
-            return None
-    return None
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
 
 
 def _floor_hour(dt: datetime) -> datetime:
     return dt.replace(minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
 
 
-def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    if not path.exists():
-        return rows
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+def _parse_ts(x) -> Optional[datetime]:
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        # Accept seconds or ms
+        try:
+            if x > 1e12:  # ms
+                x = x / 1000.0
+            return datetime.fromtimestamp(float(x), tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(x, str):
+        try:
+            # Basic ISO-8601 handling
+            if x.endswith("Z"):
+                x = x[:-1] + "+00:00"
+            return datetime.fromisoformat(x).astimezone(timezone.utc)
+        except Exception:
+            return None
+    if isinstance(x, datetime):
+        return x.astimezone(timezone.utc)
+    return None
+
+
+def _pearson(x: List[float], y: List[float]) -> Optional[float]:
+    n = min(len(x), len(y))
+    if n == 0:
+        return None
+    xa, ya = x[:n], y[:n]
+    mx = sum(xa) / n
+    my = sum(ya) / n
+    vx = sum((v - mx) ** 2 for v in xa)
+    vy = sum((v - my) ** 2 for v in ya)
+    if vx <= 1e-12 or vy <= 1e-12:
+        return None
+    cov = sum((xa[i] - mx) * (ya[i] - my) for i in range(n))
+    r = cov / math.sqrt(vx * vy)
+    # Clamp numerical noise
+    return max(-1.0, min(1.0, r))
+
+
+def _cross_corr_best_lag(a: List[float], b: List[float], max_lag: int = 6) -> Tuple[int, Optional[float]]:
+    """
+    Returns (best_lag_in_hours, corr_at_best_lag).
+
+    Convention: positive lag k means **A leads** by k hours (A shifted forward aligns with B).
+    """
+    best_lag = 0
+    best_val = None
+    for lag in range(-max_lag, max_lag + 1):
+        if lag == 0:
+            x, y = a, b
+        elif lag > 0:
+            # A leads: compare a[:-lag] with b[lag:]
+            if lag >= len(a) or lag >= len(b):
                 continue
-            try:
-                rows.append(json.loads(line))
-            except Exception:
+            x, y = a[:-lag], b[lag:]
+        else:
+            # B leads by -lag: compare a[-lag:] with b[:lag*-1]
+            k = -lag
+            if k >= len(a) or k >= len(b):
                 continue
-    return rows
-
-
-def _safe_corr(a: np.ndarray, b: np.ndarray) -> float:
-    if len(a) < 2 or len(b) < 2:
-        return float("nan")
-    if np.allclose(a, a[0]) or np.allclose(b, b[0]):
-        return 0.0
-    return float(np.corrcoef(a, b)[0, 1])
-
-
-def _pair_key(a: str, b: str) -> str:
-    return f"{a}_{b}" if a < b else f"{b}_{a}"
-
-
-def _lead_lag_label(src: str, dst: str, lag_hours: int) -> str:
-    # positive lag means `src` leads `dst`
-    if lag_hours > 0:
-        return f"{src}→{dst}", f"+{lag_hours}h"
-    if lag_hours < 0:
-        return f"{dst}→{src}", f"+{abs(lag_hours)}h"
-    return f"{src}→{dst}", "0h"
-
-
-@dataclass
-class SeriesBundle:
-    # aligned hourly time grid and values for reddit, twitter, market
-    t: List[datetime]
-    reddit: np.ndarray
-    twitter: np.ndarray
-    market: np.ndarray
-
-
-# -------------------------
-# Core computations
-# -------------------------
-def _aggregate_series(ctx: SummaryContext, lookback_h: int) -> SeriesBundle:
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(hours=lookback_h)
-
-    # Build hourly grid (inclusive of start's hour, up to now's previous hour)
-    t_grid: List[datetime] = []
-    cur = _floor_hour(start)
-    end = _floor_hour(now)
-    while cur <= end:
-        t_grid.append(cur)
-        cur += timedelta(hours=1)
-
-    # Reddit counts by hour
-    reddit_log = Path(ctx.logs_dir or ".") / "social_reddit.jsonl"
-    r_counts: Dict[datetime, int] = {}
-    for r in _read_jsonl(reddit_log):
-        ts = _parse_ts(r.get("created_utc") or r.get("timestamp") or r.get("ts"))
-        if not ts:
+            x, y = a[k:], b[:-k]
+        r = _pearson(x, y)
+        if r is None:
             continue
-        if ts < start or ts > now:
+        if (best_val is None) or (abs(r) > abs(best_val)):
+            best_val = r
+            best_lag = lag
+    return best_lag, best_val
+
+
+def _series_from_counts(counts_by_hour: Dict[datetime, int], buckets: List[datetime]) -> List[float]:
+    return [float(counts_by_hour.get(b, 0)) for b in buckets]
+
+
+def _btc_returns_from_market_jsonl(path_jsonl: str, buckets: List[datetime]) -> Optional[List[float]]:
+    """
+    Read logs/market_prices.jsonl with rows like:
+      {"t": 1696114800, "price": 60001.2} OR
+      {"ts":"...","price":...}
+    Produce % returns per hour aligned to buckets (len == len(buckets))
+    """
+    if not os.path.exists(path_jsonl):
+        return None
+    rows = _load_jsonl(path_jsonl)
+    pts: Dict[datetime, float] = {}
+    for r in rows:
+        ts = _parse_ts(r.get("ts") or r.get("t"))
+        if ts is None:
             continue
-        h = _floor_hour(ts)
-        r_counts[h] = r_counts.get(h, 0) + 1
-
-    # Twitter counts by hour
-    twitter_log = Path(ctx.logs_dir or ".") / "social_twitter.jsonl"
-    tw_counts: Dict[datetime, int] = {}
-    for r in _read_jsonl(twitter_log):
-        ts = _parse_ts(r.get("created_utc") or r.get("timestamp") or r.get("ts"))
-        if not ts:
+        price = r.get("price")
+        try:
+            price = float(price)
+        except Exception:
             continue
-        if ts < start or ts > now:
-            continue
-        h = _floor_hour(ts)
-        tw_counts[h] = tw_counts.get(h, 0) + 1
+        pts[_floor_hour(ts)] = price
+    if not pts:
+        return None
 
-    # Market: try logs/market_prices.jsonl  → compute 1h return on close
-    # Fallback: models/market_context.json returns.h1 series if available
-    market_log = Path(ctx.logs_dir or ".") / "market_prices.jsonl"
-    mk_returns: Dict[datetime, float] = {}
-
-    if market_log.exists():
-        # Expect rows with {"t": <epoch or iso>, "symbol":"BTC", "price": float}
-        # We'll take hourly close and compute returns
-        hourly_price: Dict[datetime, float] = {}
-        for r in _read_jsonl(market_log):
-            if (r.get("symbol") or "").lower() not in ("btc", "bitcoin"):
-                continue
-            # Support epoch seconds or ISO
-            t_raw = r.get("t") or r.get("ts") or r.get("timestamp")
-            ts = None
-            if isinstance(t_raw, (int, float)):
-                try:
-                    ts = datetime.fromtimestamp(float(t_raw), tz=timezone.utc)
-                except Exception:
-                    ts = None
-            if ts is None:
-                ts = _parse_ts(t_raw)
-            if not ts:
-                continue
-            if ts < start or ts > now:
-                continue
-            h = _floor_hour(ts)
-            hourly_price[h] = float(r.get("price", 0.0) or 0.0)
-
-        # Sort and forward fill simple, then returns
-        hh = sorted(hourly_price.keys())
-        for i, h in enumerate(hh):
-            if i == 0:
-                continue
-            p0 = hourly_price[hh[i - 1]]
-            p1 = hourly_price[h]
-            if p0 and p1:
-                mk_returns[h] = (p1 - p0) / p0
-    else:
-        # Fallback to models/market_context.json if available
-        mc_path = Path(ctx.models_dir or ".") / "market_context.json"
-        if mc_path.exists():
-            try:
-                mc = json.loads(mc_path.read_text())
-                # Try bitcoin series if present: {"series":{"bitcoin":[{"t": epoch, "price":...}, ...]}}
-                series = ((mc.get("series") or {}).get("bitcoin")) or []
-                hourly_price: Dict[datetime, float] = {}
-                for row in series:
-                    t_raw = row.get("t")
-                    ts = None
-                    if isinstance(t_raw, (int, float)):
-                        try:
-                            ts = datetime.fromtimestamp(float(t_raw), tz=timezone.utc)
-                        except Exception:
-                            ts = None
-                    if not ts:
-                        continue
-                    if ts < start or ts > now:
-                        continue
-                    h = _floor_hour(ts)
-                    hourly_price[h] = float(row.get("price", 0.0) or 0.0)
-                hh = sorted(hourly_price.keys())
-                for i, h in enumerate(hh):
-                    if i == 0:
-                        continue
-                    p0 = hourly_price[hh[i - 1]]
-                    p1 = hourly_price[h]
-                    if p0 and p1:
-                        mk_returns[h] = (p1 - p0) / p0
-            except Exception:
-                pass
-
-    r_vec = np.array([r_counts.get(h, 0) for h in t_grid], dtype=float)
-    t_vec = np.array([tw_counts.get(h, 0) for h in t_grid], dtype=float)
-    m_vec = np.array([mk_returns.get(h, 0.0) for h in t_grid], dtype=float)
-
-    return SeriesBundle(t=t_grid, reddit=r_vec, twitter=t_vec, market=m_vec)
-
-
-def _pearsons(bundle: SeriesBundle) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    pairs = [
-        ("reddit", bundle.reddit, "twitter", bundle.twitter),
-        ("reddit", bundle.reddit, "market", bundle.market),
-        ("twitter", bundle.twitter, "market", bundle.market),
-    ]
-    for a_name, a, b_name, b in pairs:
-        r = _safe_corr(a, b)
-        out[_pair_key(a_name, b_name)] = 0.0 if math.isnan(r) else float(r)
+    # Build return series aligned to buckets
+    out: List[float] = []
+    prev_price = None
+    for b in buckets:
+        p = pts.get(b)
+        if p is None:
+            out.append(0.0)
+        else:
+            if prev_price is None or prev_price == 0:
+                out.append(0.0)
+            else:
+                out.append((p - prev_price) / prev_price)
+            prev_price = p
     return out
 
 
-def _max_xcorr_lag(a: np.ndarray, b: np.ndarray, max_lag: int) -> int:
-    # Standardize (avoid NaN if constant)
-    def _z(v):
-        v = np.asarray(v, dtype=float)
-        mu = v.mean() if v.size else 0.0
-        sd = v.std() if v.size else 0.0
-        if sd == 0:
-            return v * 0.0
-        return (v - mu) / (sd + 1e-9)
-
-    az = _z(a)
-    bz = _z(b)
-
-    best_lag = 0
-    best_corr = -1.0
-    n = len(az)
-    for lag in range(-max_lag, max_lag + 1):
-        if lag < 0:
-            # a lags (b leads): correlate a[t], b[t - lag]
-            a_s = az[-lag:n]
-            b_s = bz[0:n + lag]
-        elif lag > 0:
-            # a leads: correlate a[t - lag], b[t]
-            a_s = az[0:n - lag]
-            b_s = bz[lag:n]
-        else:
-            a_s = az
-            b_s = bz
-        if len(a_s) < 2 or len(b_s) < 2:
-            continue
-        r = _safe_corr(a_s, b_s)
-        if r > best_corr:
-            best_corr = r
-            best_lag = lag
-    return int(best_lag)
+# ------------------------------ Core section ----------------------------------
 
 
-def _ensure_dir(p: Path) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-
-# -------------------------
-# Public entry: append()
-# -------------------------
 def append(md: List[str], ctx: SummaryContext) -> None:
-    """Compute cross-origin Pearson and lead/lag; write JSON, PNGs; render markdown."""
-    try:
-        lookback_h = int(os.getenv("MW_CORR_LOOKBACK_H", "72"))
-    except Exception:
-        lookback_h = 72
+    """
+    Compute cross-origin correlations between Reddit (posts), Twitter (tweets), and Market (BTC 1h returns).
+    Emits:
+      - models/cross_origin_correlation.json
+      - artifacts/corr_heatmap.png
+      - artifacts/corr_leadlag.png
+    Adds a markdown block to the CI summary.
+    """
+    lookback_h = _env_int("MW_CORR_LOOKBACK_H", 72)
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(hours=lookback_h)
 
-    models_dir = Path(ctx.models_dir or "models")
-    artifacts_dir = Path(getattr(ctx, "artifacts_dir", "artifacts"))
-    _ensure_dir(models_dir / "cross_origin_correlation.json")  # ensure models dir at least
+    models_dir = str(getattr(ctx, "models_dir", "models") or "models")
+    logs_dir = str(getattr(ctx, "logs_dir", "logs") or "logs")
+    arts_dir = str(getattr(ctx, "artifacts_dir", "artifacts") or "artifacts")
 
-    demo = bool(getattr(ctx, "is_demo", False) or os.getenv("DEMO_MODE") == "true" or os.getenv("MW_DEMO") == "true")
+    ensure_dir(models_dir)
+    ensure_dir(logs_dir)
+    ensure_dir(arts_dir)
 
-    if demo:
-        # Seeded deterministic outputs
-        pearson = {
-            "reddit_twitter": 0.65,
-            "reddit_market": 0.35,
-            "twitter_market": 0.40,
-        }
-        lead_lag_map = {
-            "reddit→twitter": "+1h",
-            "twitter→market": "0h",
-            "reddit→market": "+2h",
-        }
-        # Create simple demo plots so assets exist
-        _plot_heatmap(pearson, artifacts_dir / "corr_heatmap.png")
-        _plot_leadlag({"reddit_twitter": 1, "twitter_market": 0, "reddit_market": 2}, artifacts_dir / "corr_leadlag.png")
+    # Build hourly bucket timeline
+    buckets: List[datetime] = []
+    cur = _floor_hour(start)
+    end = _floor_hour(now)
+    while cur <= end:
+        buckets.append(cur)
+        cur += timedelta(hours=1)
 
-        out = {
-            "window_hours": lookback_h,
-            "generated_at": _iso(datetime.now(timezone.utc)),
-            "pearson": pearson,
-            "lead_lag": lead_lag_map,
-            "demo": True,
-        }
-        (models_dir / "cross_origin_correlation.json").write_text(json.dumps(out, indent=2))
-        md.append(f"\n### 🔗 Cross-Origin Correlations ({lookback_h}h) (demo)")
-        md.append(f"reddit–twitter   → r={pearson['reddit_twitter']:.2f} | reddit leads by ~1h")
-        md.append(f"reddit–market    → r={pearson['reddit_market']:.2f} | reddit leads by ~2h")
-        md.append(f"twitter–market   → r={pearson['twitter_market']:.2f} | synchronous")
-        return
+    # ---- Reddit counts ----
+    reddit_counts: Dict[datetime, int] = Counter()
+    reddit_log = os.path.join(logs_dir, "social_reddit.jsonl")
+    if os.path.exists(reddit_log):
+        for r in _load_jsonl(reddit_log):
+            ts = _parse_ts(r.get("created_utc") or r.get("ts") or r.get("timestamp"))
+            if ts is None:
+                continue
+            if ts < start or ts > now:
+                continue
+            reddit_counts[_floor_hour(ts)] += 1
 
-    # Live path
-    bundle = _aggregate_series(ctx, lookback_h)
+    # ---- Twitter counts ----
+    twitter_counts: Dict[datetime, int] = Counter()
+    twitter_log = os.path.join(logs_dir, "social_twitter.jsonl")
+    if os.path.exists(twitter_log):
+        for r in _load_jsonl(twitter_log):
+            ts = _parse_ts(r.get("created_utc") or r.get("ts") or r.get("timestamp"))
+            if ts is None:
+                continue
+            if ts < start or ts > now:
+                continue
+            twitter_counts[_floor_hour(ts)] += 1
 
-    pearsons = _pearsons(bundle)
-    # Lead/lag across pairs (±6h)
-    lag_cap = 6
-    lag_map_int: Dict[str, int] = {
-        "reddit_twitter": _max_xcorr_lag(bundle.reddit, bundle.twitter, lag_cap),
-        "reddit_market": _max_xcorr_lag(bundle.reddit, bundle.market, lag_cap),
-        "twitter_market": _max_xcorr_lag(bundle.twitter, bundle.market, lag_cap),
+    # ---- Market returns ----
+    market_jsonl = os.path.join(logs_dir, "market_prices.jsonl")
+    market_ret = _btc_returns_from_market_jsonl(market_jsonl, buckets)
+
+    reddit_series = _series_from_counts(reddit_counts, buckets)
+    twitter_series = _series_from_counts(twitter_counts, buckets)
+
+    # If market JSONL absent, fall back to zeros (still renders a section),
+    # and in demo mode we’ll seed correlations.
+    if market_ret is None:
+        market_ret = [0.0] * len(buckets)
+
+    have_real = any(v > 0 for v in reddit_series) or any(v > 0 for v in twitter_series)
+
+    demo = bool(getattr(ctx, "is_demo", False)) or os.getenv("MW_DEMO", "false").lower() == "true"
+    seeded = False
+
+    if (not have_real) and demo:
+        # Seed plausible demo data (deterministic pattern)
+        seeded = True
+        for i, b in enumerate(buckets):
+            base = 10 + (i % 5)  # gentle wave
+            reddit_series[i] = float(base + (1 if (i % 7 == 0) else 0))
+            twitter_series[i] = float(base * 1.1 + (1 if (i % 9 == 0) else 0))
+            market_ret[i] = 0.001 * math.sin(i / 6.0)
+    # Compute Pearson pairwise
+    pairs = {
+        "reddit_twitter": _pearson(reddit_series, twitter_series),
+        "reddit_market": _pearson(reddit_series, market_ret),
+        "twitter_market": _pearson(twitter_series, market_ret),
     }
 
-    # Pretty lead-lag labels
-    lead_lag_labels: Dict[str, str] = {}
-    for key, lag in lag_map_int.items():
-        a, b = key.split("_")
-        _, label = _lead_lag_label(a, b, lag)
-        lead_lag_labels[f"{a}→{b}"] = label
+    # Lead-lag (±6h)
+    max_lag = 6
+    lag_rt, _ = _cross_corr_best_lag(reddit_series, twitter_series, max_lag)
+    lag_rm, _ = _cross_corr_best_lag(reddit_series, market_ret, max_lag)
+    lag_tm, _ = _cross_corr_best_lag(twitter_series, market_ret, max_lag)
+
+    def fmt_lag(lag: int) -> str:
+        if lag == 0:
+            return "0h"
+        sign = "+" if lag > 0 else "-"
+        return f"{sign}{abs(lag)}h"
+
+    lead_lag = {
+        "reddit→twitter": fmt_lag(lag_rt),
+        "reddit→market": fmt_lag(lag_rm),
+        "twitter→market": fmt_lag(lag_tm),
+    }
 
     # Persist JSON
-    out = {
+    out_json = {
         "window_hours": lookback_h,
-        "generated_at": _iso(datetime.now(timezone.utc)),
-        "pearson": {
-            "reddit_twitter": pearsons.get("reddit_twitter", 0.0),
-            "reddit_market": pearsons.get("reddit_market", 0.0),
-            "twitter_market": pearsons.get("twitter_market", 0.0),
-        },
-        "lead_lag": lead_lag_labels,
-        "demo": False,
+        "generated_at": _iso(now),
+        "pearson": {k: (None if v is None else round(float(v), 2)) for k, v in pairs.items()},
+        "lead_lag": lead_lag,
+        "demo": bool(seeded),
     }
-    (models_dir / "cross_origin_correlation.json").write_text(json.dumps(out, indent=2))
+    _write_json(os.path.join(models_dir, "cross_origin_correlation.json"), out_json)
 
     # Plots
-    _plot_heatmap(out["pearson"], artifacts_dir / "corr_heatmap.png")
-    _plot_leadlag(lag_map_int, artifacts_dir / "corr_leadlag.png")
+    try:
+        # Heatmap
+        labels = ["reddit", "twitter", "market"]
+        mat = [
+            [1.0, pairs["reddit_twitter"] or 0.0, pairs["reddit_market"] or 0.0],
+            [pairs["reddit_twitter"] or 0.0, 1.0, pairs["twitter_market"] or 0.0],
+            [pairs["reddit_market"] or 0.0, pairs["twitter_market"] or 0.0, 1.0],
+        ]
+        fig = plt.figure(figsize=(4, 3))
+        ax = plt.gca()
+        im = ax.imshow(mat, vmin=-1, vmax=1)
+        ax.set_xticks(range(3), labels)
+        ax.set_yticks(range(3), labels)
+        for i in range(3):
+            for j in range(3):
+                ax.text(j, i, f"{mat[i][j]:.2f}", ha="center", va="center")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        fig.savefig(os.path.join(arts_dir, "corr_heatmap.png"), dpi=120)
+        plt.close(fig)
+    except Exception:
+        pass
+
+    try:
+        # Lead-lag bar chart (positive bar => left leads right)
+        ll_pairs = [("reddit→twitter", lag_rt), ("reddit→market", lag_rm), ("twitter→market", lag_tm)]
+        fig = plt.figure(figsize=(5, 2.5))
+        ax = plt.gca()
+        ax.bar([p[0] for p in ll_pairs], [p[1] for p in ll_pairs])
+        ax.set_ylabel("Lead (hours)")
+        ax.set_xlabel("Pair")
+        fig.tight_layout()
+        fig.savefig(os.path.join(arts_dir, "corr_leadlag.png"), dpi=120)
+        plt.close(fig)
+    except Exception:
+        pass
 
     # Markdown
     md.append(f"\n### 🔗 Cross-Origin Correlations ({lookback_h}h)")
-    md.append(f"reddit–twitter   → r={out['pearson']['reddit_twitter']:.2f} | "
-              f"{_lead_phrase('reddit', 'twitter', lag_map_int['reddit_twitter'])}")
-    md.append(f"reddit–market    → r={out['pearson']['reddit_market']:.2f} | "
-              f"{_lead_phrase('reddit', 'market', lag_map_int['reddit_market'])}")
-    md.append(f"twitter–market   → r={out['pearson']['twitter_market']:.2f} | "
-              f"{_lead_phrase('twitter', 'market', lag_map_int['twitter_market'])}")
+    def r2(v: Optional[float]) -> str:
+        return "n/a" if v is None else f"{v:.2f}"
+    # Interpret lag text for prose (positive means left leads)
+    def lag_phrase(lag: int) -> str:
+        if lag > 0:
+            return f"left leads by ~{lag}h"
+        if lag < 0:
+            return f"right leads by ~{abs(lag)}h"
+        return "synchronous"
 
-
-def _lead_phrase(a: str, b: str, lag: int) -> str:
-    if lag > 0:
-        return f"{a} leads by ~{lag}h"
-    if lag < 0:
-        return f"{b} leads by ~{abs(lag)}h"
-    return "synchronous"
-
-
-def _plot_heatmap(pearson: Dict[str, float], out_path: Path) -> None:
-    names = ["reddit", "twitter", "market"]
-    m = np.eye(3)
-    # fill symmetric
-    p_rt = float(pearson.get("reddit_twitter", 0.0) or 0.0)
-    p_rm = float(pearson.get("reddit_market", 0.0) or 0.0)
-    p_tm = float(pearson.get("twitter_market", 0.0) or 0.0)
-    m[0, 1] = m[1, 0] = p_rt
-    m[0, 2] = m[2, 0] = p_rm
-    m[1, 2] = m[2, 1] = p_tm
-
-    fig = plt.figure(figsize=(4.2, 3.6))
-    ax = plt.gca()
-    im = ax.imshow(m, vmin=-1, vmax=1)
-    ax.set_xticks(range(3))
-    ax.set_yticks(range(3))
-    ax.set_xticklabels(names)
-    ax.set_yticklabels(names)
-    for i in range(3):
-        for j in range(3):
-            ax.text(j, i, f"{m[i, j]:.2f}", ha="center", va="center", fontsize=9)
-    ax.set_title("Pearson correlation")
-    plt.colorbar(im, fraction=0.046, pad=0.04)
-    _ensure_dir(out_path)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=140)
-    plt.close(fig)
-
-
-def _plot_leadlag(lags: Dict[str, int], out_path: Path) -> None:
-    # map pair->lag; plot signed hours
-    pairs = ["reddit_twitter", "reddit_market", "twitter_market"]
-    vals = [int(lags.get(k, 0)) for k in pairs]
-
-    fig = plt.figure(figsize=(4.8, 3.2))
-    ax = plt.gca()
-    ax.bar(range(len(pairs)), vals)
-    ax.set_xticks(range(len(pairs)))
-    ax.set_xticklabels([p.replace("_", "–") for p in pairs], rotation=0)
-    ax.axhline(0, linestyle="--", linewidth=1)
-    ax.set_ylabel("Lead (hours)  — positive = left name leads")
-    ax.set_title("Max cross-correlation lag (±6h)")
-    _ensure_dir(out_path)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=140)
-    plt.close(fig)
+    md.append(f"reddit–twitter   → r={r2(pairs['reddit_twitter'])} | {lag_phrase(lag_rt)}")
+    md.append(f"reddit–market    → r={r2(pairs['reddit_market'])} | {lag_phrase(lag_rm)}")
+    md.append(f"twitter–market   → r={r2(pairs['twitter_market'])} | {lag_phrase(lag_tm)}")
