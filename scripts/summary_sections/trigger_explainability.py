@@ -1,202 +1,177 @@
 # scripts/summary_sections/trigger_explainability.py
 from __future__ import annotations
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+from pathlib import Path
+import json
+import os
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
 
-from .common import SummaryContext, pick_candidate_origins
+import matplotlib
+matplotlib.use("Agg")  # ensure headless
+import matplotlib.pyplot as plt  # noqa: E402
 
-# Import the feature builder from the TL v0 section (where it now lives)
-try:
-    from .trigger_likelihood_v0 import _build_summary_features_for_origin
-except Exception:  # ultra-safe fallback: define a no-op builder
-    def _build_summary_features_for_origin(
-        origin: str,
-        *,
-        trends_by_origin: Dict[str, List[Dict[str, Any]]] | None = None,
-        regimes_map: Dict[str, Any] | None = None,
-        metrics_map: Dict[str, Dict[str, float]] | None = None,
-        bursts_by_origin: Dict[str, List[Dict[str, Any]]] | None = None,
-    ) -> Dict[str, float]:
-        return {}
+from .common import SummaryContext, ensure_dir, parse_ts, _iso
 
+SAMPLE_JSON = "models/explainability_sample.json"
+PLOT_PNG = "artifacts/explainability_top_features.png"
+
+def _load_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+def _write_json(path: Path, obj: Any) -> None:
+    ensure_dir(path.parent)
+    path.write_text(json.dumps(obj, indent=2))
+
+def _seed_demo_sample(now: datetime) -> Dict[str, Any]:
+    # Deterministic demo payload with a few fired triggers and top features per origin
+    rnd = [
+        {
+            "ts": _iso(now),
+            "origin": "reddit",
+            "model_version": "v18",
+            "adjusted_score": 0.87,
+            "decision": "fire",
+            "explanation": [
+                {"feature": "btc_return_1h", "contribution": +0.21},
+                {"feature": "reddit_burst_etf", "contribution": +0.17},
+                {"feature": "volatility_6h", "contribution": +0.11},
+            ],
+        },
+        {
+            "ts": _iso(now),
+            "origin": "twitter",
+            "model_version": "v12",
+            "adjusted_score": 0.81,
+            "decision": "fire",
+            "explanation": [
+                {"feature": "solana_sentiment", "contribution": +0.23},
+                {"feature": "volatility_6h", "contribution": +0.12},
+                {"feature": "btc_return_1h", "contribution": +0.07},
+            ],
+        },
+        {
+            "ts": _iso(now),
+            "origin": "rss_news",
+            "model_version": "v09",
+            "adjusted_score": 0.76,
+            "decision": "fire",
+            "explanation": [
+                {"feature": "sec_approval_term", "contribution": +0.19},
+                {"feature": "btc_price_jump", "contribution": +0.15},
+                {"feature": "volatility_6h", "contribution": +0.08},
+            ],
+        },
+    ]
+    return {
+        "generated_at": _iso(now),
+        "window_hours": 72,
+        "sample_size": len(rnd),
+        "rows": rnd,
+        "demo": True,
+    }
+
+def _summarize_top_features(rows: List[Dict[str, Any]]) -> Tuple[Dict[str, List[str]], Counter]:
+    """
+    Returns:
+      - per_origin_top: origin -> list of most frequent top features (up to 3)
+      - global_counts: Counter over all features
+    """
+    per_origin_counts: Dict[str, Counter] = defaultdict(Counter)
+    global_counts: Counter = Counter()
+    for r in rows:
+        if (r.get("decision") or "").lower() != "fire":
+            continue
+        origin = r.get("origin") or "unknown"
+        expl = r.get("explanation") or []
+        # take top-K from explanation order if available
+        feats = []
+        for item in expl:
+            f = (item.get("feature") or "").strip()
+            if f:
+                feats.append(f)
+        if not feats:
+            continue
+        # only count top 3 per row to reduce noise
+        for f in feats[:3]:
+            per_origin_counts[origin][f] += 1
+            global_counts[f] += 1
+
+    per_origin_top: Dict[str, List[str]] = {}
+    for origin, cnt in per_origin_counts.items():
+        per_origin_top[origin] = [f for f, _c in cnt.most_common(3)]
+    return per_origin_top, global_counts
+
+def _plot_global_top(global_counts: Counter, out_path: Path) -> None:
+    ensure_dir(out_path.parent)
+    if not global_counts:
+        # create an empty placeholder so CI has a file
+        plt.figure(figsize=(6, 3))
+        plt.title("Top features (no data)")
+        plt.tight_layout()
+        plt.savefig(out_path)
+        plt.close()
+        return
+
+    feats, counts = zip(*global_counts.most_common(10))
+    plt.figure(figsize=(8, 4.5))
+    plt.barh(list(feats)[::-1], list(counts)[::-1])  # no custom colors per guidelines
+    plt.title("Most common top features (last 72h)")
+    plt.xlabel("count in top-3 (across fired triggers)")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
 
 def append(md: List[str], ctx: SummaryContext) -> None:
-    md.append("\n### 🧠 Trigger Explainability")
+    """
+    Render 'Trigger Explainability' section.
+    Reads models/explainability_sample.json if present; in demo, seeds a deterministic sample.
+    Emits a global top-features plot and per-origin top lists.
+    """
+    models_dir = Path(getattr(ctx, "models_dir", "models"))
+    artifacts_dir = Path(getattr(ctx, "artifacts_dir", "artifacts"))
+    sample_path = models_dir / SAMPLE_JSON.split("/", 1)[-1]
+    plot_path = artifacts_dir / PLOT_PNG.split("/", 1)[-1]
 
-    # Import ensemble scorer lazily so this module stays light to import
-    try:
-        from src.ml.infer import infer_score_ensemble
-    except Exception as e:
-        md.append(f"_Explainability unavailable: {type(e).__name__}_")
+    # Try to load sample JSON
+    data = _load_json(sample_path)
+
+    # If missing and DEMO, seed deterministic sample
+    if (not data or not isinstance(data, dict) or "rows" not in data) and (
+        str(os.getenv("MW_DEMO") or os.getenv("DEMO_MODE") or "").lower() == "true"
+        or getattr(ctx, "is_demo", False)
+    ):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        data = _seed_demo_sample(now)
+        _write_json(sample_path, data)
+
+    # If still nothing, render an informative skip
+    if not data or not isinstance(data, dict) or "rows" not in data:
+        md.append("\n> ⚠️ Trigger Explainability: no sample available (missing models/explainability_sample.json).")
         return
 
-    # Prefer the same candidates used in TL v0; otherwise pick top 3
-    origins_list = list(ctx.candidates or []) or pick_candidate_origins(ctx.origins_rows, ctx.yield_data, top=3)
-    if not origins_list:
-        md.append("_No candidate origins available._")
-        return
+    rows = list(data.get("rows") or [])
+    per_origin_top, global_counts = _summarize_top_features(rows)
+    _plot_global_top(global_counts, plot_path)
 
-    # Reuse cached analytics assembled by earlier sections when possible
-    trends_map: Dict[str, List[Dict[str, Any]]] = {}
-    regimes_map: Dict[str, Any] = {}
-    metrics_map: Dict[str, Dict[str, float]] = {}
-    bursts_map: Dict[str, List[Dict[str, Any]]] = {}
-    dyn_thresholds: Dict[str, Dict[str, float]] = {}
-
-    try:
-        t = ctx.caches.get("origin_trends") or {}
-        for item in (t.get("origins") or []):
-            o = item.get("origin")
-            if not o:
+    md.append("\n### 🔍 Trigger Explainability (last 72h)")
+    if not rows:
+        md.append("_no fired triggers in window_")
+    else:
+        # Print per-origin top features
+        # keep a stable order: reddit, twitter, rss_news, then others
+        preferred = ["reddit", "twitter", "rss_news"]
+        seen = set()
+        for o in preferred + sorted(set(per_origin_top.keys()) - set(preferred)):
+            if o in seen or o not in per_origin_top:
                 continue
-            series = (
-                item.get("series")
-                or item.get("buckets")
-                or item.get("data")
-                or item.get("timeline")
-                or []
-            )
-            # Ensure 'flags_count' exists for downstream feature sums
-            norm = []
-            for b in series:
-                if not isinstance(b, dict):
-                    continue
-                if "flags_count" not in b:
-                    bb = dict(b)
-                    if "flags" in bb:
-                        bb["flags_count"] = bb.get("flags", 0)
-                    elif "count" in bb:
-                        bb["flags_count"] = bb.get("count", 0)
-                    else:
-                        bb["flags_count"] = 0
-                    norm.append(bb)
-                else:
-                    norm.append(b)
-            trends_map[o] = norm
-    except Exception:
-        pass
-
-    try:
-        vr = ctx.caches.get("volatility_regimes") or {}
-        for row in (vr.get("origins") or []):
-            o = row.get("origin")
-            if o:
-                regimes_map[o] = (row.get("regime") or "normal")
-    except Exception:
-        pass
-
-    try:
-        sm = ctx.caches.get("source_metrics_7d") or {}
-        for r in (sm.get("origins") or []):
-            o = r.get("origin")
-            if o:
-                metrics_map[o] = {
-                    "precision": float(r.get("precision", 0.0) or 0.0),
-                    "recall": float(r.get("recall", 0.0) or 0.0),
-                }
-    except Exception:
-        pass
-
-    try:
-        bd = ctx.caches.get("bursts_7d") or {}
-        for item in (bd.get("origins") or []):
-            o = item.get("origin")
-            if o:
-                bursts_map[o] = list(item.get("bursts", []) or [])
-    except Exception:
-        pass
-
-    # Dynamic threshold information (if a prior section stored it)
-    try:
-        dyn_thresholds = ctx.caches.get("dyn_thresholds") or {}
-    except Exception:
-        dyn_thresholds = {}
-
-    shown = 0
-    for o in origins_list:
-        if shown >= 2:
-            break
-
-        # Build features (best effort)
-        try:
-            feats = _build_summary_features_for_origin(
-                o,
-                trends_by_origin=trends_map,
-                regimes_map=regimes_map,
-                metrics_map=metrics_map,
-                bursts_by_origin=bursts_map,
-            )
-        except Exception:
-            feats = {}
-
-        # Base threshold from dynamic map if present (used as a hint; ensemble may override)
-        base_thr = None
-        try:
-            drec = dyn_thresholds.get(o) or {}
-            # prefer value that was actually "used", else dynamic, else static
-            if "used" in drec:
-                base_thr = float(drec["used"])
-            elif "dynamic" in drec:
-                base_thr = float(drec["dynamic"])
-            elif "static" in drec:
-                base_thr = float(drec["static"])
-        except Exception:
-            base_thr = None
-
-        payload = {"features": dict(feats or {})}
-        if base_thr is not None:
-            payload["base_threshold"] = base_thr
-
-        try:
-            res = infer_score_ensemble(payload)
-        except Exception:
-            md.append(f"- **{o}**: _no explanation available_")
-            continue
-
-        expl = res.get("explanation", {}) or {}
-
-        # Pull numbers with safe defaults for formatting
-        regime     = (expl.get("volatility_regime")
-                      or res.get("volatility_regime")
-                      or "normal")
-        drift_pen  = float(res.get("drift_penalty", 0.0) or 0.0)
-        adj_score  = float(res.get("adjusted_score", res.get("prob_trigger_next_6h", 0.0)) or 0.0)
-
-        base_thr_v = res.get("base_threshold")
-        try:
-            base_thr_v = float(base_thr_v) if base_thr_v is not None else 0.5
-        except Exception:
-            base_thr_v = 0.5
-
-        adj_thr_v  = res.get("threshold_after_volatility")
-        try:
-            adj_thr_v = float(adj_thr_v) if adj_thr_v is not None else None
-        except Exception:
-            adj_thr_v = None
-
-        thr_show = adj_thr_v if isinstance(adj_thr_v, (int, float)) else base_thr_v
-        decision = expl.get("decision")
-        if not decision:
-            decision = "triggered" if adj_score >= thr_show else "not_triggered"
-
-        top_feats = expl.get("top_contributors") or []
-        if not top_feats and isinstance(payload.get("features"), dict):
-            # Fallback heuristic: top absolute-valued features from the input
-            try:
-                numeric = [(k, float(v)) for k, v in payload["features"].items()
-                           if isinstance(v, (int, float))]
-                numeric.sort(key=lambda kv: abs(kv[1]), reverse=True)
-                top_feats = [k for k, _ in numeric[:3]]
-            except Exception:
-                top_feats = []
-
-        md.append(f"- **{o}**: {decision}")
-        md.append(
-            f"  - adjusted_score={adj_score:.3f}  "
-            f"threshold: base={base_thr_v:.3f}"
-            + (f" → adjusted={thr_show:.3f}" if adj_thr_v is not None else "")
-            + f" (regime={regime}, drift_penalty={drift_pen:.2f})"
-        )
-        if top_feats:
-            md.append(f"  - top contributors: {', '.join(map(str, top_feats))}")
-
-        shown += 1
+            seen.add(o)
+            tops = per_origin_top[o]
+            if tops:
+                md.append(f"{o}  → top: {', '.join(tops)}")
+        # Footer
+        demo_flag = " (demo)" if data.get("demo") else ""
+        md.append(f"\n_Footer: Feature contributions estimated via model coefficients/importances{demo_flag}._")
