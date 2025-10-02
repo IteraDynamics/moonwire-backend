@@ -138,10 +138,17 @@ jobs:
           MW_CG_VS_CURRENCY: "usd"
           MW_CG_LOOKBACK_H: "72"
           MW_CG_RATE_LIMIT_PER_MIN: "25"
+          # Reddit lite
           MW_REDDIT_MODE: "rss"
           MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
           MW_REDDIT_SORT: "new"
           MW_REDDIT_LOOKBACK_H: "72"
+          # --- NEW: Twitter lite (auto → api if token, else demo) ---
+          MW_TWITTER_MODE: "auto"
+          MW_TWITTER_KEYWORDS: "bitcoin,ethereum,solana,crypto"
+          MW_TWITTER_LOOKBACK_H: "72"
+          MW_TWITTER_RATE_LIMIT_PER_MIN: "25"
+          MW_TWITTER_BEARER_TOKEN: ${{ secrets.MW_TWITTER_BEARER_TOKEN }}
           # --- Drift Response knobs ---
           MW_DRIFT_ECE_THRESH: "0.06"
           MW_DRIFT_MIN_BUCKETS: "3"
@@ -192,7 +199,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # --- NEW: Retrain Automation artifacts ---
+      # --- Retrain Automation artifacts ---
       - name: Upload retrain plan
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -287,6 +294,27 @@ jobs:
           path: |
             artifacts/reddit_activity_*.png
             artifacts/reddit_bursts_*.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- NEW: Twitter artifacts ---
+      - name: Upload social twitter context
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-twitter-context
+          path: models/social_twitter_context.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload twitter plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: twitter-plots
+          path: |
+            artifacts/twitter_activity.png
+            artifacts/twitter_bursts.png
           if-no-files-found: ignore
           retention-days: 14
 
