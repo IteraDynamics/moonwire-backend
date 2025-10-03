@@ -43,9 +43,9 @@ def test_demo_mode_seeds(tmp_path, monkeypatch):
 
         # copy module under test
         from textwrap import dedent
-        module_src = dedent(\"\"\"\
+        module_src = dedent("""
         from __future__ import annotations
-        \"\"\")
+        """)
         # Instead of copying full file, import from project under test if present
         # In CI, the real project file will be used.
         # For this isolated test, we write a thin wrapper that imports it.
