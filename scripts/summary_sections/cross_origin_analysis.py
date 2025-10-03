@@ -113,9 +113,9 @@ def _align_series(keys: List[str], d: Dict[str, float | int]) -> np.ndarray:
 
 def _pearson(a: np.ndarray, b: np.ndarray) -> float:
     if len(a) < 2 or len(b) < 2:
-        return float("nan")
-    if np.all(a == a[0]) or np.all(b == b[0]):
-        return float("nan")
+        return 0.0
+    if np.allclose(a, a[0]) or np.allclose(b, b[0]):
+        return 0.0  # treat zero-variance as no correlation rather than NaN
     return float(np.corrcoef(a, b)[0, 1])
 
 
@@ -129,19 +129,15 @@ def _cross_corr_lag(a: np.ndarray, b: np.ndarray, max_shift: int) -> Tuple[int, 
     """
     n = len(a)
     if n < 3 or len(b) != n:
-        return 0, float("nan"), np.zeros(1, dtype=int), np.zeros(1, dtype=float)
+        return 0, 0.0, np.zeros(1, dtype=int), np.zeros(1, dtype=float)
 
-    # de-mean to be safe for correlation comparison
+    # de-mean
     a0 = a - np.mean(a)
     b0 = b - np.mean(b)
 
     lags = np.arange(-max_shift, max_shift + 1, dtype=int)
     rvals = np.zeros_like(lags, dtype=float)
 
-    # Definition: for a given lag L:
-    #   if L > 0: correlate a[:-L] vs b[L:]
-    #   if L < 0: correlate a[-L:] vs b[:L]
-    #   if L == 0: correlate a vs b
     for i, L in enumerate(lags):
         if L > 0:
             aa = a0[:-L]
@@ -154,28 +150,26 @@ def _cross_corr_lag(a: np.ndarray, b: np.ndarray, max_shift: int) -> Tuple[int, 
             bb = b0
 
         if len(aa) < 3 or len(bb) < 3:
-            r = float("nan")
+            r = 0.0
         else:
+            # if either slice is (near) constant, define r=0.0
             if np.allclose(aa, aa[0]) or np.allclose(bb, bb[0]):
-                r = float("nan")
+                r = 0.0
             else:
                 r = float(np.corrcoef(aa, bb)[0, 1])
         rvals[i] = r
 
-    valid = ~np.isnan(rvals)
-    if not np.any(valid):
-        return 0, float("nan"), lags, rvals
-
-    idx = int(np.nanargmax(np.abs(rvals)))
+    # pick lag with maximum |r|
+    idx = int(np.argmax(np.abs(rvals)))
     return int(lags[idx]), float(rvals[idx]), lags, rvals
 
 
 def _perm_test_ccf(a: np.ndarray, b: np.ndarray, lag: int, r_obs: float, n_perm: int = 100) -> float:
     """
-    Permutation test: shuffle one series' order (break temporal structure) and recompute
-    correlation at the chosen lag. Two-sided p-value on |r|.
+    Permutation test: shuffle one series and recompute correlation at the chosen lag.
+    Two-sided p-value on |r|.
     """
-    if math.isnan(r_obs):
+    if not np.isfinite(r_obs):
         return 1.0
     rng = np.random.default_rng(42)
     count_extreme = 0
@@ -225,17 +219,15 @@ def _seed_demo_series(keys: List[str]) -> SeriesBundle:
     rng = np.random.default_rng(7)
     n = len(keys)
 
-    # Seed Reddit/Twitter as moderately correlated counts; Market as smoothed noise with some correlation
     reddit = rng.poisson(50, size=n).astype(float)
     twitter = reddit * 0.6 + rng.poisson(30, size=n) * 0.4
     market = rng.normal(0, 1, size=n).cumsum()
     market = (market - np.mean(market)) / (np.std(market) + 1e-9)
 
-    # inject simple lags: reddit leads twitter by 1h, reddit leads market by 2h
-    twitter = np.roll(twitter, -1)  # reddit leads by +1h => twitter lags
-    market = np.roll(market, -2)    # reddit leads by +2h => market lags
+    # inject lags: reddit leads twitter by 1h, market by 2h
+    twitter = np.roll(twitter, -1)
+    market = np.roll(market, -2)
 
-    # normalize
     def norm(v: np.ndarray) -> np.ndarray:
         v = np.array(v, dtype=float)
         return (v - v.mean()) / (v.std() + 1e-9)
@@ -247,6 +239,14 @@ def _seed_demo_series(keys: List[str]) -> SeriesBundle:
         market=norm(market),
         demo=True,
     )
+
+
+def _add_tiny_jitter_if_constant(v: np.ndarray, seed: int = 123) -> np.ndarray:
+    # if near-zero std, add tiny deterministic jitter so correlations are defined
+    if float(np.std(v)) < 1e-12:
+        rng = np.random.default_rng(seed)
+        v = v + rng.normal(0.0, 1e-6, size=v.shape[0])
+    return v
 
 
 def _gather_series(lookback_h: int) -> SeriesBundle:
@@ -270,13 +270,16 @@ def _gather_series(lookback_h: int) -> SeriesBundle:
         sd = float(np.std(v))
         return (v - mu) / (sd + 1e-9)
 
-    return SeriesBundle(
-        keys=keys,
-        reddit=z(reddit),
-        twitter=z(twitter),
-        market=z(market),
-        demo=False,
-    )
+    reddit = z(reddit)
+    twitter = z(twitter)
+    market = z(market)
+
+    # Ensure non-constant after z-scoring
+    reddit  = _add_tiny_jitter_if_constant(reddit, seed=101)
+    twitter = _add_tiny_jitter_if_constant(twitter, seed=102)
+    market  = _add_tiny_jitter_if_constant(market, seed=103)
+
+    return SeriesBundle(keys=keys, reddit=reddit, twitter=twitter, market=market, demo=False)
 
 
 def _pairwise(series: SeriesBundle) -> List[Tuple[str, np.ndarray, np.ndarray]]:
@@ -330,10 +333,7 @@ def _heatmap(matrix: np.ndarray, labels: List[str], title: str, outpath: str) ->
     for i in range(matrix.shape[0]):
         for j in range(matrix.shape[1]):
             val = matrix[i, j]
-            if np.isnan(val):
-                s = "n/a"
-            else:
-                s = f"{val:.2f}"
+            s = "n/a" if not np.isfinite(val) else f"{val:.2f}"
             ax.text(j, i, s, ha="center", va="center")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
@@ -405,10 +405,10 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
     # 4) Plots
     labels = ["reddit", "twitter", "market"]
 
-    # Pearson heatmap (ordered: reddit, twitter, market)
-    r_rt = pearson_map.get("reddit_twitter", float("nan"))
-    r_rm = pearson_map.get("reddit_market", float("nan"))
-    r_tm = pearson_map.get("twitter_market", float("nan"))
+    # Pearson heatmap
+    r_rt = pearson_map.get("reddit_twitter", 0.0)
+    r_rm = pearson_map.get("reddit_market", 0.0)
+    r_tm = pearson_map.get("twitter_market", 0.0)
     pearson_matrix = np.array([
         [1.0, r_rt, r_rm],
         [r_rt, 1.0, r_tm],
@@ -416,10 +416,8 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
     ], dtype=float)
     _heatmap(pearson_matrix, labels, "Pearson Correlations", os.path.join(artifacts_dir, "corr_heatmap.png"))
 
-    # Lead–lag heatmap: matrix of r at the selected (max-|r|) lag for each pair
-    # Build a 3x3 with symmetric fill; diagonal = 1.0
+    # Lead–lag heatmap: r at the best lag for each pair
     r_map = {rec["pair"]: rec for rec in results}
-    # Helper to fetch r for a pair irrespective of order used above
     def _r_for(a: str, b: str) -> float:
         key1 = f"{a}–{b}"
         key2 = f"{b}–{a}"
@@ -427,7 +425,7 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
             return float(r_map[key1]["r"])
         if key2 in r_map:
             return float(r_map[key2]["r"])
-        return float("nan")
+        return 0.0
 
     leadlag_matrix = np.array([
         [1.0, _r_for("reddit", "twitter"), _r_for("reddit", "market")],
@@ -436,8 +434,7 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
     ], dtype=float)
     _heatmap(leadlag_matrix, labels, "Lead–Lag (r at best lag)", os.path.join(artifacts_dir, "leadlag_heatmap.png"))
 
-    # Max-lag (who leads) simple bar plot: map lag->signed hours per pair
-    # (Keep old corr_leadlag.png for backward-compat)
+    # Simple bar of signed lag per pair (legacy plot name for compatibility)
     try:
         pairs_order = ["reddit–twitter", "reddit–market", "twitter–market"]
         lag_vals = [next((r["lag_hours"] for r in results if r["pair"] == p), 0) for p in pairs_order]
@@ -467,7 +464,6 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
     # 5) Markdown
     md.append(f"\n⏱️ Lead–Lag Analysis ({look_h}h, max ±{max_shift}h)")
 
-    # Sort results by |r| desc for readability
     def _score(rec: Dict[str, Any]) -> float:
         v = rec.get("r")
         try:
@@ -477,11 +473,9 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
 
     for rec in sorted(results, key=_score, reverse=True):
         pair = rec.get("pair", "a–b")
-        rbest = float(rec.get("r", float("nan")))
+        rbest = float(rec.get("r", 0.0))
         lag = int(rec.get("lag_hours", 0))
         pval = float(rec.get("p_value", 1.0))
-        sig = "✅" if rec.get("significant") else "❌"
-        # pair is "a–b" (en dash)
         try:
             a_name, b_name = pair.split("–", 1)
         except Exception:
