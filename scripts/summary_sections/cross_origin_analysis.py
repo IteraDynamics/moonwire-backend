@@ -2,495 +2,549 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple, Iterable, Optional
 
-import math
 import numpy as np
+
+# Matplotlib (Agg-only; no seaborn)
 import matplotlib
-matplotlib.use("Agg")  # CI-friendly
-import matplotlib.pyplot as plt
+matplotlib.use("Agg")  # ensure headless
+import matplotlib.pyplot as plt  # noqa: E402
 
-
-# ----------------------------- Small utilities --------------------------------
-
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _env_f(key: str, default: float) -> float:
-    try:
-        return float(os.getenv(key, str(default)))
-    except Exception:
-        return default
-
-
-def _env_i(key: str, default: int) -> int:
-    try:
-        return int(float(os.getenv(key, str(default))))
-    except Exception:
-        return default
-
-
-def _ensure_dir(path: str) -> None:
-    d = os.path.dirname(path)
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-
-
-def _load_jsonl_counts(path: str, ts_key: str) -> Dict[str, int]:
-    """Return counts per ISO hour (YYYY-mm-ddTHH:00:00Z)."""
-    out: Dict[str, int] = {}
-    if not os.path.exists(path):
-        return out
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                ts = row.get(ts_key) or row.get("created_utc") or row.get("ts") or row.get("timestamp")
-                if not ts:
-                    continue
-                try:
-                    # normalize to hour bucket
-                    t = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone(timezone.utc)
-                    bucket = t.replace(minute=0, second=0, microsecond=0)
-                    key = bucket.strftime("%Y-%m-%dT%H:00:00Z")
-                    out[key] = out.get(key, 0) + 1
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return out
-
-
-def _load_market_returns_jsonl(path: str) -> Dict[str, float]:
-    """Return BTC hourly returns per hour ISO key."""
-    out: Dict[str, float] = {}
-    if not os.path.exists(path):
-        return out
-    last_price = None
-    last_hour_key = None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:
-                    continue
-                ts = row.get("ts_utc") or row.get("ts") or row.get("timestamp")
-                price = row.get("price") or row.get("close") or row.get("value")
-                if ts is None or price is None:
-                    continue
-                try:
-                    t = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone(timezone.utc)
-                except Exception:
-                    continue
-                bucket = t.replace(minute=0, second=0, microsecond=0)
-                key = bucket.strftime("%Y-%m-%dT%H:00:00Z")
-                price = float(price)
-                if last_price is not None and last_hour_key is not None and key != last_hour_key:
-                    ret = (price - last_price) / last_price if last_price != 0 else 0.0
-                    out[key] = float(ret)
-                last_price = price
-                last_hour_key = key
-    except Exception:
-        pass
-    return out
-
-
-def _align_series(keys: List[str], d: Dict[str, float | int]) -> np.ndarray:
-    return np.array([float(d.get(k, 0.0)) for k in keys], dtype=float)
-
-
-def _pearson(a: np.ndarray, b: np.ndarray) -> float:
-    if len(a) < 2 or len(b) < 2:
-        return 0.0
-    if np.allclose(a, a[0]) or np.allclose(b, b[0]):
-        return 0.0  # treat zero-variance as no correlation rather than NaN
-    return float(np.corrcoef(a, b)[0, 1])
-
-
-def _cross_corr_lag(a: np.ndarray, b: np.ndarray, max_shift: int) -> Tuple[int, float, np.ndarray, np.ndarray]:
-    """
-    Return (best_lag, best_r, lags, r_by_lag).
-    Convention:
-      lag > 0  => series A leads by +lag hours (A precedes B)
-      lag < 0  => series B leads by +|lag| hours
-      lag == 0 => synchronous
-    """
-    n = len(a)
-    if n < 3 or len(b) != n:
-        return 0, 0.0, np.zeros(1, dtype=int), np.zeros(1, dtype=float)
-
-    # de-mean
-    a0 = a - np.mean(a)
-    b0 = b - np.mean(b)
-
-    lags = np.arange(-max_shift, max_shift + 1, dtype=int)
-    rvals = np.zeros_like(lags, dtype=float)
-
-    for i, L in enumerate(lags):
-        if L > 0:
-            aa = a0[:-L]
-            bb = b0[L:]
-        elif L < 0:
-            aa = a0[-L:]
-            bb = b0[:L]
-        else:
-            aa = a0
-            bb = b0
-
-        if len(aa) < 3 or len(bb) < 3:
-            r = 0.0
-        else:
-            # if either slice is (near) constant, define r=0.0
-            if np.allclose(aa, aa[0]) or np.allclose(bb, bb[0]):
-                r = 0.0
-            else:
-                r = float(np.corrcoef(aa, bb)[0, 1])
-        rvals[i] = r
-
-    # pick lag with maximum |r|
-    idx = int(np.argmax(np.abs(rvals)))
-    return int(lags[idx]), float(rvals[idx]), lags, rvals
-
-
-def _perm_test_ccf(a: np.ndarray, b: np.ndarray, lag: int, r_obs: float, n_perm: int = 100) -> float:
-    """
-    Permutation test: shuffle one series and recompute correlation at the chosen lag.
-    Two-sided p-value on |r|.
-    """
-    if not np.isfinite(r_obs):
-        return 1.0
-    rng = np.random.default_rng(42)
-    count_extreme = 0
-    for _ in range(max(1, n_perm)):
-        b_perm = rng.permutation(b)
-        L = lag
-        if L > 0:
-            aa = a[:-L]
-            bb = b_perm[L:]
-        elif L < 0:
-            aa = a[-L:]
-            bb = b_perm[:L]
-        else:
-            aa = a
-            bb = b_perm
-        if len(aa) < 3 or len(bb) < 3:
-            r = 0.0
-        else:
-            if np.allclose(aa, aa[0]) or np.allclose(bb, bb[0]):
-                r = 0.0
-            else:
-                r = float(np.corrcoef(aa, bb)[0, 1])
-        if abs(r) >= abs(r_obs):
-            count_extreme += 1
-    p = (count_extreme + 1) / (n_perm + 1)  # add-1 smoothing
-    return float(p)
-
-
-# ----------------------------- Core workflow ----------------------------------
 
 @dataclass
-class SeriesBundle:
-    keys: List[str]
-    reddit: np.ndarray
-    twitter: np.ndarray
-    market: np.ndarray
+class _Config:
+    window_h: int = 72
+    max_shift_h: int = 6          # tighter by default to avoid boundary artifacts
+    n_perm: int = 400             # higher by default for stabler p-values
+    artifacts_dir: str = "artifacts"
+    models_dir: str = "models"
+    logs_dir: str = "logs"
     demo: bool = False
 
 
-def _build_hour_keys(lookback_h: int) -> List[str]:
-    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    keys = [(now - timedelta(hours=h)).strftime("%Y-%m-%dT%H:00:00Z") for h in range(lookback_h - 1, -1, -1)]
-    return keys
-
-
-def _seed_demo_series(keys: List[str]) -> SeriesBundle:
-    rng = np.random.default_rng(7)
-    n = len(keys)
-
-    reddit = rng.poisson(50, size=n).astype(float)
-    twitter = reddit * 0.6 + rng.poisson(30, size=n) * 0.4
-    market = rng.normal(0, 1, size=n).cumsum()
-    market = (market - np.mean(market)) / (np.std(market) + 1e-9)
-
-    # inject lags: reddit leads twitter by 1h, market by 2h
-    twitter = np.roll(twitter, -1)
-    market = np.roll(market, -2)
-
-    def norm(v: np.ndarray) -> np.ndarray:
-        v = np.array(v, dtype=float)
-        return (v - v.mean()) / (v.std() + 1e-9)
-
-    return SeriesBundle(
-        keys=keys,
-        reddit=norm(reddit),
-        twitter=norm(twitter),
-        market=norm(market),
-        demo=True,
-    )
-
-
-def _add_tiny_jitter_if_constant(v: np.ndarray, seed: int = 123) -> np.ndarray:
-    # if near-zero std, add tiny deterministic jitter so correlations are defined
-    if float(np.std(v)) < 1e-12:
-        rng = np.random.default_rng(seed)
-        v = v + rng.normal(0.0, 1e-6, size=v.shape[0])
-    return v
-
-
-def _gather_series(lookback_h: int) -> SeriesBundle:
-    keys = _build_hour_keys(lookback_h)
-
-    reddit_counts = _load_jsonl_counts("logs/social_reddit.jsonl", ts_key="ts_ingested_utc")
-    twitter_counts = _load_jsonl_counts("logs/social_twitter.jsonl", ts_key="ts_ingested_utc")
-    market_rets   = _load_market_returns_jsonl("logs/market_prices.jsonl")
-
-    reddit = _align_series(keys, reddit_counts)
-    twitter = _align_series(keys, twitter_counts)
-    market = _align_series(keys, market_rets)
-
-    # If everything is empty, produce demo series.
-    if (reddit.sum() == 0) and (twitter.sum() == 0) and (np.allclose(market, 0.0)):
-        return _seed_demo_series(keys)
-
-    # Standardize (z-score) each
-    def z(v: np.ndarray) -> np.ndarray:
-        mu = float(np.mean(v))
-        sd = float(np.std(v))
-        return (v - mu) / (sd + 1e-9)
-
-    reddit = z(reddit)
-    twitter = z(twitter)
-    market = z(market)
-
-    # Ensure non-constant after z-scoring
-    reddit  = _add_tiny_jitter_if_constant(reddit, seed=101)
-    twitter = _add_tiny_jitter_if_constant(twitter, seed=102)
-    market  = _add_tiny_jitter_if_constant(market, seed=103)
-
-    return SeriesBundle(keys=keys, reddit=reddit, twitter=twitter, market=market, demo=False)
-
-
-def _pairwise(series: SeriesBundle) -> List[Tuple[str, np.ndarray, np.ndarray]]:
-    return [
-        ("reddit–twitter", series.reddit, series.twitter),
-        ("reddit–market",  series.reddit, series.market),
-        ("twitter–market", series.twitter, series.market),
-    ]
-
-
-def _pearson_block(series: SeriesBundle) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    for name, a, b in _pairwise(series):
-        out[name.replace("–", "_")] = _pearson(a, b)
-    return out
-
-
-def _leadlag_block(series: SeriesBundle, max_shift_h: int, n_perm: int) -> List[Dict[str, Any]]:
-    res: List[Dict[str, Any]] = []
-    for name, a, b in _pairwise(series):
-        lag, rbest, lags, rvals = _cross_corr_lag(a, b, max_shift_h)
-        pval = _perm_test_ccf(a, b, lag, rbest, n_perm)
-        res.append({
-            "pair": name,
-            "lag_hours": int(lag),
-            "r": float(rbest),
-            "p_value": float(pval),
-            "significant": bool(pval < 0.05),
-            "lags": lags.tolist(),
-            "r_by_lag": rvals.tolist(),
-        })
-    return res
-
-
-def _save_json(obj: Any, path: str) -> None:
-    _ensure_dir(path)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2)
-
-
-def _heatmap(matrix: np.ndarray, labels: List[str], title: str, outpath: str) -> None:
-    _ensure_dir(outpath)
-    fig = plt.figure(figsize=(4.2, 3.8))
-    ax = fig.add_subplot(111)
-    im = ax.imshow(matrix, vmin=-1, vmax=1)
-    ax.set_xticks(np.arange(len(labels)))
-    ax.set_yticks(np.arange(len(labels)))
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_yticklabels(labels)
-    ax.set_title(title)
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            val = matrix[i, j]
-            s = "n/a" if not np.isfinite(val) else f"{val:.2f}"
-            ax.text(j, i, s, ha="center", va="center")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=150)
-    plt.close(fig)
-
-
-def _plot_ccf(pair: str, lags: Iterable[int], rvals: Iterable[float], outpath: str) -> None:
-    _ensure_dir(outpath)
-    lags = np.array(list(lags), dtype=int)
-    rvals = np.array(list(rvals), dtype=float)
-    fig = plt.figure(figsize=(5.2, 3.6))
-    ax = fig.add_subplot(111)
-    ax.plot(lags, rvals, marker="o")
-    ax.axhline(0.0, linestyle="--")
-    ax.set_xlabel("Lag (hours)  — positive = first series leads")
-    ax.set_ylabel("Correlation r")
-    ax.set_title(f"CCF: {pair}")
-    fig.tight_layout()
-    fig.savefig(outpath, dpi=150)
-    plt.close(fig)
-
-
-# --------------------------------- Public API ---------------------------------
-
-def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
-    look_h = _env_i("MW_LEADLAG_LOOKBACK_H", 72)
-    max_shift = _env_i("MW_LEADLAG_MAX_SHIFT_H", 12)
-    n_perm = _env_i("MW_LEADLAG_N_PERM", 100)
-    artifacts_dir = os.getenv("ARTIFACTS_DIR", "artifacts")
-
-    # Build or seed series
-    series = _gather_series(look_h)
-
-    # 1) Pearson matrix
-    pearson_map = _pearson_block(series)
-
-    # 2) Lead/Lag with permutation p-values
-    results = _leadlag_block(series, max_shift, n_perm)
-
-    # 3) Save JSON artifacts
-    corr_json = {
-        "window_hours": look_h,
-        "generated_at": _now_utc_iso(),
-        "pearson": pearson_map,
-        "lead_lag": {r["pair"].replace("–", "_"): r["lag_hours"] for r in results},
-        "demo": series.demo,
-    }
-    _save_json(corr_json, "models/cross_origin_correlation.json")
-
-    leadlag_json = {
-        "window_hours": look_h,
-        "max_shift_hours": max_shift,
-        "generated_at": _now_utc_iso(),
-        "pairs": [
-            {
-                "pair": r["pair"],
-                "lag_hours": r["lag_hours"],
-                "r": r["r"],
-                "p_value": r["p_value"],
-                "significant": r["significant"],
-            }
-            for r in results
-        ],
-        "demo": series.demo,
-    }
-    _save_json(leadlag_json, "models/leadlag_analysis.json")
-
-    # 4) Plots
-    labels = ["reddit", "twitter", "market"]
-
-    # Pearson heatmap
-    r_rt = pearson_map.get("reddit_twitter", 0.0)
-    r_rm = pearson_map.get("reddit_market", 0.0)
-    r_tm = pearson_map.get("twitter_market", 0.0)
-    pearson_matrix = np.array([
-        [1.0, r_rt, r_rm],
-        [r_rt, 1.0, r_tm],
-        [r_rm, r_tm, 1.0],
-    ], dtype=float)
-    _heatmap(pearson_matrix, labels, "Pearson Correlations", os.path.join(artifacts_dir, "corr_heatmap.png"))
-
-    # Lead–lag heatmap: r at the best lag for each pair
-    r_map = {rec["pair"]: rec for rec in results}
-    def _r_for(a: str, b: str) -> float:
-        key1 = f"{a}–{b}"
-        key2 = f"{b}–{a}"
-        if key1 in r_map:
-            return float(r_map[key1]["r"])
-        if key2 in r_map:
-            return float(r_map[key2]["r"])
-        return 0.0
-
-    leadlag_matrix = np.array([
-        [1.0, _r_for("reddit", "twitter"), _r_for("reddit", "market")],
-        [_r_for("twitter", "reddit"), 1.0, _r_for("twitter", "market")],
-        [_r_for("market", "reddit"), _r_for("market", "twitter"), 1.0],
-    ], dtype=float)
-    _heatmap(leadlag_matrix, labels, "Lead–Lag (r at best lag)", os.path.join(artifacts_dir, "leadlag_heatmap.png"))
-
-    # Simple bar of signed lag per pair (legacy plot name for compatibility)
+def _get_env_int(key: str, default: int) -> int:
     try:
-        pairs_order = ["reddit–twitter", "reddit–market", "twitter–market"]
-        lag_vals = [next((r["lag_hours"] for r in results if r["pair"] == p), 0) for p in pairs_order]
-        fig = plt.figure(figsize=(5.6, 3.2))
-        ax = fig.add_subplot(111)
-        ax.bar(range(len(pairs_order)), lag_vals)
-        ax.set_xticks(range(len(pairs_order)))
-        ax.set_xticklabels(pairs_order, rotation=45, ha="right")
-        ax.axhline(0.0, linestyle="--")
-        ax.set_ylabel("Lag (hours)  — positive = first series leads")
-        ax.set_title("Lead/Lag (max |r| lag)")
-        fig.tight_layout()
-        fig.savefig(os.path.join(artifacts_dir, "corr_leadlag.png"), dpi=150)
-        plt.close(fig)
+        v = int(os.getenv(key, "").strip() or default)
+        return v
+    except Exception:
+        return default
+
+
+def _get_env_bool(key: str, default: bool = False) -> bool:
+    v = (os.getenv(key) or "").strip().lower()
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ensure_dir(p: str) -> None:
+    os.makedirs(p, exist_ok=True)
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _write_json(path: str, payload: dict) -> None:
+    _ensure_dir(os.path.dirname(path))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _parse_ts(s: str) -> Optional[datetime]:
+    # Accepts ISO8601 with Z
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _bucket_hourly(timestamps: List[datetime], start: datetime, end: datetime) -> Tuple[np.ndarray, List[datetime]]:
+    """
+    Build hourly buckets count vector over [start, end) at 1h frequency.
+    """
+    if end <= start:
+        return np.zeros(0), []
+    n_hours = int((end - start).total_seconds() // 3600)
+    if n_hours <= 0:
+        return np.zeros(0), []
+    counts = np.zeros(n_hours, dtype=float)
+    for ts in timestamps:
+        if ts is None:
+            continue
+        if ts < start or ts >= end:
+            continue
+        idx = int((ts - start).total_seconds() // 3600)
+        if 0 <= idx < n_hours:
+            counts[idx] += 1.0
+    # index vector for reference
+    idx_ts = [start + timedelta(hours=i) for i in range(n_hours)]
+    return counts, idx_ts
+
+
+def _load_reddit_counts(logs_dir: str, start: datetime, end: datetime) -> np.ndarray:
+    path = os.path.join(logs_dir, "social_reddit.jsonl")
+    timestamps: List[datetime] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                ts = j.get("created_utc") or j.get("ts_ingested_utc") or j.get("ts")
+                d = _parse_ts(str(ts)) if ts else None
+                if d:
+                    timestamps.append(d)
+    except Exception:
+        pass
+    vec, _ = _bucket_hourly(timestamps, start, end)
+    return vec
+
+
+def _load_twitter_counts(logs_dir: str, start: datetime, end: datetime) -> np.ndarray:
+    path = os.path.join(logs_dir, "social_twitter.jsonl")
+    timestamps: List[datetime] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                ts = j.get("created_utc") or j.get("ts_ingested_utc") or j.get("ts")
+                d = _parse_ts(str(ts)) if ts else None
+                if d:
+                    timestamps.append(d)
+    except Exception:
+        pass
+    vec, _ = _bucket_hourly(timestamps, start, end)
+    return vec
+
+
+def _load_market_returns(logs_dir: str, start: datetime, end: datetime) -> np.ndarray:
+    """
+    Expect logs/market_prices.jsonl with fields:
+      { "ts": "<UTC>", "symbol":"bitcoin", "price": 60000.0 }
+    We compute hourly log returns for BTC (symbol 'bitcoin').
+    If missing, returns zeros vector.
+    """
+    path = os.path.join(logs_dir, "market_prices.jsonl")
+    rows: List[Tuple[datetime, float]] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                if str(j.get("symbol", "")).lower() not in ("bitcoin", "btc"):
+                    continue
+                ts = j.get("ts") or j.get("ts_ingested_utc") or j.get("timestamp")
+                d = _parse_ts(str(ts)) if ts else None
+                price = j.get("price") or j.get("p")
+                try:
+                    price = float(price)
+                except Exception:
+                    price = None
+                if d and (price is not None):
+                    rows.append((d, float(price)))
     except Exception:
         pass
 
-    # CCF per pair
-    for r in results:
-        _plot_ccf(
-            r["pair"],
-            r.get("lags", []),
-            r.get("r_by_lag", []),
-            os.path.join(artifacts_dir, f"leadlag_ccf_{r['pair'].replace('–','_')}.png"),
-        )
+    # Bucket prices hourly by last observation in the hour, then compute log returns
+    if not rows:
+        vec, _ = _bucket_hourly([], start, end)
+        return vec * 0.0
 
-    # 5) Markdown
-    md.append(f"\n⏱️ Lead–Lag Analysis ({look_h}h, max ±{max_shift}h)")
+    rows.sort(key=lambda x: x[0])
+    # Build hourly buckets of price (carry last known within hour)
+    n_hours = int((end - start).total_seconds() // 3600)
+    prices = np.full(n_hours, np.nan, dtype=float)
+    for ts, p in rows:
+        if ts < start or ts >= end:
+            continue
+        idx = int((ts - start).total_seconds() // 3600)
+        prices[idx] = p
 
-    def _score(rec: Dict[str, Any]) -> float:
-        v = rec.get("r")
-        try:
-            return abs(float(v))
-        except Exception:
-            return 0.0
-
-    for rec in sorted(results, key=_score, reverse=True):
-        pair = rec.get("pair", "a–b")
-        rbest = float(rec.get("r", 0.0))
-        lag = int(rec.get("lag_hours", 0))
-        pval = float(rec.get("p_value", 1.0))
-        try:
-            a_name, b_name = pair.split("–", 1)
-        except Exception:
-            a_name, b_name = "first", "second"
-
-        if lag > 0:
-            lead_txt = f"{a_name} leads by +{lag}h"
-        elif lag < 0:
-            lead_txt = f"{b_name} leads by +{abs(lag)}h"
+    # forward-fill within the window
+    last = np.nan
+    for i in range(n_hours):
+        if not math.isnan(prices[i]):
+            last = prices[i]
         else:
-            lead_txt = "synchronous"
+            prices[i] = last
 
-        md.append(f"{pair:<18} → r={rbest:.2f} | {lead_txt} [p={pval:.2f} {'✅' if pval < 0.05 else '❌'}]")
+    # compute log returns (hour-over-hour)
+    rets = np.zeros(n_hours, dtype=float)
+    for i in range(1, n_hours):
+        if prices[i] > 0 and prices[i - 1] > 0:
+            rets[i] = math.log(prices[i] / prices[i - 1])
+        else:
+            rets[i] = 0.0
+    return rets
 
-    if series.demo:
-        md.append("Footer: Lead/lag via cross-correlation; significance via permutation test (demo).")
+
+def _zscore(a: np.ndarray) -> np.ndarray:
+    a = np.asarray(a, dtype=float)
+    m = np.nanmean(a)
+    s = np.nanstd(a)
+    if s <= 1e-12 or not np.isfinite(s):
+        return np.zeros_like(a)
+    return (a - m) / s
+
+
+def _pearson(x: np.ndarray, y: np.ndarray) -> float:
+    xz = _zscore(x)
+    yz = _zscore(y)
+    if xz.size == 0 or yz.size == 0 or xz.size != yz.size:
+        return float("nan")
+    r = float(np.nanmean(xz * yz))
+    # clip for numerical stability
+    return max(min(r, 1.0), -1.0)
+
+
+def _cc_at_lag(x: np.ndarray, y: np.ndarray, lag: int) -> float:
+    """
+    Correlation at integer lag.
+    lag > 0  => x leads by +lag (use x[0:n-lag] vs y[lag:n])
+    lag == 0 => synchronous
+    lag < 0  => y leads by +|lag| (use x[-lag:n] vs y[0:n+lag])
+    """
+    n = len(x)
+    if n != len(y) or n == 0:
+        return float("nan")
+    if lag > 0:
+        a = x[0:n - lag]
+        b = y[lag:n]
+    elif lag < 0:
+        k = -lag
+        a = x[k:n]
+        b = y[0:n - k]
     else:
-        md.append("Footer: Lead/lag via cross-correlation; significance via permutation test (p<0.05).")
+        a = x
+        b = y
+    if len(a) <= 1 or len(b) <= 1:
+        return float("nan")
+    return _pearson(a, b)
+
+
+def _cross_corr_lag(x: np.ndarray, y: np.ndarray, max_shift_h: int) -> Tuple[int, float, np.ndarray, np.ndarray]:
+    """
+    Scan lags in [-max_shift_h, +max_shift_h], return:
+      (best_lag, best_r, lags_array, r_values_array)
+
+    Positive lag => the **first** series (x) leads by +lag.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) == 0 or len(y) == 0 or len(x) != len(y):
+        return 0, float("nan"), np.zeros(0, dtype=int), np.zeros(0, dtype=float)
+
+    lags = np.arange(-max_shift_h, max_shift_h + 1, dtype=int)
+    rvals = np.array([_cc_at_lag(x, y, int(L)) for L in lags], dtype=float)
+
+    # choose best by absolute value
+    idx = int(np.nanargmax(np.abs(rvals)))
+    # --- Edge guard: avoid reporting boundary unless convincingly stronger than neighbor
+    if idx in (0, len(rvals) - 1) and len(rvals) > 2:
+        neighbor = rvals[1] if idx == 0 else rvals[-2]
+        if abs(rvals[idx]) < abs(neighbor) + 0.02:
+            # prefer synchronous if boundary is not clear
+            idx = int(np.argmin(np.abs(lags)))
+    return int(lags[idx]), float(rvals[idx]), lags, rvals
+
+
+def _perm_test_best_abs_cc(x: np.ndarray, y: np.ndarray, max_shift_h: int, n_perm: int, rng: np.random.Generator) -> float:
+    """
+    Permutation test: shuffle y and recompute max |r|.
+    Returns p-value for observed max |r| under the null.
+    """
+    if len(x) == 0 or len(y) == 0 or len(x) != len(y):
+        return 1.0
+    obs_lag, obs_r, _, _ = _cross_corr_lag(x, y, max_shift_h)
+    obs_abs = abs(obs_r) if np.isfinite(obs_r) else 0.0
+    if obs_abs <= 1e-12:
+        return 1.0
+
+    count = 0
+    for _ in range(max(1, int(n_perm))):
+        yperm = np.array(y, copy=True)
+        rng.shuffle(yperm)
+        _, rbest, _, _ = _cross_corr_lag(x, yperm, max_shift_h)
+        if abs(rbest) >= obs_abs - 1e-12:
+            count += 1
+    return count / float(max(1, int(n_perm)))
+
+
+def _plot_heatmap(matrix: np.ndarray, labels: List[str], out_path: str, title: str) -> None:
+    _ensure_dir(os.path.dirname(out_path) or ".")
+    fig = plt.figure(figsize=(4.6, 3.8))
+    ax = fig.add_subplot(111)
+    im = ax.imshow(matrix, vmin=-1.0, vmax=1.0, aspect="auto")
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticks(range(len(labels)))
+    ax.set_yticklabels(labels)
+    ax.set_title(title)
+    # Add value annotations
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            val = matrix[i, j]
+            if np.isfinite(val):
+                ax.text(j, i, f"{val:+.2f}", ha="center", va="center", fontsize=8)
+    fig.colorbar(im, ax=ax, shrink=0.8)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def _plot_ccf(lags: np.ndarray, rvals: np.ndarray, out_path: str, title: str) -> None:
+    _ensure_dir(os.path.dirname(out_path) or ".")
+    fig = plt.figure(figsize=(5.0, 3.0))
+    ax = fig.add_subplot(111)
+    ax.plot(lags, rvals, marker="o", linewidth=1.5)
+    ax.axhline(0.0, linestyle="--", linewidth=1.0)
+    ax.axvline(0.0, linestyle="--", linewidth=1.0)
+    ax.set_xlabel("Lag (hours)  —  positive: first series leads")
+    ax.set_ylabel("Correlation")
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def _seed_demo_series(n: int, rng: np.random.Generator) -> Dict[str, np.ndarray]:
+    """
+    Produce simple synthetic series with known relationships:
+      reddit -> twitter by +1h, reddit -> market by +2h, twitter ~ reddit lagged 1h
+    """
+    t = np.arange(n)
+    base = np.sin(t / 6.0) + 0.3 * np.cos(t / 9.0)
+    reddit = base + 0.1 * rng.standard_normal(n)
+    twitter = np.roll(reddit, +1) + 0.1 * rng.standard_normal(n)  # reddit leads by +1
+    market = np.roll(reddit, +2) + 0.15 * rng.standard_normal(n)  # reddit leads market by +2
+    # ensure zero-mean/var scale for nicer plots
+    reddit = _zscore(reddit)
+    twitter = _zscore(twitter)
+    market = _zscore(market)
+    return {"reddit": reddit, "twitter": twitter, "market": market}
+
+
+def _collect_series(cfg: _Config) -> Dict[str, np.ndarray]:
+    end = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    start = end - timedelta(hours=cfg.window_h)
+    n_hours = cfg.window_h
+
+    # DEMO path or missing logs -> seed
+    if cfg.demo:
+        rng = np.random.default_rng(1337)
+        return _seed_demo_series(n_hours, rng)
+
+    # Real data path
+    reddit = _load_reddit_counts(cfg.logs_dir, start, end)
+    twitter = _load_twitter_counts(cfg.logs_dir, start, end)
+    market = _load_market_returns(cfg.logs_dir, start, end)
+
+    # If all empty, fallback to demo seed
+    if (reddit.size == 0 or reddit.sum() == 0.0) and \
+       (twitter.size == 0 or twitter.sum() == 0.0) and \
+       (market.size == 0 or np.allclose(market, 0.0)):
+        rng = np.random.default_rng(1337)
+        return _seed_demo_series(n_hours, rng)
+
+    # Ensure lengths match (pad/truncate to window)
+    def _fit(v: np.ndarray) -> np.ndarray:
+        v = np.asarray(v, dtype=float)
+        if v.size == n_hours:
+            return v
+        if v.size == 0:
+            return np.zeros(n_hours, dtype=float)
+        if v.size > n_hours:
+            return v[-n_hours:]
+        # pad at front
+        pad = np.zeros(n_hours - v.size, dtype=float)
+        return np.concatenate([pad, v], axis=0)
+
+    reddit = _fit(reddit)
+    twitter = _fit(twitter)
+    market = _fit(market)
+
+    return {"reddit": reddit, "twitter": twitter, "market": market}
+
+
+def _leadlag_analysis(cfg: _Config, series: Dict[str, np.ndarray]) -> Dict[str, dict]:
+    """
+    For each pair, compute best lag, r, p-value, and produce CCF plot.
+    """
+    pairs = [("reddit", "twitter"), ("reddit", "market"), ("twitter", "market")]
+    rng = np.random.default_rng(2024)
+    out: Dict[str, dict] = {}
+
+    for a, b in pairs:
+        x = series.get(a)
+        y = series.get(b)
+        if x is None or y is None:
+            out[f"{a}–{b}"] = {
+                "pair": f"{a}–{b}",
+                "lag_hours": 0,
+                "r": float("nan"),
+                "p_value": 1.0,
+                "significant": False,
+            }
+            continue
+
+        lag, rbest, lags, rvals = _cross_corr_lag(x, y, cfg.max_shift_h)
+        pval = _perm_test_best_abs_cc(x, y, cfg.max_shift_h, cfg.n_perm, rng)
+        sig = bool(pval < 0.05)
+
+        # Save per-pair CCF plot
+        safe_pair = f"{a}_vs_{b}".replace("/", "_")
+        ccf_path = os.path.join(cfg.artifacts_dir, f"leadlag_ccf_{safe_pair}.png")
+        title = f"CCF: {a} vs {b} (best lag={lag:+d}h, r={rbest:+.2f})"
+        _plot_ccf(lags, rvals, ccf_path, title)
+
+        out[f"{a}–{b}"] = {
+            "pair": f"{a}–{b}",
+            "lag_hours": int(lag),
+            "r": float(rbest) if np.isfinite(rbest) else float("nan"),
+            "p_value": float(pval),
+            "significant": sig,
+        }
+
+    return out
+
+
+def _matrix_from_pairs(pairs: Dict[str, dict], labels: List[str]) -> np.ndarray:
+    """
+    Build symmetric matrix of r for heatmap from pair dict.
+    labels order defines matrix indices.
+    """
+    idx = {name: i for i, name in enumerate(labels)}
+    M = np.zeros((len(labels), len(labels)), dtype=float)
+    M[:] = np.nan
+    for i in range(len(labels)):
+        M[i, i] = 1.0
+
+    def _put(a: str, b: str, val: float):
+        ia = idx[a]
+        ib = idx[b]
+        M[ia, ib] = val
+        M[ib, ia] = val
+
+    for key, rec in pairs.items():
+        a, b = key.split("–")
+        r = float(rec.get("r", float("nan")))
+        if np.isfinite(r):
+            _put(a, b, r)
+
+    return M
+
+
+def _format_line(pair: str, rec: dict) -> str:
+    lag = int(rec.get("lag_hours", 0))
+    r = rec.get("r", float("nan"))
+    p = rec.get("p_value", 1.0)
+    sig = bool(rec.get("significant", False))
+    # phrasing: positive lag => first series leads by +lag
+    a, b = pair.split("–")
+    if lag == 0:
+        lead_txt = "synchronous"
+    elif lag > 0:
+        lead_txt = f"{a} leads by +{lag}h"
+    else:
+        # Negative lag => second series leads by +|lag|
+        lead_txt = f"{b} leads by +{abs(lag)}h"
+    mark = "✅" if sig else "❌"
+    rtxt = "nan" if not np.isfinite(r) else f"{r:.2f}"
+    return f"{a}–{b} → r={rtxt} | {lead_txt} [p={p:.2f} {mark}]"
+
+
+def _append_markdown(md: List[str], cfg: _Config, pairs: Dict[str, dict]) -> None:
+    md.append(f"\n⏱️ Lead–Lag Analysis ({cfg.window_h}h, max ±{cfg.max_shift_h}h)")
+    # deterministic order for readability
+    order = ["reddit–twitter", "reddit–market", "twitter–market"]
+    for k in order:
+        rec = pairs.get(k)
+        if not rec:
+            continue
+        md.append(_format_line(k, rec))
+    md.append("Footer: Lead/lag via cross-correlation; significance via permutation test (p<0.05).")
+
+
+def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed)
+    """
+    Entry point used by the CI orchestrator.
+    Produces:
+      - models/leadlag_analysis.json
+      - artifacts/leadlag_heatmap.png
+      - artifacts/leadlag_ccf_<pair>.png
+    And appends a markdown block to `md`.
+    """
+    cfg = _Config(
+        window_h=_get_env_int("MW_LEADLAG_LOOKBACK_H", _get_env_int("MW_CORR_LOOKBACK_H", 72)),
+        max_shift_h=_get_env_int("MW_LEADLAG_MAX_SHIFT_H", 6),
+        n_perm=_get_env_int("MW_LEADLAG_N_PERM", 400),
+        artifacts_dir=os.getenv("ARTIFACTS_DIR", "artifacts"),
+        models_dir="models",
+        logs_dir="logs",
+        demo=_get_env_bool("MW_DEMO", False),
+    )
+
+    try:
+        _ensure_dir(cfg.artifacts_dir)
+        _ensure_dir(cfg.models_dir)
+
+        series = _collect_series(cfg)
+
+        # Lead-lag analysis (with CCF plots + edge guards)
+        pairs = _leadlag_analysis(cfg, series)
+
+        # Heatmap of r
+        labels = ["reddit", "twitter", "market"]
+        mat = _matrix_from_pairs(pairs, labels)
+        heatmap_path = os.path.join(cfg.artifacts_dir, "leadlag_heatmap.png")
+        _plot_heatmap(mat, labels, heatmap_path, "Lead–Lag: max |r| at best lag")
+
+        # Write JSON
+        out_json = {
+            "window_hours": cfg.window_h,
+            "max_shift_hours": cfg.max_shift_h,
+            "generated_at": _utcnow_iso(),
+            "pairs": [
+                pairs.get("reddit–twitter", {}),
+                pairs.get("reddit–market", {}),
+                pairs.get("twitter–market", {}),
+            ],
+            "demo": bool(cfg.demo),
+        }
+        _write_json(os.path.join(cfg.models_dir, "leadlag_analysis.json"), out_json)
+
+        # Markdown
+        _append_markdown(md, cfg, pairs)
+
+    except Exception as e:
+        md.append(f"❌ Lead–Lag Analysis unavailable: {type(e).__name__}: {e}")
