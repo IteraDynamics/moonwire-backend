@@ -8,21 +8,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Tuple
 
 import math
-import random
-
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")  # CI-friendly
 import matplotlib.pyplot as plt
-
-# Public API: append(md, ctx)
-# This module extends cross-origin correlation with a robust lead–lag analysis:
-# - Build hourly series for Reddit posts, Twitter tweets, and BTC market returns
-# - Pearson correlations
-# - Lead/Lag via cross-correlation across ±K hours with permutation p-values
-# - Artifacts: JSON + heatmaps/CCF plots
-#
-# It is demo-friendly: if inputs are missing, it seeds plausible series.
 
 
 # ----------------------------- Small utilities --------------------------------
@@ -151,15 +140,15 @@ def _cross_corr_lag(a: np.ndarray, b: np.ndarray, max_shift: int) -> Tuple[int, 
 
     # Definition: for a given lag L:
     #   if L > 0: correlate a[:-L] vs b[L:]
-    #   if L < 0: correlate a[-L:] vs b[:L]  (since L is negative, -L is positive)
+    #   if L < 0: correlate a[-L:] vs b[:L]
     #   if L == 0: correlate a vs b
     for i, L in enumerate(lags):
         if L > 0:
             aa = a0[:-L]
             bb = b0[L:]
         elif L < 0:
-            aa = a0[-L:]   # shift a forward
-            bb = b0[:L]    # shift b backward (L is negative => slice to negative index)
+            aa = a0[-L:]
+            bb = b0[:L]
         else:
             aa = a0
             bb = b0
@@ -167,14 +156,12 @@ def _cross_corr_lag(a: np.ndarray, b: np.ndarray, max_shift: int) -> Tuple[int, 
         if len(aa) < 3 or len(bb) < 3:
             r = float("nan")
         else:
-            # guard against constant vectors
             if np.allclose(aa, aa[0]) or np.allclose(bb, bb[0]):
                 r = float("nan")
             else:
                 r = float(np.corrcoef(aa, bb)[0, 1])
         rvals[i] = r
 
-    # pick argmax of absolute r (ignore NaNs)
     valid = ~np.isnan(rvals)
     if not np.any(valid):
         return 0, float("nan"), lags, rvals
@@ -194,7 +181,6 @@ def _perm_test_ccf(a: np.ndarray, b: np.ndarray, lag: int, r_obs: float, n_perm:
     count_extreme = 0
     for _ in range(max(1, n_perm)):
         b_perm = rng.permutation(b)
-        # recompute r at the same lag
         L = lag
         if L > 0:
             aa = a[:-L]
@@ -343,7 +329,12 @@ def _heatmap(matrix: np.ndarray, labels: List[str], title: str, outpath: str) ->
     ax.set_title(title)
     for i in range(matrix.shape[0]):
         for j in range(matrix.shape[1]):
-            ax.text(j, i, f"{matrix[i, j]:.2f}", ha="center", va="center")
+            val = matrix[i, j]
+            if np.isnan(val):
+                s = "n/a"
+            else:
+                s = f"{val:.2f}"
+            ax.text(j, i, s, ha="center", va="center")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     fig.savefig(outpath, dpi=150)
@@ -412,22 +403,42 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
     _save_json(leadlag_json, "models/leadlag_analysis.json")
 
     # 4) Plots
-    # Pearson heatmap (ordered: reddit, twitter, market)
     labels = ["reddit", "twitter", "market"]
+
+    # Pearson heatmap (ordered: reddit, twitter, market)
     r_rt = pearson_map.get("reddit_twitter", float("nan"))
     r_rm = pearson_map.get("reddit_market", float("nan"))
     r_tm = pearson_map.get("twitter_market", float("nan"))
-    matrix = np.array([
+    pearson_matrix = np.array([
         [1.0, r_rt, r_rm],
         [r_rt, 1.0, r_tm],
         [r_rm, r_tm, 1.0],
     ], dtype=float)
-    _heatmap(matrix, labels, "Pearson Correlations", os.path.join(artifacts_dir, "corr_heatmap.png"))
+    _heatmap(pearson_matrix, labels, "Pearson Correlations", os.path.join(artifacts_dir, "corr_heatmap.png"))
+
+    # Lead–lag heatmap: matrix of r at the selected (max-|r|) lag for each pair
+    # Build a 3x3 with symmetric fill; diagonal = 1.0
+    r_map = {rec["pair"]: rec for rec in results}
+    # Helper to fetch r for a pair irrespective of order used above
+    def _r_for(a: str, b: str) -> float:
+        key1 = f"{a}–{b}"
+        key2 = f"{b}–{a}"
+        if key1 in r_map:
+            return float(r_map[key1]["r"])
+        if key2 in r_map:
+            return float(r_map[key2]["r"])
+        return float("nan")
+
+    leadlag_matrix = np.array([
+        [1.0, _r_for("reddit", "twitter"), _r_for("reddit", "market")],
+        [_r_for("twitter", "reddit"), 1.0, _r_for("twitter", "market")],
+        [_r_for("market", "reddit"), _r_for("market", "twitter"), 1.0],
+    ], dtype=float)
+    _heatmap(leadlag_matrix, labels, "Lead–Lag (r at best lag)", os.path.join(artifacts_dir, "leadlag_heatmap.png"))
 
     # Max-lag (who leads) simple bar plot: map lag->signed hours per pair
     # (Keep old corr_leadlag.png for backward-compat)
     try:
-        from collections import OrderedDict
         pairs_order = ["reddit–twitter", "reddit–market", "twitter–market"]
         lag_vals = [next((r["lag_hours"] for r in results if r["pair"] == p), 0) for p in pairs_order]
         fig = plt.figure(figsize=(5.6, 3.2))
@@ -455,6 +466,7 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
 
     # 5) Markdown
     md.append(f"\n⏱️ Lead–Lag Analysis ({look_h}h, max ±{max_shift}h)")
+
     # Sort results by |r| desc for readability
     def _score(rec: Dict[str, Any]) -> float:
         v = rec.get("r")
@@ -469,7 +481,7 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
         lag = int(rec.get("lag_hours", 0))
         pval = float(rec.get("p_value", 1.0))
         sig = "✅" if rec.get("significant") else "❌"
-        # pair is "a–b" (en dash); extract names for a/b
+        # pair is "a–b" (en dash)
         try:
             a_name, b_name = pair.split("–", 1)
         except Exception:
@@ -482,7 +494,7 @@ def append(md: List[str], ctx) -> None:  # ctx: SummaryContext (duck-typed here)
         else:
             lead_txt = "synchronous"
 
-        md.append(f"{pair:<18} → r={rbest:.2f} | {lead_txt} [p={pval:.2f} {sig}]")
+        md.append(f"{pair:<18} → r={rbest:.2f} | {lead_txt} [p={pval:.2f} {'✅' if pval < 0.05 else '❌'}]")
 
     if series.demo:
         md.append("Footer: Lead/lag via cross-correlation; significance via permutation test (demo).")
