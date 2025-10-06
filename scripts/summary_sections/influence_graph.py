@@ -1,6 +1,6 @@
 # scripts/summary_sections/influence_graph.py
-# v0.7.6 — Multi-Origin Influence Graph
-# Robustly parses lead/lag results (models/leadlag_analysis.json) into a directed influence graph,
+# v0.7.6 — Multi-Origin Influence Graph (hardened loader)
+# Parses lead/lag results (models/leadlag_analysis.json) into a directed influence graph,
 # writes JSON + PNG artifacts, and appends a CI-friendly markdown block.
 
 from __future__ import annotations
@@ -78,8 +78,8 @@ def _extract_nodes(pr: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Op
     Returns (a, b, lag_hours) where positive lag means a leads b.
     """
     # direct two-key forms
-    a = _coerce_str(pr, ["a", "from", "src", "origin_a", "x", "left"])
-    b = _coerce_str(pr, ["b", "to", "dst", "origin_b", "y", "right"])
+    a = _coerce_str(pr, ["a", "A", "from", "src", "origin_a", "x", "left"])
+    b = _coerce_str(pr, ["b", "B", "to", "dst", "origin_b", "y", "right"])
     lag = _coerce_float(pr, ["lag_hours", "lag", "lag_h"], 0.0)
 
     if a and b:
@@ -93,7 +93,6 @@ def _extract_nodes(pr: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Op
     leader = _coerce_str(pr, ["leader"])
     follower = _coerce_str(pr, ["follower"])
     if leader and follower:
-        # Use given direction; lag magnitude if present, else 0 (we only need direction)
         lag = abs(_coerce_float(pr, ["lag_hours", "lag", "lag_h"], 0.0))
         return leader, follower, lag
 
@@ -111,6 +110,23 @@ def _extract_nodes(pr: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Op
 
     return None, None, None
 
+def _maybe_flatten_best(pr: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    If a row has a nested 'best' dict (common in lead/lag pipelines), merge it onto the row.
+    Keeps outer keys like 'a','b','pair' while overlaying metrics from 'best'.
+    """
+    if isinstance(pr, dict) and isinstance(pr.get("best"), dict):
+        merged = dict(pr)
+        for k, v in pr["best"].items():
+            if k not in merged:
+                merged[k] = v
+            else:
+                # prefer nested metrics if the outer is missing/None
+                if merged[k] is None:
+                    merged[k] = v
+        return merged
+    return pr
+
 def _derive_edges(pairs: List[Dict[str, Any]], r_min: float, p_sig: float) -> List[Dict[str, Any]]:
     """
     Build directed edges from lead/lag pairs.
@@ -119,25 +135,22 @@ def _derive_edges(pairs: List[Dict[str, Any]], r_min: float, p_sig: float) -> Li
       - Robust to varied input schemas.
     """
     edges: List[Dict[str, Any]] = []
-    for pr in pairs or []:
+    for raw in pairs or []:
         try:
+            pr = _maybe_flatten_best(raw) if isinstance(raw, dict) else raw
+            if not isinstance(pr, dict):
+                continue
+
             if not _is_significant(pr, r_min=r_min, p_sig=p_sig):
                 continue
 
             r = _coerce_float(pr, ["r", "corr", "rho"], float("nan"))
             p = _coerce_float(pr, ["p_value", "p", "pval", "pvalue"], float("nan"))
             a, b, lag = _extract_nodes(pr)
-
             if r != r or p != p or a is None or b is None:
                 continue
 
-            # If lag not provided or zero in a/b or leader/follower forms, we already encoded direction in (a,b)
-            # but we still skip truly synchronous cases if explicitly given as 0 across schemas.
-            if lag is not None and float(lag) == 0.0:
-                # if we got leader/follower without a meaningful lag, still treat as directional
-                # unless data explicitly marks synchronous; we can't detect that here, so allow.
-                pass
-
+            # If lag is explicitly 0, we still keep the direction from (a,b)
             edges.append({"from": a, "to": b, "r": float(r), "p": float(p), "w": _edge_weight(r, p)})
         except Exception:
             continue
@@ -293,16 +306,36 @@ def _plot_bar(influence: Dict[str, float], sensitivity: Dict[str, float], out_pn
 # I/O
 # ---------------------------
 
+def _unwrap_envelope(obj: Any) -> List[Dict[str, Any]]:
+    """
+    Support top-level envelopes like:
+      {"pairs":[...]}, {"edges":[...]}, {"results":[...]}, {"rows":[...]}, {"data":[...]}
+    If already a list, return it. Otherwise return [].
+    """
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        for key in ("pairs", "edges", "results", "rows", "data"):
+            v = obj.get(key)
+            if isinstance(v, list):
+                return v
+    return []
+
 def _load_pairs(models_dir: Path) -> Tuple[List[Dict[str, Any]], bool]:
     """
     Read models/leadlag_analysis.json or return deterministic demo pairs.
     Returns (pairs, demo_flag).
     """
     jpath = Path(models_dir) / "leadlag_analysis.json"
-    pairs = _read_json(jpath, default=None)
-    if pairs:
+    obj = _read_json(jpath, default=None)
+    if obj:
+        pairs = _unwrap_envelope(obj)
+        # If the file was a dict with a single row (unlikely), make it a list
+        if not pairs and isinstance(obj, dict):
+            pairs = [obj]
         return pairs, False
 
+    # Deterministic demo for empty/missing input
     demo_pairs = [
         {"a": "reddit", "b": "twitter", "lag_hours": 1.0, "r": 0.62, "p_value": 0.03, "significant": True},
         {"a": "reddit", "b": "market",  "lag_hours": 2.0, "r": 0.42, "p_value": 0.01, "significant": True},
