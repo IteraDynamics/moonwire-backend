@@ -38,28 +38,42 @@ def _edge_weight(r: float, p: float) -> float:
     return max(0.0, abs(float(r)) * (1.0 - float(p)))
 
 
+def _is_significant(pr: Dict[str, Any], r_min: float, p_sig: float) -> bool:
+    """
+    Robust significance check:
+      - If 'significant' key exists, require it to be True.
+      - Always also enforce p < p_sig and |r| >= r_min as guardrails.
+      - If 'significant' is missing, significance falls back to thresholds only.
+    """
+    try:
+        r = float(pr["r"])
+        p = float(pr.get("p_value", pr.get("p", 1.0)))
+    except Exception:
+        return False
+
+    if "significant" in pr and not bool(pr["significant"]):
+        return False
+    return (abs(r) >= r_min) and (p < p_sig)
+
+
 def _derive_edges(pairs: List[Dict[str, Any]], r_min: float, p_sig: float) -> List[Dict[str, Any]]:
     """
     Build directed edges from lead/lag pairs.
-      - Keep only where significant == true and |r| >= r_min and p < p_sig
       - Direction: lag > 0 => a -> b (a leads); lag < 0 => b -> a
       - Ignore lag == 0 (synchronous)
+      - Keep only significant pairs per _is_significant
     """
     edges: List[Dict[str, Any]] = []
     for pr in pairs or []:
         try:
-            if not pr.get("significant"):
+            if not _is_significant(pr, r_min=r_min, p_sig=p_sig):
                 continue
             r = float(pr["r"])
             p = float(pr.get("p_value", pr.get("p", 1.0)))
             lag = float(pr.get("lag_hours", 0.0))
             a = pr.get("a") or pr.get("from") or pr.get("src")
             b = pr.get("b") or pr.get("to") or pr.get("dst")
-            if a is None or b is None:
-                continue
-            if abs(r) < r_min or p >= p_sig:
-                continue
-            if lag == 0.0:
+            if a is None or b is None or lag == 0.0:
                 continue
             src, dst = (a, b) if lag > 0 else (b, a)
             edges.append({"from": src, "to": dst, "r": r, "p": p, "w": _edge_weight(r, p)})
@@ -109,12 +123,10 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
     """Directed graph; uses networkx if available, else a circular fallback. Handles no-edge cases."""
     ensure_dir(out_png.parent)
 
-    # Defer heavy imports
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa
 
-    # If no edges, render a simple placeholder figure
     if not edges:
         plt.figure(figsize=(6, 4), dpi=160)
         plt.text(0.5, 0.5, "No significant edges", ha="center", va="center", fontsize=12)
@@ -148,12 +160,10 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
             plt.close()
             return
     except Exception:
-        # Fall through to manual plotting below
         pass
 
-    # Manual circular layout (safe iteration; no indexing into empty lists)
+    # Manual circular layout
     nodes = sorted({n for e in edges for n in (e["from"], e["to"])})
-    # Extra guard: if somehow empty, show placeholder
     if not nodes:
         plt.figure(figsize=(6, 4), dpi=160)
         plt.text(0.5, 0.5, "No significant edges", ha="center", va="center", fontsize=12)
@@ -179,12 +189,7 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
         x1, y1 = coords[e["from"]]
         x2, y2 = coords[e["to"]]
         lw = 1.0 + 6.0 * float(e["w"])
-        plt.annotate(
-            "",
-            xy=(x2, y2),
-            xytext=(x1, y1),
-            arrowprops=dict(arrowstyle="->", lw=lw),
-        )
+        plt.annotate("", xy=(x2, y2), xytext=(x1, y1), arrowprops=dict(arrowstyle="->", lw=lw))
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
         plt.text(mx, my, f"r={e['r']:.2f} p={e['p']:.2f}", fontsize=8, ha="center")
     plt.axis("off")
@@ -204,7 +209,6 @@ def _plot_bar(influence: Dict[str, float], sensitivity: Dict[str, float], out_pn
 
     keys = sorted(set(influence) | set(sensitivity))
     if not keys:
-        # Produce an empty-but-valid figure so CI always has an artifact
         plt.figure(figsize=(7, 4), dpi=160)
         plt.text(0.5, 0.5, "No nodes (no significant edges)", ha="center", va="center", fontsize=12)
         plt.axis("off")
@@ -243,7 +247,6 @@ def _load_pairs(models_dir: Path) -> Tuple[List[Dict[str, Any]], bool]:
     if pairs:
         return pairs, False
 
-    # Deterministic demo for empty/missing input
     demo_pairs = [
         {"a": "reddit", "b": "twitter", "lag_hours": 1.0, "r": 0.62, "p_value": 0.03, "significant": True},
         {"a": "reddit", "b": "market",  "lag_hours": 2.0, "r": 0.42, "p_value": 0.01, "significant": True},
@@ -269,7 +272,6 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     ensure_dir(models_dir)
     ensure_dir(artifacts_dir)
 
-    # thresholds
     r_min = _get_env_float("MW_INFLUENCE_MIN_R", 0.30)
     p_sig = _get_env_float("MW_INFLUENCE_MIN_SIG", 0.05)
 
@@ -277,7 +279,6 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     edges = _derive_edges(pairs, r_min=r_min, p_sig=p_sig)
     influence, sensitivity = _compute_scores(edges)
 
-    # JSON artifact
     nodes_list = sorted(set(list(influence.keys()) + list(sensitivity.keys())))
     graph_json = {
         "generated_at": _utc_now_iso(),
@@ -290,11 +291,9 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     }
     _write_json(models_dir / "influence_graph.json", graph_json, pretty=True)
 
-    # PNG artifacts (always created, even for no-edge case)
     _plot_graph(edges, artifacts_dir / "influence_graph.png")
     _plot_bar(influence, sensitivity, artifacts_dir / "influence_bar.png")
 
-    # Markdown block
     md.append("")
     md.append("🌐 **Multi-Origin Influence Graph (72 h)**")
     if edges:
