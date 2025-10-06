@@ -1,7 +1,5 @@
 # scripts/summary_sections/influence_graph.py
-# v0.7.6 — Multi-Origin Influence Graph (hardened loader)
-# Parses lead/lag results (models/leadlag_analysis.json) into a directed influence graph,
-# writes JSON + PNG artifacts, and appends a CI-friendly markdown block.
+# v0.7.6 — Multi-Origin Influence Graph (hardened loader + inline PNG embeds)
 
 from __future__ import annotations
 
@@ -71,11 +69,7 @@ def _is_significant(pr: Dict[str, Any], r_min: float, p_sig: float) -> bool:
 def _extract_nodes(pr: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[float]]:
     """
     Try to extract (a, b, lag_hours) from many plausible schemas.
-    Priority:
-      1) explicit pairs: (a,b) / (from,to) / (src,dst) / (origin_a,origin_b) / (x,y)
-      2) leader/follower (ignore lag sign)
-      3) single "pair" string like "reddit–twitter", interpret lag sign to infer direction
-    Returns (a, b, lag_hours) where positive lag means a leads b.
+    Positive lag => a leads b.
     """
     # direct two-key forms
     a = _coerce_str(pr, ["a", "A", "from", "src", "origin_a", "x", "left"])
@@ -83,20 +77,19 @@ def _extract_nodes(pr: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Op
     lag = _coerce_float(pr, ["lag_hours", "lag", "lag_h"], 0.0)
 
     if a and b:
-        # Interpret sign: lag > 0 means a leads b; lag < 0 means b leads a
         if lag < 0:
             a, b = b, a
             lag = abs(lag)
         return a, b, lag
 
-    # leader/follower explicitly given
+    # leader/follower
     leader = _coerce_str(pr, ["leader"])
     follower = _coerce_str(pr, ["follower"])
     if leader and follower:
         lag = abs(_coerce_float(pr, ["lag_hours", "lag", "lag_h"], 0.0))
         return leader, follower, lag
 
-    # parse "pair" strings like "reddit–twitter" or "reddit -> twitter"
+    # pair string: "reddit–twitter", "reddit -> twitter", etc.
     pair = _coerce_str(pr, ["pair", "pair_key", "pair_id"])
     if pair:
         parts = _PAIR_SPLIT_RE.split(pair)
@@ -111,46 +104,32 @@ def _extract_nodes(pr: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Op
     return None, None, None
 
 def _maybe_flatten_best(pr: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    If a row has a nested 'best' dict (common in lead/lag pipelines), merge it onto the row.
-    Keeps outer keys like 'a','b','pair' while overlaying metrics from 'best'.
-    """
+    """Merge nested `best` metrics onto the parent row if present."""
     if isinstance(pr, dict) and isinstance(pr.get("best"), dict):
         merged = dict(pr)
         for k, v in pr["best"].items():
-            if k not in merged:
+            if k not in merged or merged[k] is None:
                 merged[k] = v
-            else:
-                # prefer nested metrics if the outer is missing/None
-                if merged[k] is None:
-                    merged[k] = v
         return merged
     return pr
 
 def _derive_edges(pairs: List[Dict[str, Any]], r_min: float, p_sig: float) -> List[Dict[str, Any]]:
-    """
-    Build directed edges from lead/lag pairs.
-      - Direction: positive lag => A -> B (A leads B).
-      - Keep only significant pairs per _is_significant.
-      - Robust to varied input schemas.
-    """
+    """Build directed edges from lead/lag pairs."""
     edges: List[Dict[str, Any]] = []
     for raw in pairs or []:
         try:
             pr = _maybe_flatten_best(raw) if isinstance(raw, dict) else raw
             if not isinstance(pr, dict):
                 continue
-
             if not _is_significant(pr, r_min=r_min, p_sig=p_sig):
                 continue
 
             r = _coerce_float(pr, ["r", "corr", "rho"], float("nan"))
             p = _coerce_float(pr, ["p_value", "p", "pval", "pvalue"], float("nan"))
-            a, b, lag = _extract_nodes(pr)
+            a, b, _ = _extract_nodes(pr)
             if r != r or p != p or a is None or b is None:
                 continue
 
-            # If lag is explicitly 0, we still keep the direction from (a,b)
             edges.append({"from": a, "to": b, "r": float(r), "p": float(p), "w": _edge_weight(r, p)})
         except Exception:
             continue
@@ -166,10 +145,7 @@ def _l1_normalize(values_by_key: Dict[str, float]) -> Dict[str, float]:
     return {k: max(0.0, float(v)) / s for k, v in values_by_key.items()}
 
 def _compute_scores(edges: List[Dict[str, Any]]) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """
-    Influence = weighted out-degree sum; Sensitivity = weighted in-degree sum.
-    Both L1-normalized across nodes.
-    """
+    """Influence = weighted out-degree; Sensitivity = weighted in-degree; both L1-normalized."""
     out_w: Dict[str, float] = {}
     in_w: Dict[str, float] = {}
     nodes = set()
@@ -236,6 +212,7 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
     # Manual circular layout
     nodes = sorted({n for e in edges for n in (e["from"], e["to"])})
     if not nodes:
+        import matplotlib.pyplot as plt  # noqa
         plt.figure(figsize=(6, 4), dpi=160)
         plt.text(0.5, 0.5, "No significant edges", ha="center", va="center", fontsize=12)
         plt.axis("off")
@@ -252,6 +229,7 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
             math.sin(2 * math.pi * i / n),
         )
 
+    import matplotlib.pyplot as plt  # noqa
     plt.figure(figsize=(6, 5), dpi=160)
     for name, (x, y) in coords.items():
         plt.scatter([x], [y], s=400)
@@ -330,7 +308,6 @@ def _load_pairs(models_dir: Path) -> Tuple[List[Dict[str, Any]], bool]:
     obj = _read_json(jpath, default=None)
     if obj:
         pairs = _unwrap_envelope(obj)
-        # If the file was a dict with a single row (unlikely), make it a list
         if not pairs and isinstance(obj, dict):
             pairs = [obj]
         return pairs, False
@@ -379,9 +356,12 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     }
     _write_json(models_dir / "influence_graph.json", graph_json, pretty=True)
 
-    _plot_graph(edges, artifacts_dir / "influence_graph.png")
-    _plot_bar(influence, sensitivity, artifacts_dir / "influence_bar.png")
+    graph_png = artifacts_dir / "influence_graph.png"
+    bar_png = artifacts_dir / "influence_bar.png"
+    _plot_graph(edges, graph_png)
+    _plot_bar(influence, sensitivity, bar_png)
 
+    # Markdown block
     md.append("")
     md.append("🌐 **Multi-Origin Influence Graph (72 h)**")
     if edges:
@@ -395,5 +375,9 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     else:
         md.append("_No significant directional edges under current thresholds._  ")
 
+    # Inline image embeds (render in GitHub Step Summary)
+    md.append("")
+    md.append(f"![Influence graph](./artifacts/{graph_png.name})")
+    md.append(f"![Influence vs Sensitivity](./artifacts/{bar_png.name})")
     md.append("")
     md.append("_Edges weighted by |r| × (1 − p). p<0.05 = significant. Scores L1-normalized (sum≈1)._")
