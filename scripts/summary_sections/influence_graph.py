@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-# Local helpers from the summary sections package
 from .common import (
     SummaryContext,
     ensure_dir,
@@ -71,7 +70,7 @@ def _derive_edges(pairs: List[Dict[str, Any]], r_min: float, p_sig: float) -> Li
 
 
 def _l1_normalize(values_by_key: Dict[str, float]) -> Dict[str, float]:
-    """Normalize so the values sum to ~1 (keeps tests happy). All non-negative."""
+    """Normalize so the values sum to ~1. All non-negative."""
     if not values_by_key:
         return {}
     s = sum(max(0.0, float(v)) for v in values_by_key.values())
@@ -107,13 +106,23 @@ def _compute_scores(edges: List[Dict[str, Any]]) -> Tuple[Dict[str, float], Dict
 # ---------------------------
 
 def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
-    """Directed graph; uses networkx if available, else a circular fallback."""
+    """Directed graph; uses networkx if available, else a circular fallback. Handles no-edge cases."""
     ensure_dir(out_png.parent)
 
     # Defer heavy imports
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa
+
+    # If no edges, render a simple placeholder figure
+    if not edges:
+        plt.figure(figsize=(6, 4), dpi=160)
+        plt.text(0.5, 0.5, "No significant edges", ha="center", va="center", fontsize=12)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(out_png)
+        plt.close()
+        return
 
     try:
         try:
@@ -142,20 +151,25 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
         # Fall through to manual plotting below
         pass
 
-    # Fallback: simple circular layout with arrow annotations
+    # Manual circular layout (safe iteration; no indexing into empty lists)
     nodes = sorted({n for e in edges for n in (e["from"], e["to"])})
-    n = max(1, len(nodes))
-    coords = {
-        nodes[i]: (
+    # Extra guard: if somehow empty, show placeholder
+    if not nodes:
+        plt.figure(figsize=(6, 4), dpi=160)
+        plt.text(0.5, 0.5, "No significant edges", ha="center", va="center", fontsize=12)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(out_png)
+        plt.close()
+        return
+
+    coords: Dict[str, Tuple[float, float]] = {}
+    n = len(nodes)
+    for i, name in enumerate(nodes):
+        coords[name] = (
             math.cos(2 * math.pi * i / n),
             math.sin(2 * math.pi * i / n),
         )
-        for i in range(n)
-    }
-
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt  # noqa
 
     plt.figure(figsize=(6, 5), dpi=160)
     for name, (x, y) in coords.items():
@@ -180,7 +194,7 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
 
 
 def _plot_bar(influence: Dict[str, float], sensitivity: Dict[str, float], out_png: Path) -> None:
-    """Grouped bar chart: Influence vs Sensitivity per origin."""
+    """Grouped bar chart: Influence vs Sensitivity per origin. Handles empty data."""
     ensure_dir(out_png.parent)
 
     import matplotlib
@@ -189,6 +203,16 @@ def _plot_bar(influence: Dict[str, float], sensitivity: Dict[str, float], out_pn
     import numpy as np  # noqa
 
     keys = sorted(set(influence) | set(sensitivity))
+    if not keys:
+        # Produce an empty-but-valid figure so CI always has an artifact
+        plt.figure(figsize=(7, 4), dpi=160)
+        plt.text(0.5, 0.5, "No nodes (no significant edges)", ha="center", va="center", fontsize=12)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(out_png)
+        plt.close()
+        return
+
     vals_i = [float(influence.get(k, 0.0)) for k in keys]
     vals_s = [float(sensitivity.get(k, 0.0)) for k in keys]
     x = np.arange(len(keys))
@@ -266,7 +290,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     }
     _write_json(models_dir / "influence_graph.json", graph_json, pretty=True)
 
-    # PNG artifacts
+    # PNG artifacts (always created, even for no-edge case)
     _plot_graph(edges, artifacts_dir / "influence_graph.png")
     _plot_bar(influence, sensitivity, artifacts_dir / "influence_bar.png")
 
