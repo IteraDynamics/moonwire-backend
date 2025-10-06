@@ -183,6 +183,9 @@ jobs:
           MW_LEADLAG_LOOKBACK_H: "72"
           MW_LEADLAG_MAX_SHIFT_H: "12"
           MW_LEADLAG_N_PERM: "100"
+          # --- NEW: Influence Graph thresholds (explicit)
+          MW_INFLUENCE_MIN_R: "0.30"
+          MW_INFLUENCE_MIN_SIG: "0.05"
         run: python scripts/mw_demo_summary.py
 
       # --- Upload JSON artifacts produced by summary sections (existing) ---
@@ -354,6 +357,27 @@ jobs:
           path: |
             artifacts/leadlag_heatmap.png
             artifacts/leadlag_ccf_*.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- NEW: Influence Graph artifacts ---
+      - name: Upload influence-graph JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: influence-graph
+          path: models/influence_graph.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload influence-graph plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: influence-graph-plots
+          path: |
+            artifacts/influence_graph.png
+            artifacts/influence_bar.png
           if-no-files-found: ignore
           retention-days: 14
 
