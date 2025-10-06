@@ -62,7 +62,75 @@ def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -
     """
     Call module.append(md, ctx) if available.
     On failure, record an inline, human-friendly error in the markdown
-    (don’t crash the entire summary).
+    (do not crash the entire summary).
     """
     if module is None:
-        md.append(f"\n> ⚠️ Skippin
+        md.append("\n> ⚠️ Skipping **{}** (module not available in this branch).\n".format(title))
+        return
+    fn: Optional[Callable[[List[str], SummaryContext], None]] = getattr(module, "append", None)
+    if not callable(fn):
+        md.append("\n> ⚠️ Skipping **{}** (no append(md, ctx) function found).\n".format(title))
+        return
+    try:
+        fn(md, ctx)
+    except Exception as e:
+        md.append("\n> ❌ **{}** failed: `{}`\n".format(title, "{}: {}".format(type(e).__name__, e)))
+
+
+def build_all(ctx: SummaryContext) -> List[str]:
+    """
+    Build all sections in the recommended order.
+    Returns a list of markdown lines (paragraphs) that can be joined with newlines.
+    """
+    md: List[str] = []
+
+    # 1) Market Context
+    _maybe_append(market_context, md, ctx, "Market Context")
+
+    # 2) Social Context (Reddit + Twitter)
+    _maybe_append(social_context_reddit, md, ctx, "Social Context — Reddit")
+    _maybe_append(social_context_twitter, md, ctx, "Social Context — Twitter")
+
+    # 3) Cross-Origin Correlations (existing)
+    _maybe_append(cross_origin_correlation, md, ctx, "Cross-Origin Correlations")
+
+    # 4) Lead–Lag Analysis (v0.7.5)
+    _maybe_append(cross_origin_analysis, md, ctx, "Lead–Lag Analysis")
+
+    # 5) NEW: Multi-Origin Influence Graph (v0.7.6)
+    _maybe_append(influence_graph, md, ctx, "Multi-Origin Influence Graph")
+
+    # 6) Calibration trend with market + social overlays
+    _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market + Social")
+
+    # 7) Automated Drift Response
+    _maybe_append(drift_response, md, ctx, "Automated Drift Response")
+
+    # 8) Retrain Automation
+    _maybe_append(retrain_automation, md, ctx, "Retrain Automation")
+
+    # 9) Trigger Explainability
+    _maybe_append(trigger_explainability, md, ctx, "Trigger Explainability")
+
+    # 10) Optional sections
+    for _mod in OPTIONAL_SECTIONS:
+        _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
+        _maybe_append(_mod, md, ctx, _title)
+
+    return md
+
+
+__all__ = [
+    "SummaryContext",
+    "build_all",
+    "market_context",
+    "social_context_reddit",
+    "social_context_twitter",
+    "cross_origin_correlation",
+    "cross_origin_analysis",
+    "influence_graph",
+    "calibration_reliability_trend",
+    "drift_response",
+    "retrain_automation",
+    "trigger_explainability",
+]
