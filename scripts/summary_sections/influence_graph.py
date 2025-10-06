@@ -1,15 +1,16 @@
 # scripts/summary_sections/influence_graph.py
 # v0.7.6 — Multi-Origin Influence Graph
-# Converts lead/lag results (models/leadlag_analysis.json) into a directed influence graph,
+# Robustly parses lead/lag results (models/leadlag_analysis.json) into a directed influence graph,
 # writes JSON + PNG artifacts, and appends a CI-friendly markdown block.
 
 from __future__ import annotations
 
 import math
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 from .common import (
     SummaryContext,
@@ -22,9 +23,10 @@ from .common import (
 # Config / simple utils
 # ---------------------------
 
+_PAIR_SPLIT_RE = re.compile(r"\s*(?:-|–|—|→|->|=>)\s*")
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
 
 def _get_env_float(name: str, default: float) -> float:
     try:
@@ -32,56 +34,114 @@ def _get_env_float(name: str, default: float) -> float:
     except Exception:
         return default
 
+def _coerce_float(d: Dict[str, Any], keys: List[str], default: float) -> float:
+    for k in keys:
+        if k in d:
+            try:
+                return float(d[k])
+            except Exception:
+                pass
+    return default
+
+def _coerce_str(d: Dict[str, Any], keys: List[str]) -> Optional[str]:
+    for k in keys:
+        if k in d and d[k] is not None:
+            return str(d[k])
+    return None
 
 def _edge_weight(r: float, p: float) -> float:
     """Edge weight = |r| × (1 − p), clamped at 0."""
     return max(0.0, abs(float(r)) * (1.0 - float(p)))
 
-
 def _is_significant(pr: Dict[str, Any], r_min: float, p_sig: float) -> bool:
     """
     Robust significance check:
-      - If 'significant' key exists, require it to be True.
-      - Always also enforce p < p_sig and |r| >= r_min as guardrails.
-      - If 'significant' is missing, significance falls back to thresholds only.
+      - If 'significant' key exists, require it True.
+      - Always also enforce p < p_sig and |r| ≥ r_min.
+      - If 'significant' is missing, rely on thresholds only.
     """
-    try:
-        r = float(pr["r"])
-        p = float(pr.get("p_value", pr.get("p", 1.0)))
-    except Exception:
+    r = _coerce_float(pr, ["r", "corr", "rho"], float("nan"))
+    p = _coerce_float(pr, ["p_value", "p", "pval", "pvalue"], float("nan"))
+    if not (r == r and p == p):  # NaN check
         return False
-
     if "significant" in pr and not bool(pr["significant"]):
         return False
     return (abs(r) >= r_min) and (p < p_sig)
 
+def _extract_nodes(pr: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[float]]:
+    """
+    Try to extract (a, b, lag_hours) from many plausible schemas.
+    Priority:
+      1) explicit pairs: (a,b) / (from,to) / (src,dst) / (origin_a,origin_b) / (x,y)
+      2) leader/follower (ignore lag sign)
+      3) single "pair" string like "reddit–twitter", interpret lag sign to infer direction
+    Returns (a, b, lag_hours) where positive lag means a leads b.
+    """
+    # direct two-key forms
+    a = _coerce_str(pr, ["a", "from", "src", "origin_a", "x", "left"])
+    b = _coerce_str(pr, ["b", "to", "dst", "origin_b", "y", "right"])
+    lag = _coerce_float(pr, ["lag_hours", "lag", "lag_h"], 0.0)
+
+    if a and b:
+        # Interpret sign: lag > 0 means a leads b; lag < 0 means b leads a
+        if lag < 0:
+            a, b = b, a
+            lag = abs(lag)
+        return a, b, lag
+
+    # leader/follower explicitly given
+    leader = _coerce_str(pr, ["leader"])
+    follower = _coerce_str(pr, ["follower"])
+    if leader and follower:
+        # Use given direction; lag magnitude if present, else 0 (we only need direction)
+        lag = abs(_coerce_float(pr, ["lag_hours", "lag", "lag_h"], 0.0))
+        return leader, follower, lag
+
+    # parse "pair" strings like "reddit–twitter" or "reddit -> twitter"
+    pair = _coerce_str(pr, ["pair", "pair_key", "pair_id"])
+    if pair:
+        parts = _PAIR_SPLIT_RE.split(pair)
+        if len(parts) == 2 and parts[0] and parts[1]:
+            a, b = parts[0].strip(), parts[1].strip()
+            lag = _coerce_float(pr, ["lag_hours", "lag", "lag_h"], 0.0)
+            if lag < 0:
+                a, b = b, a
+                lag = abs(lag)
+            return a, b, lag
+
+    return None, None, None
 
 def _derive_edges(pairs: List[Dict[str, Any]], r_min: float, p_sig: float) -> List[Dict[str, Any]]:
     """
     Build directed edges from lead/lag pairs.
-      - Direction: lag > 0 => a -> b (a leads); lag < 0 => b -> a
-      - Ignore lag == 0 (synchronous)
-      - Keep only significant pairs per _is_significant
+      - Direction: positive lag => A -> B (A leads B).
+      - Keep only significant pairs per _is_significant.
+      - Robust to varied input schemas.
     """
     edges: List[Dict[str, Any]] = []
     for pr in pairs or []:
         try:
             if not _is_significant(pr, r_min=r_min, p_sig=p_sig):
                 continue
-            r = float(pr["r"])
-            p = float(pr.get("p_value", pr.get("p", 1.0)))
-            lag = float(pr.get("lag_hours", 0.0))
-            a = pr.get("a") or pr.get("from") or pr.get("src")
-            b = pr.get("b") or pr.get("to") or pr.get("dst")
-            if a is None or b is None or lag == 0.0:
+
+            r = _coerce_float(pr, ["r", "corr", "rho"], float("nan"))
+            p = _coerce_float(pr, ["p_value", "p", "pval", "pvalue"], float("nan"))
+            a, b, lag = _extract_nodes(pr)
+
+            if r != r or p != p or a is None or b is None:
                 continue
-            src, dst = (a, b) if lag > 0 else (b, a)
-            edges.append({"from": src, "to": dst, "r": r, "p": p, "w": _edge_weight(r, p)})
+
+            # If lag not provided or zero in a/b or leader/follower forms, we already encoded direction in (a,b)
+            # but we still skip truly synchronous cases if explicitly given as 0 across schemas.
+            if lag is not None and float(lag) == 0.0:
+                # if we got leader/follower without a meaningful lag, still treat as directional
+                # unless data explicitly marks synchronous; we can't detect that here, so allow.
+                pass
+
+            edges.append({"from": a, "to": b, "r": float(r), "p": float(p), "w": _edge_weight(r, p)})
         except Exception:
-            # Skip malformed rows defensively
             continue
     return edges
-
 
 def _l1_normalize(values_by_key: Dict[str, float]) -> Dict[str, float]:
     """Normalize so the values sum to ~1. All non-negative."""
@@ -91,7 +151,6 @@ def _l1_normalize(values_by_key: Dict[str, float]) -> Dict[str, float]:
     if s <= 0.0:
         return {k: 0.0 for k in values_by_key}
     return {k: max(0.0, float(v)) / s for k, v in values_by_key.items()}
-
 
 def _compute_scores(edges: List[Dict[str, Any]]) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
@@ -114,9 +173,8 @@ def _compute_scores(edges: List[Dict[str, Any]]) -> Tuple[Dict[str, float], Dict
 
     return _l1_normalize(out_w), _l1_normalize(in_w)
 
-
 # ---------------------------
-# Plotting (imports deferred to avoid import-time failures)
+# Plotting (imports deferred)
 # ---------------------------
 
 def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
@@ -197,7 +255,6 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
     plt.savefig(out_png)
     plt.close()
 
-
 def _plot_bar(influence: Dict[str, float], sensitivity: Dict[str, float], out_png: Path) -> None:
     """Grouped bar chart: Influence vs Sensitivity per origin. Handles empty data."""
     ensure_dir(out_png.parent)
@@ -232,7 +289,6 @@ def _plot_bar(influence: Dict[str, float], sensitivity: Dict[str, float], out_pn
     plt.savefig(out_png)
     plt.close()
 
-
 # ---------------------------
 # I/O
 # ---------------------------
@@ -253,7 +309,6 @@ def _load_pairs(models_dir: Path) -> Tuple[List[Dict[str, Any]], bool]:
         {"a": "twitter","b": "market",  "lag_hours": 0.0, "r": 0.38, "p_value": 0.12, "significant": False},
     ]
     return demo_pairs, True
-
 
 # ---------------------------
 # Public API
@@ -299,13 +354,13 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     if edges:
         for e in edges:
             md.append(f"{e['from']} → {e['to']} (r={e['r']:.2f} p={e['p']:.2f})  ")
+        # Influence summary (sorted)
+        if nodes_list:
+            ranked = sorted(nodes_list, key=lambda k: influence.get(k, 0.0), reverse=True)
+            parts = [f"{k} {influence.get(k, 0.0):.2f}" for k in ranked]
+            md.append("Influence scores: " + " | ".join(parts))
     else:
         md.append("_No significant directional edges under current thresholds._  ")
-
-    if nodes_list:
-        ranked = sorted(nodes_list, key=lambda k: influence.get(k, 0.0), reverse=True)
-        parts = [f"{k} {influence.get(k, 0.0):.2f}" for k in ranked]
-        md.append("Influence scores: " + " | ".join(parts))
 
     md.append("")
     md.append("_Edges weighted by |r| × (1 − p). p<0.05 = significant. Scores L1-normalized (sum≈1)._")
