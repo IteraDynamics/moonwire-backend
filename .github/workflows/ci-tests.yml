@@ -376,6 +376,7 @@ jobs:
             artifacts/influence_graph.png
             artifacts/influence_bar.png
             artifacts/influence_graph.gexf
+            artifacts/INFLUENCE_README.md
           if-no-files-found: ignore
           retention-days: 14
 
