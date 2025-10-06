@@ -25,9 +25,9 @@ social_context_twitter = _try_import("social_context_twitter")
 
 # Correlation (existing)
 cross_origin_correlation = _try_import("cross_origin_correlation")
-# NEW: Lead–Lag Analysis (v0.7.5)
+# Lead–Lag Analysis (v0.7.5)
 cross_origin_analysis = _try_import("cross_origin_analysis")
-# NEW: Influence Graph (v0.7.6)
+# Influence Graph (v0.7.6)
 influence_graph = _try_import("influence_graph")
 
 calibration_reliability_trend = _try_import("calibration_reliability_trend")
@@ -50,8 +50,8 @@ for _modname in (
     "threshold_recommendations",
     "threshold_backtest",
     "threshold_auto_apply",
-    "header_overview",
-    "source_yield_plan",
+    # "header_overview",         # intentionally excluded (requires extra args)
+    # "source_yield_plan",       # intentionally excluded (noisy in this branch)
 ):
     _mod = _try_import(_modname)
     if _mod is not None:
@@ -97,7 +97,7 @@ def build_all(ctx: SummaryContext) -> List[str]:
     # 4) Lead–Lag Analysis (v0.7.5)
     _maybe_append(cross_origin_analysis, md, ctx, "Lead–Lag Analysis")
 
-    # 5) NEW: Multi-Origin Influence Graph (v0.7.6)
+    # 5) Multi-Origin Influence Graph (v0.7.6)
     _maybe_append(influence_graph, md, ctx, "Multi-Origin Influence Graph")
 
     # 6) Calibration trend with market + social overlays
