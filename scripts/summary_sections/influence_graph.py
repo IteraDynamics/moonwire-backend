@@ -1,8 +1,13 @@
 # scripts/summary_sections/influence_graph.py
-# v0.7.6 — Multi-Origin Influence Graph (hardened loader + inline PNG embeds)
+# v0.7.6 — Multi-Origin Influence Graph (audit-focused)
+# - Robust loader for varied lead/lag schemas
+# - Deterministic ordering of edges by weight = |r|(1-p)
+# - Exports: JSON, PNGs, CSVs (+ GEXF if networkx available)
+# - Includes thresholds/provenance line in markdown
 
 from __future__ import annotations
 
+import csv
 import math
 import os
 import re
@@ -133,6 +138,9 @@ def _derive_edges(pairs: List[Dict[str, Any]], r_min: float, p_sig: float) -> Li
             edges.append({"from": a, "to": b, "r": float(r), "p": float(p), "w": _edge_weight(r, p)})
         except Exception:
             continue
+
+    # deterministic ordering for auditability: weight desc, then from, then to
+    edges.sort(key=lambda e: (-e["w"], str(e["from"]), str(e["to"])))
     return edges
 
 def _l1_normalize(values_by_key: Dict[str, float]) -> Dict[str, float]:
@@ -205,14 +213,20 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
             plt.tight_layout()
             plt.savefig(out_png)
             plt.close()
+
+            # Export GEXF for graph tools (audit/DS)
+            try:
+                out_gexf = out_png.with_suffix(".gexf")
+                nx.write_gexf(G, out_gexf)
+            except Exception:
+                pass
             return
     except Exception:
         pass
 
-    # Manual circular layout
+    # Manual circular layout fallback (no GEXF here)
     nodes = sorted({n for e in edges for n in (e["from"], e["to"])})
     if not nodes:
-        import matplotlib.pyplot as plt  # noqa
         plt.figure(figsize=(6, 4), dpi=160)
         plt.text(0.5, 0.5, "No significant edges", ha="center", va="center", fontsize=12)
         plt.axis("off")
@@ -229,7 +243,6 @@ def _plot_graph(edges: List[Dict[str, Any]], out_png: Path) -> None:
             math.sin(2 * math.pi * i / n),
         )
 
-    import matplotlib.pyplot as plt  # noqa
     plt.figure(figsize=(6, 5), dpi=160)
     for name, (x, y) in coords.items():
         plt.scatter([x], [y], s=400)
@@ -281,7 +294,7 @@ def _plot_bar(influence: Dict[str, float], sensitivity: Dict[str, float], out_pn
     plt.close()
 
 # ---------------------------
-# I/O
+# I/O helpers
 # ---------------------------
 
 def _unwrap_envelope(obj: Any) -> List[Dict[str, Any]]:
@@ -314,11 +327,28 @@ def _load_pairs(models_dir: Path) -> Tuple[List[Dict[str, Any]], bool]:
 
     # Deterministic demo for empty/missing input
     demo_pairs = [
-        {"a": "reddit", "b": "twitter", "lag_hours": 1.0, "r": 0.62, "p_value": 0.03, "significant": True},
-        {"a": "reddit", "b": "market",  "lag_hours": 2.0, "r": 0.42, "p_value": 0.01, "significant": True},
-        {"a": "twitter","b": "market",  "lag_hours": 0.0, "r": 0.38, "p_value": 0.12, "significant": False},
+        {"a": "reddit", "b": "twitter", "lag_hours": 1.0, "r": 0.97, "p_value": 0.01, "significant": True},
+        {"a": "reddit", "b": "market",  "lag_hours": 2.0, "r": 0.40, "p_value": 0.04, "significant": True},
+        {"a": "twitter","b": "market",  "lag_hours": 1.0, "r": 0.39, "p_value": 0.03, "significant": True},
     ]
     return demo_pairs, True
+
+def _write_csv_edges(edges: List[Dict[str, Any]], path: Path) -> None:
+    ensure_dir(path.parent)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["from", "to", "r", "p", "weight"])
+        for e in edges:
+            w.writerow([e["from"], e["to"], f"{e['r']:.6f}", f"{e['p']:.6f}", f"{e['w']:.6f}"])
+
+def _write_csv_nodes(influence: Dict[str, float], sensitivity: Dict[str, float], path: Path) -> None:
+    ensure_dir(path.parent)
+    keys = sorted(set(influence) | set(sensitivity))
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["origin", "influence", "sensitivity"])
+        for k in keys:
+            w.writerow([k, f"{float(influence.get(k, 0.0)):.6f}", f"{float(sensitivity.get(k, 0.0)):.6f}"])
 
 # ---------------------------
 # Public API
@@ -329,7 +359,9 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     Generate the influence graph artifacts and append a markdown block.
     Artifacts:
       - models/influence_graph.json
-      - artifacts/influence_graph.png
+      - models/influence_edges.csv
+      - models/influence_nodes.csv
+      - artifacts/influence_graph.png (+ .gexf if networkx is available)
       - artifacts/influence_bar.png
     """
     models_dir = Path(ctx.models_dir or "models")
@@ -353,8 +385,11 @@ def append(md: List[str], ctx: SummaryContext) -> None:
         ],
         "edges": [{"from": e["from"], "to": e["to"], "r": float(e["r"]), "p": float(e["p"])} for e in edges],
         "demo": bool(demo),
+        "thresholds": {"min_r": r_min, "max_p": p_sig},
     }
     _write_json(models_dir / "influence_graph.json", graph_json, pretty=True)
+    _write_csv_edges(edges, models_dir / "influence_edges.csv")
+    _write_csv_nodes(influence, sensitivity, models_dir / "influence_nodes.csv")
 
     graph_png = artifacts_dir / "influence_graph.png"
     bar_png = artifacts_dir / "influence_bar.png"
@@ -380,4 +415,4 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     md.append(f"![Influence graph](./artifacts/{graph_png.name})")
     md.append(f"![Influence vs Sensitivity](./artifacts/{bar_png.name})")
     md.append("")
-    md.append("_Edges weighted by |r| × (1 − p). p<0.05 = significant. Scores L1-normalized (sum≈1)._")
+    md.append(f"_Edges weighted by |r| × (1 − p). p<{p_sig:.2f} = significant. Scores L1-normalized (sum≈1). r≥{r_min:.2f}._")
