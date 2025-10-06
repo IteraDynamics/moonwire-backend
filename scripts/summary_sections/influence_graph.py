@@ -1,8 +1,8 @@
 # scripts/summary_sections/influence_graph.py
-# v0.7.6 — Multi-Origin Influence Graph (audit-focused)
+# v0.7.6 — Multi-Origin Influence Graph (audit-focused + README)
 # - Robust loader for varied lead/lag schemas
 # - Deterministic ordering of edges by weight = |r|(1-p)
-# - Exports: JSON, PNGs, CSVs (+ GEXF if networkx available)
+# - Exports: JSON, PNGs, CSVs (+ GEXF if networkx available), README.md
 # - Includes thresholds/provenance line in markdown
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from .common import (
     ensure_dir,
     _read_json,
     _write_json,
+    _write_text,
 )
 
 # ---------------------------
@@ -350,6 +351,56 @@ def _write_csv_nodes(influence: Dict[str, float], sensitivity: Dict[str, float],
         for k in keys:
             w.writerow([k, f"{float(influence.get(k, 0.0)):.6f}", f"{float(sensitivity.get(k, 0.0)):.6f}"])
 
+def _write_readme(artifacts_dir: Path, thresholds: Dict[str, float], edges: List[Dict[str, Any]]) -> None:
+    """Emit artifacts/INFLUENCE_README.md with audit notes and quick-load snippets."""
+    ensure_dir(artifacts_dir)
+    path = artifacts_dir / "INFLUENCE_README.md"
+
+    lines: List[str] = []
+    lines.append("# Multi-Origin Influence Graph — Audit Notes")
+    lines.append("")
+    lines.append("This run converts lead/lag results into a directed graph where each edge A→B ")
+    lines.append("means *A leads B* by the best-estimated lag. Edge weight = `|r| × (1 − p)`.")
+    lines.append("")
+    lines.append("## Thresholds used")
+    lines.append(f"- min |r|: **{thresholds.get('min_r', 0.0):.2f}**")
+    lines.append(f"- max p-value: **{thresholds.get('max_p', 1.0):.2f}**")
+    lines.append("")
+    lines.append("## Files produced")
+    lines.append("- `models/influence_graph.json` — nodes, edges, thresholds, timestamps")
+    lines.append("- `models/influence_edges.csv` — `from,to,r,p,weight`")
+    lines.append("- `models/influence_nodes.csv` — `origin,influence,sensitivity` (L1-normalized)")
+    lines.append("- `artifacts/influence_graph.png` — directed graph")
+    lines.append("- `artifacts/influence_bar.png` — influence vs sensitivity bars")
+    lines.append("- `artifacts/influence_graph.gexf` — (if available) NetworkX graph for Gephi")
+    lines.append("")
+    lines.append("## Quick load (pandas)")
+    lines.append("```python")
+    lines.append("import pandas as pd")
+    lines.append("edges = pd.read_csv('models/influence_edges.csv')")
+    lines.append("nodes = pd.read_csv('models/influence_nodes.csv')")
+    lines.append("edges.sort_values('weight', ascending=False).head()")
+    lines.append("```")
+    lines.append("")
+    lines.append("## Quick load (networkx)")
+    lines.append("```python")
+    lines.append("import networkx as nx")
+    lines.append("G = nx.read_gexf('artifacts/influence_graph.gexf')  # requires file to exist")
+    lines.append("list(G.edges(data=True))[:5]")
+    lines.append("```")
+    lines.append("")
+    lines.append("## Gephi")
+    lines.append("Open `artifacts/influence_graph.gexf` and use ForceAtlas2/labels for quick exploration.")
+    lines.append("")
+    lines.append("## Top edges by weight")
+    if edges:
+        for e in edges[:10]:
+            lines.append(f"- {e['from']} → {e['to']} | r={e['r']:.3f} p={e['p']:.3f} | w={e['w']:.3f}")
+    else:
+        lines.append("- (no edges passed thresholds)")
+
+    _write_text(path, "\n".join(lines))
+
 # ---------------------------
 # Public API
 # ---------------------------
@@ -363,6 +414,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
       - models/influence_nodes.csv
       - artifacts/influence_graph.png (+ .gexf if networkx is available)
       - artifacts/influence_bar.png
+      - artifacts/INFLUENCE_README.md
     """
     models_dir = Path(ctx.models_dir or "models")
     artifacts_dir = Path(ctx.artifacts_dir or "artifacts")
@@ -377,6 +429,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     influence, sensitivity = _compute_scores(edges)
 
     nodes_list = sorted(set(list(influence.keys()) + list(sensitivity.keys())))
+    thresholds = {"min_r": r_min, "max_p": p_sig}
     graph_json = {
         "generated_at": _utc_now_iso(),
         "nodes": [
@@ -385,7 +438,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
         ],
         "edges": [{"from": e["from"], "to": e["to"], "r": float(e["r"]), "p": float(e["p"])} for e in edges],
         "demo": bool(demo),
-        "thresholds": {"min_r": r_min, "max_p": p_sig},
+        "thresholds": thresholds,
     }
     _write_json(models_dir / "influence_graph.json", graph_json, pretty=True)
     _write_csv_edges(edges, models_dir / "influence_edges.csv")
@@ -395,6 +448,9 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     bar_png = artifacts_dir / "influence_bar.png"
     _plot_graph(edges, graph_png)
     _plot_bar(influence, sensitivity, bar_png)
+
+    # README for auditors / DS
+    _write_readme(artifacts_dir, thresholds, edges)
 
     # Markdown block
     md.append("")
