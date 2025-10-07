@@ -1,3 +1,4 @@
+# scripts/summary_sections/__init__.py
 """
 Summary sections registry + compatibility helpers.
 
@@ -11,6 +12,7 @@ from typing import List, Callable, Optional, Any
 # Always import common types
 from .common import SummaryContext  # noqa: F401
 
+
 # Core sections (import guarded so repo remains tolerant to partial checkouts)
 def _try_import(modname: str):
     try:
@@ -18,17 +20,21 @@ def _try_import(modname: str):
     except Exception:
         return None
 
+
 market_context = _try_import("market_context")
+
 # Social context sections
 social_context_reddit = _try_import("social_context_reddit")
 social_context_twitter = _try_import("social_context_twitter")
 
 # Correlation (existing)
 cross_origin_correlation = _try_import("cross_origin_correlation")
-# Lead–Lag Analysis (v0.7.5)
+
+# Lead–Lag Analysis
 cross_origin_analysis = _try_import("cross_origin_analysis")
-# Influence Graph (v0.7.6)
-influence_graph = _try_import("influence_graph")
+
+# NEW: Model Lineage & Provenance (v0.7.7)
+model_lineage = _try_import("model_lineage")
 
 calibration_reliability_trend = _try_import("calibration_reliability_trend")
 drift_response = _try_import("drift_response")
@@ -50,8 +56,8 @@ for _modname in (
     "threshold_recommendations",
     "threshold_backtest",
     "threshold_auto_apply",
-    # "header_overview",         # intentionally excluded (requires extra args)
-    # "source_yield_plan",       # intentionally excluded (noisy in this branch)
+    "header_overview",
+    "source_yield_plan",
 ):
     _mod = _try_import(_modname)
     if _mod is not None:
@@ -62,19 +68,19 @@ def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -
     """
     Call module.append(md, ctx) if available.
     On failure, record an inline, human-friendly error in the markdown
-    (do not crash the entire summary).
+    (don’t crash the entire summary).
     """
     if module is None:
-        md.append("\n> ⚠️ Skipping **{}** (module not available in this branch).\n".format(title))
+        md.append(f"\n> Skipping {title} (module not available in this branch).\n")
         return
     fn: Optional[Callable[[List[str], SummaryContext], None]] = getattr(module, "append", None)
     if not callable(fn):
-        md.append("\n> ⚠️ Skipping **{}** (no append(md, ctx) function found).\n".format(title))
+        md.append(f"\n> Skipping {title} (no append(md, ctx) found).\n")
         return
     try:
         fn(md, ctx)
     except Exception as e:
-        md.append("\n> ❌ **{}** failed: `{}`\n".format(title, "{}: {}".format(type(e).__name__, e)))
+        md.append(f"\n> {title} failed: {type(e).__name__}: {e}\n")
 
 
 def build_all(ctx: SummaryContext) -> List[str]:
@@ -97,22 +103,19 @@ def build_all(ctx: SummaryContext) -> List[str]:
     # 4) Lead–Lag Analysis (v0.7.5)
     _maybe_append(cross_origin_analysis, md, ctx, "Lead–Lag Analysis")
 
-    # 5) Multi-Origin Influence Graph (v0.7.6)
-    _maybe_append(influence_graph, md, ctx, "Multi-Origin Influence Graph")
-
-    # 6) Calibration trend with market + social overlays
-    _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market + Social")
-
-    # 7) Automated Drift Response
+    # 5) Automated Drift Response
     _maybe_append(drift_response, md, ctx, "Automated Drift Response")
 
-    # 8) Retrain Automation
+    # 6) NEW: Model Lineage & Provenance (v0.7.7)
+    _maybe_append(model_lineage, md, ctx, "Model Lineage & Provenance")
+
+    # 7) Retrain Automation
     _maybe_append(retrain_automation, md, ctx, "Retrain Automation")
 
-    # 9) Trigger Explainability
+    # 8) Trigger Explainability
     _maybe_append(trigger_explainability, md, ctx, "Trigger Explainability")
 
-    # 10) Optional sections
+    # 9) Optional sections
     for _mod in OPTIONAL_SECTIONS:
         _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
         _maybe_append(_mod, md, ctx, _title)
@@ -128,7 +131,7 @@ __all__ = [
     "social_context_twitter",
     "cross_origin_correlation",
     "cross_origin_analysis",
-    "influence_graph",
+    "model_lineage",
     "calibration_reliability_trend",
     "drift_response",
     "retrain_automation",
