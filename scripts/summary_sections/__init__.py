@@ -25,8 +25,10 @@ social_context_twitter = _try_import("social_context_twitter")
 
 # Correlation (existing)
 cross_origin_correlation = _try_import("cross_origin_correlation")
-# NEW: Lead–Lag Analysis
+# Lead–Lag Analysis (v0.7.5)
 cross_origin_analysis = _try_import("cross_origin_analysis")
+# Influence Graph (v0.7.6)
+influence_graph = _try_import("influence_graph")
 
 calibration_reliability_trend = _try_import("calibration_reliability_trend")
 drift_response = _try_import("drift_response")
@@ -48,8 +50,8 @@ for _modname in (
     "threshold_recommendations",
     "threshold_backtest",
     "threshold_auto_apply",
-    "header_overview",
-    "source_yield_plan",
+    # "header_overview",         # intentionally excluded (requires extra args)
+    # "source_yield_plan",       # intentionally excluded (noisy in this branch)
 ):
     _mod = _try_import(_modname)
     if _mod is not None:
@@ -60,19 +62,19 @@ def _maybe_append(module: Any, md: List[str], ctx: SummaryContext, title: str) -
     """
     Call module.append(md, ctx) if available.
     On failure, record an inline, human-friendly error in the markdown
-    (don’t crash the entire summary).
+    (do not crash the entire summary).
     """
     if module is None:
-        md.append(f"\n> ⚠️ Skipping **{title}** (module not available in this branch).\n")
+        md.append("\n> ⚠️ Skipping **{}** (module not available in this branch).\n".format(title))
         return
     fn: Optional[Callable[[List[str], SummaryContext], None]] = getattr(module, "append", None)
     if not callable(fn):
-        md.append(f"\n> ⚠️ Skipping **{title}** (no `append(md, ctx)` function found).\n")
+        md.append("\n> ⚠️ Skipping **{}** (no append(md, ctx) function found).\n".format(title))
         return
     try:
         fn(md, ctx)
     except Exception as e:
-        md.append(f"\n> ❌ **{title}** failed: `{type(e).__name__}: {e}`\n")
+        md.append("\n> ❌ **{}** failed: `{}`\n".format(title, "{}: {}".format(type(e).__name__, e)))
 
 
 def build_all(ctx: SummaryContext) -> List[str]:
@@ -92,22 +94,25 @@ def build_all(ctx: SummaryContext) -> List[str]:
     # 3) Cross-Origin Correlations (existing)
     _maybe_append(cross_origin_correlation, md, ctx, "Cross-Origin Correlations")
 
-    # 4) NEW: Lead–Lag Analysis (v0.7.5)
+    # 4) Lead–Lag Analysis (v0.7.5)
     _maybe_append(cross_origin_analysis, md, ctx, "Lead–Lag Analysis")
 
-    # 5) Calibration trend with market + social overlays
+    # 5) Multi-Origin Influence Graph (v0.7.6)
+    _maybe_append(influence_graph, md, ctx, "Multi-Origin Influence Graph")
+
+    # 6) Calibration trend with market + social overlays
     _maybe_append(calibration_reliability_trend, md, ctx, "Calibration Trend vs Market + Social")
 
-    # 6) Automated Drift Response
+    # 7) Automated Drift Response
     _maybe_append(drift_response, md, ctx, "Automated Drift Response")
 
-    # 7) Retrain Automation
+    # 8) Retrain Automation
     _maybe_append(retrain_automation, md, ctx, "Retrain Automation")
 
-    # 8) Trigger Explainability
+    # 9) Trigger Explainability
     _maybe_append(trigger_explainability, md, ctx, "Trigger Explainability")
 
-    # 9) Optional sections
+    # 10) Optional sections
     for _mod in OPTIONAL_SECTIONS:
         _title = getattr(_mod, "__name__", "Section").split(".")[-1].replace("_", " ").title()
         _maybe_append(_mod, md, ctx, _title)
@@ -123,6 +128,7 @@ __all__ = [
     "social_context_twitter",
     "cross_origin_correlation",
     "cross_origin_analysis",
+    "influence_graph",
     "calibration_reliability_trend",
     "drift_response",
     "retrain_automation",

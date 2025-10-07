@@ -88,6 +88,26 @@ jobs:
           ls -lah models || true
           ls -lah "models/$MODEL_VERSION" || true
 
+      # --- NEW: Seed versioned model stub (demo) BEFORE uploading versioned artifacts ---
+      - name: Seed versioned model stub (demo)
+        if: ${{ success() }}
+        env:
+          MODEL_VERSION: "v0.5.1"
+        run: |
+          set -e
+          VDIR="models/${MODEL_VERSION:-v0.5.1}"
+          mkdir -p "$VDIR"
+          # If directory is empty, seed a tiny stub so the artifact upload has a match.
+          shopt -s nullglob
+          files=("$VDIR"/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "Seeding stub in $VDIR"
+            echo "MoonWire demo stub for versioned artifacts." > "$VDIR/README.txt"
+            printf '{"generated_at":"%s","version":"%s","kind":"demo_stub"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${MODEL_VERSION:-v0.5.1}" > "$VDIR/stub.meta.json"
+          else
+            echo "$VDIR already contains files; leaving as-is."
+          fi
+
       # --- Upload retrained artifacts (versioned) ---
       - name: Upload retrained model artifacts (v0.5.1)
         if: ${{ success() }}
@@ -192,7 +212,7 @@ jobs:
         with:
           name: drift-response-plan
           path: models/drift_response_plan.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload governance actions log
@@ -201,7 +221,7 @@ jobs:
         with:
           name: governance-actions-log
           path: logs/governance_actions.jsonl
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload drift response plots
@@ -212,7 +232,7 @@ jobs:
           path: |
             artifacts/drift_response_timeline.png
             artifacts/drift_response_backtest_*.png
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       # --- Retrain Automation artifacts ---
@@ -222,7 +242,7 @@ jobs:
         with:
           name: retrain-plan
           path: models/retrain_plan.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload retrain plots
@@ -234,7 +254,7 @@ jobs:
             artifacts/retrain_eval_*.png
             artifacts/retrain_reliability_*.png
             artifacts/retrain_confusion_*.png
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload model registry
@@ -243,7 +263,7 @@ jobs:
         with:
           name: model-registry
           path: models/model_registry.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload calibration reliability JSON
@@ -252,7 +272,7 @@ jobs:
         with:
           name: calibration-reliability
           path: models/calibration_reliability.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload calibration reliability plots
@@ -261,7 +281,7 @@ jobs:
         with:
           name: calibration-reliability-plots
           path: artifacts/cal_reliability_*.png
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload calibration per-origin JSON
@@ -270,7 +290,7 @@ jobs:
         with:
           name: calibration-per-origin
           path: models/calibration_per_origin.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       # --- Market Context artifacts ---
@@ -280,7 +300,7 @@ jobs:
         with:
           name: market-context
           path: models/market_context.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload market trend charts
@@ -291,7 +311,7 @@ jobs:
           path: |
             artifacts/market_trend_price_*.png
             artifacts/market_trend_returns_*.png
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       # --- Social Context artifacts ---
@@ -301,7 +321,7 @@ jobs:
         with:
           name: social-reddit-context
           path: models/social_reddit_context.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload reddit plots
@@ -312,7 +332,7 @@ jobs:
           path: |
             artifacts/reddit_activity_*.png
             artifacts/reddit_bursts_*.png
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       # --- Cross-Origin Correlation artifacts ---
@@ -322,7 +342,7 @@ jobs:
         with:
           name: cross-origin-correlation
           path: models/cross_origin_correlation.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload cross-origin correlation plots
@@ -333,7 +353,7 @@ jobs:
           path: |
             artifacts/corr_heatmap.png
             artifacts/corr_leadlag.png
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       # --- NEW: Lead-Lag Analysis artifacts ---
@@ -343,7 +363,7 @@ jobs:
         with:
           name: leadlag-analysis
           path: models/leadlag_analysis.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload lead–lag plots
@@ -354,7 +374,41 @@ jobs:
           path: |
             artifacts/leadlag_heatmap.png
             artifacts/leadlag_ccf_*.png
-          if-no-files-found: ignore
+          if-no-files-found: warn
+          retention-days: 14
+
+      # --- Influence Graph artifacts ---
+      - name: Upload influence-graph JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: influence-graph
+          path: models/influence_graph.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload influence-graph plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: influence-graph-plots
+          path: |
+            artifacts/influence_graph.png
+            artifacts/influence_bar.png
+            artifacts/influence_graph.gexf
+            artifacts/INFLUENCE_README.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload influence-graph CSVs
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: influence-graph-csv
+          path: |
+            models/influence_edges.csv
+            models/influence_nodes.csv
+          if-no-files-found: warn
           retention-days: 14
 
       # --- Show artifacts & publish summary ---
@@ -376,11 +430,11 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           cat artifacts/demo_summary.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload demo-summary artifact
+      - name: Upload demo-summary artifact (bundle)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: moonwire-demo
-          path: artifacts/*
-          if-no-files-found: error
+          path: artifacts/**
+          if-no-files-found: warn
           retention-days: 14
