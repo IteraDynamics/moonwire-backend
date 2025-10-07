@@ -187,14 +187,14 @@ jobs:
           MW_LEADLAG_N_PERM: "100"
         run: python scripts/mw_demo_summary.py
 
-      # --- Preflight tree (right before uploads) ---
-      - name: Preflight: show models & artifacts
+      # --- Preflight listing (right before uploads) ---
+      - name: Preflight: list models & artifacts
         if: ${{ success() }}
         run: |
-          echo "=== models ==="
-          find models -maxdepth 2 -type f -printf "%p\t%k KB\n" || true
-          echo "=== artifacts ==="
-          find artifacts -maxdepth 2 -type f -printf "%p\t%k KB\n" || true
+          echo "=== models (tree) ==="
+          if [ -d models ]; then ls -lahR models || true; else echo "(missing)"; fi
+          echo "=== artifacts (tree) ==="
+          if [ -d artifacts ]; then ls -lahR artifacts || true; else echo "(missing)"; fi
 
       # --- Upload JSON artifacts produced by summary sections (existing) ---
       - name: Upload drift response plan
