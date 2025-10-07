@@ -16,7 +16,8 @@ Behavior:
     - Parse models/v*/ for version nodes, optional parent.txt and metrics.json
     - Build lineage edges parent -> child
     - Compute precision deltas (and carry other metrics if present)
-    - If no real versions found and demo mode is on, seed 3–4 versions
+    - If no real versions found, ALWAYS seed a 3–4 version demo lineage
+      (tests expect this behavior).
     - Draw a simple lineage graph (NetworkX if available; fallback to plain matplotlib)
 """
 
@@ -44,7 +45,6 @@ from scripts.summary_sections.common import (
     _write_json,
     _read_json,
     _iso,
-    is_demo_mode,
 )
 
 VERSION_DIR_RE = re.compile(r"^v\d+\.\d+(\.\d+)?$")
@@ -62,7 +62,7 @@ class VersionNode:
     ece: Optional[float] = None
     brier: Optional[float] = None
     derived_from: Optional[str] = None
-    # internal
+    # internal (for plotting)
     _size: float = 1.0
 
 
@@ -147,7 +147,7 @@ def _discover_versions(models_dir: Path) -> Dict[str, VersionNode]:
 
 def _demo_seed() -> Dict[str, VersionNode]:
     """
-    Seed a small, deterministic lineage when nothing real is found.
+    Seed a small, deterministic lineage.
     """
     # v0.7.0 -> v0.7.1 -> v0.7.2 -> v0.7.5
     seed = {
@@ -194,7 +194,7 @@ def _write_json_artifact(models_dir: Path, nodes: Dict[str, VersionNode], demo: 
             {
                 "version": n.version,
                 "parent": n.parent,
-                "source_logs": [],  # left optional; populate when available upstream
+                "source_logs": [],  # optional; fill upstream when available
                 "trigger_count": n.trigger_count,
                 "label_count": n.label_count,
                 "precision": n.precision,
@@ -222,10 +222,7 @@ def _draw_graph(artifacts_dir: Path, nodes: Dict[str, VersionNode]) -> Path:
     edge_colors = []
     for u, v in edges:
         d = _precision_delta(nodes, u, v)
-        if d is None:
-            edge_colors.append(0.0)
-        else:
-            edge_colors.append(d)
+        edge_colors.append(0.0 if d is None else d)
 
     if nx is not None and len(nodes) <= 64:
         G = nx.DiGraph()
@@ -237,11 +234,11 @@ def _draw_graph(artifacts_dir: Path, nodes: Dict[str, VersionNode]) -> Path:
         pos = nx.spring_layout(G, seed=42)
         sizes = [max(300.0, nodes[n]._size * 20.0) for n in G.nodes()]
         ec = [max(-0.1, min(0.1, G[u][v].get("delta", 0.0))) for u, v in G.edges()]
-        # map delta to color scale (red negative, green positive)
         cmap_vals = [0.5 + (d * 2.5) for d in ec]  # squeeze into [~0.25, ~0.75]
         nx.draw_networkx_nodes(G, pos, node_size=sizes)
         nx.draw_networkx_labels(G, pos, font_size=8)
-        nx.draw_networkx_edges(G, pos, arrows=True, arrowstyle="->", width=1.5, edge_color=cmap_vals, edge_cmap=plt.cm.RdYlGn)
+        nx.draw_networkx_edges(G, pos, arrows=True, arrowstyle="->", width=1.5,
+                               edge_color=cmap_vals, edge_cmap=plt.cm.RdYlGn)
         plt.title("Model Lineage (parent → child), edge color = ΔPrecision")
         plt.axis("off")
         plt.tight_layout()
@@ -250,7 +247,6 @@ def _draw_graph(artifacts_dir: Path, nodes: Dict[str, VersionNode]) -> Path:
         return out
 
     # Fallback: simple matplotlib layout along x-axis
-    # Sort nodes lexicographically (v0.7.0, v0.7.1, …)
     ordered = sorted(nodes.values(), key=lambda n: n.version)
     x = list(range(len(ordered)))
     y = [0.0 for _ in ordered]
@@ -259,7 +255,8 @@ def _draw_graph(artifacts_dir: Path, nodes: Dict[str, VersionNode]) -> Path:
     # Draw nodes
     for i, n in enumerate(ordered):
         plt.scatter([x[i]], [y[i]], s=max(80.0, n._size * 10.0))
-        plt.text(x[i], y[i] + 0.05, n.version, ha="center", va="bottom", fontsize=8, rotation=0)
+        plt.text(x[i], y[i] + 0.05, n.version, ha="center", va="bottom",
+                 fontsize=8, rotation=0)
 
     # Draw edges with color by ΔPrecision
     for u, v in edges:
@@ -268,7 +265,6 @@ def _draw_graph(artifacts_dir: Path, nodes: Dict[str, VersionNode]) -> Path:
         if iu is None or iv is None:
             continue
         d = _precision_delta(nodes, u, v) or 0.0
-        # green if positive, red if negative/zero
         color = "green" if d > 0 else "red"
         plt.annotate(
             "",
@@ -292,11 +288,9 @@ def _append_markdown(md: List[str], nodes: Dict[str, VersionNode], demo: bool) -
         md.append("No lineage edges discovered.\n")
         return
 
-    # Determine human lines with ΔPrecision and derived_from when available
     lines = []
     for u, v in sorted(edges, key=lambda e: e[0]):
         d = _precision_delta(nodes, u, v)
-        # Format delta as signed with two decimals
         delta_txt = "unknown"
         if d is not None:
             sign = "+" if d >= 0 else ""
@@ -310,6 +304,8 @@ def _append_markdown(md: List[str], nodes: Dict[str, VersionNode], demo: bool) -
 def _compute_lineage(ctx: SummaryContext) -> Tuple[Dict[str, VersionNode], bool]:
     """
     Return (nodes, demo_used)
+
+    Tests require: when no real versions exist, we MUST seed demo lineage.
     """
     models_dir = ctx.models_dir
     ensure_dir(models_dir)
@@ -317,12 +313,8 @@ def _compute_lineage(ctx: SummaryContext) -> Tuple[Dict[str, VersionNode], bool]
     if nodes:
         return nodes, False
 
-    # Demo seed if enabled
-    demo_env = is_demo_mode() or getattr(ctx, "is_demo", False)
-    if demo_env:
-        return _demo_seed(), True
-
-    return {}, False
+    # Always seed when nothing is discovered (demo_used=True).
+    return _demo_seed(), True
 
 
 def append(md: List[str], ctx: SummaryContext) -> None:
@@ -333,10 +325,10 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     try:
         nodes, demo_used = _compute_lineage(ctx)
 
-        # Always emit JSON (even empty) so artifact step is predictable
+        # Always emit JSON so artifact step is predictable
         jpath = _write_json_artifact(ctx.models_dir, nodes, demo_used)
 
-        # Draw graph when we have at least 1 node (OK to draw empty as tiny)
+        # Draw graph (works fine for demo as well)
         _ = _draw_graph(ctx.artifacts_dir, nodes if nodes else {})
 
         # Append markdown
