@@ -69,10 +69,7 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
 # --------------------------
 
 def _seed_drift_response_plan(models_dir: Path) -> None:
-    """
-    Create a benign 'no candidates' drift plan so the CI summary never shows
-    'no plan available' when running without upstream pipeline.
-    """
+    """Create a benign 'no candidates' drift plan for CI rendering."""
     ensure_dir(models_dir)
     jpath = models_dir / "drift_response_plan.json"
     if jpath.exists():
@@ -92,9 +89,7 @@ def _seed_drift_response_plan(models_dir: Path) -> None:
 
 
 def _seed_retrain_plan(models_dir: Path) -> None:
-    """
-    Create a benign 'plan empty' retrain JSON so the CI summary can render a section.
-    """
+    """Create a benign 'plan empty' retrain JSON for CI rendering."""
     ensure_dir(models_dir)
     jpath = models_dir / "retrain_plan.json"
     if jpath.exists():
@@ -198,6 +193,38 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
     _write_png_placeholder(artifacts_dir / "drift_response_backtest_demo.png", "drift backtest (demo)")
 
 
+def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
+    """
+    Create a tiny versioned directory so the workflow's 'models/<version>/**' upload
+    always finds at least one file during demo runs.
+    Never overwrites real artifacts.
+    """
+    vdir = ensure_dir(models_dir / version)
+    # if real model files already exist, do nothing
+    has_real = any((vdir / name).exists() for name in (
+        "model.joblib", "model.meta.json", "README.txt", "README.md"
+    ))
+    if has_real:
+        return
+
+    # write a minimal README and a tiny meta to make the bundle useful in audits
+    readme = vdir / "README.txt"
+    meta = vdir / "stub.meta.json"
+    now = _now_utc()
+    if not readme.exists():
+        readme.write_text(
+            "MoonWire demo stub for versioned artifacts.\n"
+            f"Generated at { _iso(now) } (demo mode).\n"
+        )
+    if not meta.exists():
+        meta.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "version": version,
+            "kind": "demo_stub",
+            "note": "Created so CI artifact upload models/v*/** has a match during demos."
+        }, indent=2))
+
+
 # --------------------------
 # Build demo summary markdown
 # --------------------------
@@ -238,8 +265,12 @@ def main() -> None:
         _seed_drift_response_plan(models)
         _seed_retrain_plan(models)
 
-    # NEW: seed stub artifacts so upload globs always match (demo/no-upstream)
+    # Seed stub artifacts so upload globs always match (demo/no-upstream)
     _seed_ci_stub_artifacts(models, arts, logs)
+
+    # NEW: ensure versioned bundle exists in demo to satisfy models/v0.5.1/** upload
+    if demo:
+        _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
     # assemble markdown
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
