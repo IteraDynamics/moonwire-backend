@@ -11,8 +11,10 @@ from typing import Any, Dict, List, Tuple
 from scripts.summary_sections import build_all
 from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
 
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
+
 
 # Exposed helper used by tests and header_overview seeding
 def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -21,6 +23,7 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
         return reviewers, []
     if reviewers:
         return reviewers, []
+
     now = _now_utc()
     out_reviewers: List[Dict[str, Any]] = []
     events: List[Dict[str, Any]] = []
@@ -33,14 +36,19 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
         rcopy = dict(r)
         rcopy["timestamp"] = _iso(now - timedelta(hours=max(0, 2 - i)))
         out_reviewers.append(rcopy)
-        events.append({
-            "type": "demo_review_created",
-            "review_id": rcopy["id"],
-            "at": _iso(now - timedelta(hours=max(0, 2 - i))),
-            "meta": {"note": "seeded in demo mode", "version": "v0.6.6"},
-        })
+        events.append(
+            {
+                "type": "demo_review_created",
+                "review_id": rcopy["id"],
+                "at": _iso(now - timedelta(hours=max(0, 2 - i))),
+                "meta": {"note": "seeded in demo mode", "version": "v0.6.6"},
+            }
+        )
+
     return out_reviewers, events
 
+
+# --- Seed helpers (unchanged behavior) ----------------------------------------
 def _seed_drift_response_plan(models_dir: Path) -> None:
     ensure_dir(models_dir)
     jpath = models_dir / "drift_response_plan.json"
@@ -59,6 +67,7 @@ def _seed_drift_response_plan(models_dir: Path) -> None:
     }
     jpath.write_text(json.dumps(plan))
 
+
 def _seed_retrain_plan(models_dir: Path) -> None:
     ensure_dir(models_dir)
     jpath = models_dir / "retrain_plan.json"
@@ -73,11 +82,13 @@ def _seed_retrain_plan(models_dir: Path) -> None:
     }
     jpath.write_text(json.dumps(plan))
 
+
 _PNG_1x1_BYTES = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
     b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0bIDAT\x08\xd7c`\x00\x00"
     b"\x00\x02\x00\x01\x0e\xc2\x02\xbd\x00\x00\x00\x00IEND\xaeB`\x82"
 )
+
 
 def _write_png_placeholder(path: Path, title_text: str = "") -> None:
     try:
@@ -97,6 +108,7 @@ def _write_png_placeholder(path: Path, title_text: str = "") -> None:
         pass
     ensure_dir(path.parent)
     path.write_bytes(_PNG_1x1_BYTES)
+
 
 def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Path) -> None:
     ensure_dir(models_dir); ensure_dir(artifacts_dir); ensure_dir(logs_dir)
@@ -144,6 +156,7 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
     _write_png_placeholder(artifacts_dir / "drift_response_timeline.png", "drift timeline (demo)")
     _write_png_placeholder(artifacts_dir / "drift_response_backtest_demo.png", "drift backtest (demo)")
 
+
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
     vdir = ensure_dir(models_dir / version)
     has_real = any((vdir / name).exists() for name in ("model.joblib", "model.meta.json", "README.txt", "README.md"))
@@ -165,6 +178,7 @@ def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> Non
             "note": "Created so CI artifact upload models/v*/** has a match during demos."
         }, indent=2))
 
+
 @dataclass
 class _Ctx(SummaryContext):
     logs_dir: Path
@@ -176,9 +190,11 @@ class _Ctx(SummaryContext):
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     caches: Dict[str, Any] = field(default_factory=dict)
 
+
 def _write_md(md_lines: List[str], out_path: Path) -> None:
     ensure_dir(out_path.parent)
     out_path.write_text("\n".join(md_lines))
+
 
 def main() -> None:
     root = Path(".").resolve()
@@ -188,6 +204,8 @@ def main() -> None:
     ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
 
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
+
+    # Always seed benign governance JSON so blocks render
     _seed_drift_response_plan(models)
     _seed_retrain_plan(models)
     _seed_ci_stub_artifacts(models, arts, logs)
@@ -197,13 +215,11 @@ def main() -> None:
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
 
-    # Add a single header if the first line isn't already a title line
-    header = "MoonWire CI Demo Summary"
-    if not md_lines or not md_lines[0].strip().lower().startswith("moonwire ci demo summary"):
-        md_lines = [header] + md_lines
+    # Do NOT inject our own header or footer here — avoids duplicates.
+    # Header/overview block is emitted by header_overview; build_all adds the footer.
 
-    # build_all already appends one footer; don't add another.
     _write_md(md_lines, arts / "demo_summary.md")
+
 
 if __name__ == "__main__":
     main()
