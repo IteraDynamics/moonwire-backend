@@ -210,83 +210,107 @@ HEADER_PLAIN = "MoonWire CI Demo Summary"
 HEADER_DETAILED_PREFIX = "MoonWire Demo Summary —"
 FOOTER_LINE = "Job summary generated at run-time"
 
-# Unicode line/paragraph/next-line separators we’ve observed in CI logs
-_SEP_CHARS = ["\u2028", "\u2029", "\u0085", "\r\n", "\r", "\n"]
+# Odd separators & invisibles that show up in CI logs
+_SEP_CHARS = [
+    "\u2028",  # LINE SEPARATOR
+    "\u2029",  # PARAGRAPH SEPARATOR
+    "\u0085",  # NEXT LINE
+    "\r\n", "\r", "\n",
+]
+_INVISIBLE_WS = {
+    "\u00A0": " ",  # NBSP
+    "\u202F": " ",  # NNBSP
+    "\u2009": " ",  # THIN SPACE
+    "\u200A": " ",  # HAIR SPACE
+    "\u200B": "",   # ZERO WIDTH SPACE
+    "\u2060": "",   # WORD JOINER
+    "\ufeff": "",   # BOM
+}
+
+def _canon_text(s: str) -> str:
+    # Replace invisibles, collapse spaces, strip
+    for k, v in _INVISIBLE_WS.items():
+        s = s.replace(k, v)
+    s = " ".join(s.split())
+    return s.strip()
 
 def _explode_weird_lines(lines: List[str]) -> List[str]:
-    """
-    Split any line that accidentally contains embedded line/paragraph separators
-    into multiple clean lines, so our de-dupe can see them.
-    """
     out: List[str] = []
     for ln in lines:
-        parts = [ln]
+        pieces = [ln]
         for sep in _SEP_CHARS:
             tmp: List[str] = []
-            for p in parts:
+            for p in pieces:
                 tmp.extend(p.split(sep))
-            parts = tmp
-        out.extend(p.strip() for p in parts if p is not None)
-    return out
+            pieces = tmp
+        out.extend(p for p in pieces if p is not None)
+    return [p for p in (x.strip() for x in out) if p is not None]
+
+def _is_plain_header(s: str) -> bool:
+    return _canon_text(s).casefold() == HEADER_PLAIN.casefold()
+
+def _is_detailed_header(s: str) -> bool:
+    return _canon_text(s).startswith(HEADER_DETAILED_PREFIX)
+
+def _is_footer(s: str) -> bool:
+    return _canon_text(s).casefold() == FOOTER_LINE.casefold()
 
 def _normalize_whole_markdown(lines: List[str]) -> List[str]:
     """
     Global cleanup:
-      • Prefer a single timestamped header if present; otherwise keep one plain header.
-      • Drop all extra plain headers anywhere in the body.
-      • Keep only one footer, placed at the end.
+      • Prefer a single timestamped header if present; otherwise one plain header.
+      • Drop all extra plain headers anywhere in the body (even with invisibles).
+      • Keep only one footer, placed at the very end.
       • Collapse consecutive blank lines.
-      • Be robust to Unicode line separators that merged lines.
+      • Robust to Unicode separators & zero-width/invisible spaces.
     """
-    # First split odd embedded separators so we can reason line-by-line
     exploded = _explode_weird_lines(lines)
 
     demo_header_line: str | None = None
     body: List[str] = []
-    saw_plain_header = False
+    saw_any_plain_header = False
 
-    for ln in exploded:
-        s = ln.strip()
+    for raw in exploded:
+        s = raw.strip()
         if not s:
-            body.append("")  # keep blanks for later collapse
+            body.append("")
             continue
-        # Capture the first detailed (timestamped) header
-        if s.startswith(HEADER_DETAILED_PREFIX) and demo_header_line is None:
-            demo_header_line = s
+        if _is_detailed_header(s) and demo_header_line is None:
+            demo_header_line = _canon_text(s)
             continue
-        # Drop any plain header occurrences; remember we saw at least one
-        if s == HEADER_PLAIN:
-            saw_plain_header = True
+        if _is_plain_header(s):
+            saw_any_plain_header = True
             continue
-        # Drop any footer lines for now; we’ll add a single one at the end
-        if s == FOOTER_LINE:
+        if _is_footer(s):
             continue
         body.append(s)
 
-    # Construct final header
     out: List[str] = []
     if demo_header_line is not None:
-        out.append(HEADER_PLAIN)  # keep the short product title
-        out.append(demo_header_line)  # then the timestamped proof header
-    elif saw_plain_header:
+        out.append(HEADER_PLAIN)
+        out.append(demo_header_line)
+    elif saw_any_plain_header:
         out.append(HEADER_PLAIN)
     else:
-        # If neither was found (edge case), add a single plain header
         out.append(HEADER_PLAIN)
 
-    # Append body, collapsing duplicate consecutive blanks
+    # Collapse consecutive blanks
     compact: List[str] = []
     prev_blank = False
     for s in body:
-        is_blank = (s == "")
+        cs = _canon_text(s)
+        is_blank = (cs == "")
         if is_blank and prev_blank:
             continue
-        compact.append(s)
+        compact.append(cs if cs != "" else "")
         prev_blank = is_blank
+
+    # Remove any stray plain headers that slipped into body
+    compact = [ln for ln in compact if not _is_plain_header(ln)]
+
     out.extend(compact)
 
-    # Ensure exactly one footer, at the very end
-    if not out or out[-1] != FOOTER_LINE:
+    if not out or not _is_footer(out[-1]):
         out.append(FOOTER_LINE)
     return out
 
