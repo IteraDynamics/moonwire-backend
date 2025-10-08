@@ -5,6 +5,7 @@ import json
 import os
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -17,6 +18,9 @@ _PNG_1x1 = (
     b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0bIDAT\x08\xd7c`\x00\x00"
     b"\x00\x02\x00\x01\x0e\xc2\x02\xbd\x00\x00\x00\x00IEND\xaeB`\x82"
 )
+
+def _iso_now() -> str:
+    return _iso(datetime.now(timezone.utc).replace(microsecond=0))
 
 def _safe_plot(points: List[Tuple[int, float]], marks: List[Tuple[int, str]], out: Path) -> None:
     """Try to plot (time,value) with labels; otherwise drop a 1x1 PNG."""
@@ -221,7 +225,7 @@ def append(md: List[str], ctx: SummaryContext) -> None:
 
     # JSON plan
     plan = {
-        "generated_at": _iso(),
+        "generated_at": _iso_now(),
         "mode": _get_mode(),
         "actions": actions,
     }
