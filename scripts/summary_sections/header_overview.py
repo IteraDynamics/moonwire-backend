@@ -18,6 +18,8 @@ def append(
     reviewers: List[Dict[str, Any]] | None = None,
     threshold: float = 0.5,
     sig_id: str = "demo",
+    triggered_log: List[Dict[str, Any]] | None = None,  # accepted for test compatibility
+    **_ignore: Any,  # future-proof: accept & ignore any extra kwargs
 ) -> None:
     """
     Header/overview block. Keyword-only args have sane defaults so accidental
@@ -29,8 +31,7 @@ def append(
             return
         ctx.caches["did_header"] = True
 
-    # Optional demo seeding handled by mw_demo_summary.generate_demo_data_if_needed,
-    # but stay resilient if nothing is passed.
+    # Optional demo seeding handled elsewhere; remain resilient if nothing is passed.
     revs = reviewers or []
     n_unique = len({r.get("id") for r in revs if r.get("id")})
     now_iso = _iso(_now())
@@ -55,3 +56,6 @@ def append(
 
     md.append("Signal origin breakdown (last 7 days):")
     md.append("\t•\tno origin data")
+
+    # `triggered_log` is intentionally ignored for now; kept for API compatibility.
+    _ = triggered_log  # silence linter
