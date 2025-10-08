@@ -1,54 +1,60 @@
 # scripts/summary_sections/__init__.py
 from __future__ import annotations
 
-from typing import List
-from scripts.summary_sections.common import SummaryContext
+import importlib
+import traceback
+from datetime import datetime, timezone
+from typing import Any, List, Tuple
 
-# Import sections we call; each must expose append(md, ctx)
-# These imports are intentionally tolerant: failures are caught in build_all.
-from . import model_lineage            # v0.7.7
-from . import model_performance_trend  # v0.7.8
-# Governance actions (new v0.7.9) lives under scripts/governance
-from scripts.governance import model_governance_actions
+from pathlib import Path
+from .common import SummaryContext, ensure_dir
 
-# Optional sections (wrapped via try/except in build_all)
-_OPTIONAL_SECTIONS = [
-    ("scripts.summary_sections.header_overview", "header_overview"),
-    ("scripts.summary_sections.market_context", "market_context"),
-    ("scripts.summary_sections.social_reddit_context", "social_reddit_context"),
-    ("scripts.summary_sections.social_twitter_context", "social_twitter_context"),
-    ("scripts.summary_sections.cross_origin_correlation", "cross_origin_correlation"),
-    ("scripts.summary_sections.leadlag_analysis", "leadlag_analysis"),
-    ("scripts.summary_sections.drift_response", "drift_response"),
-    ("scripts.summary_sections.thresholds", "thresholds"),
+# Keep the original order from your working summary (Task 2 baseline).
+SECTION_MODULES: List[Tuple[str, str]] = [
+    ("scripts.summary_sections.header_overview", "Header Overview"),
+    ("scripts.summary_sections.market_context", "Market Context"),
+    ("scripts.summary_sections.social_reddit_context", "Social Context — Reddit"),
+    ("scripts.summary_sections.social_twitter_context", "Social Context — Twitter"),
+    ("scripts.summary_sections.cross_origin_correlation", "Cross-Origin Correlations"),
+    ("scripts.summary_sections.leadlag_analysis", "Lead–Lag Analysis"),
+    ("scripts.summary_sections.drift_response", "Automated Drift Response"),
+    ("scripts.summary_sections.model_lineage", "Model Lineage & Provenance"),
+    ("scripts.summary_sections.model_performance_trend", "Model Performance Trends"),
+    ("scripts.summary_sections.model_governance_actions", "Model Governance Actions"),
+    ("scripts.summary_sections.trigger_explainability", "Trigger Explainability"),
+    ("scripts.summary_sections.signal_quality", "Signal Quality"),
+    ("scripts.summary_sections.thresholds", "Thresholds & Backtests"),
+    ("scripts.summary_sections.source_yield_plan", "Source Yield Plan"),
 ]
 
+def _append_error(md: List[str], module_path: str, err: BaseException) -> None:
+    # Emit the same-style error marker users expect in CI
+    msg = f"❌ {module_path} failed: {err}"
+    md.append(msg)
 
-def _safe_append(mod, md: List[str], ctx: SummaryContext, qualname: str) -> None:
+def _run_section(md: List[str], ctx: SummaryContext, module_path: str) -> None:
     try:
-        mod.append(md, ctx)
+        mod = importlib.import_module(module_path)
     except Exception as e:
-        md.append(f"❌ {qualname} failed: {e}")
+        _append_error(md, module_path, e)
+        return
 
+    if not hasattr(mod, "append"):
+        _append_error(md, module_path, RuntimeError("module has no append(md, ctx)"))
+        return
+
+    try:
+        mod.append(md, ctx)  # type: ignore[attr-defined]
+    except Exception as e:
+        _append_error(md, module_path, e)
 
 def build_all(ctx: SummaryContext) -> List[str]:
-    md: List[str] = []
+    ensure_dir(Path(ctx.artifacts_dir))
+    lines: List[str] = []
 
-    # Optional/context sections first
-    for qual, name in _OPTIONAL_SECTIONS:
-        try:
-            mod = __import__(qual, fromlist=[name])
-            _safe_append(mod, md, ctx, qual)
-        except Exception as e:
-            md.append(f"❌ {qual} failed: {e}")
+    for module_path, _title in SECTION_MODULES:
+        _run_section(lines, ctx, module_path)
 
-    # Lineage (v0.7.7)
-    _safe_append(model_lineage, md, ctx, "scripts.summary_sections.model_lineage")
-
-    # Performance trend (v0.7.8)
-    _safe_append(model_performance_trend, md, ctx, "scripts.summary_sections.model_performance_trend")
-
-    # Governance actions (v0.7.9) AFTER trend
-    _safe_append(model_governance_actions, md, ctx, "scripts.governance.model_governance_actions")
-
-    return md
+    ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    lines.append(f"Job summary generated at run-time")
+    return lines
