@@ -8,35 +8,22 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-# Summary sections entrypoint
 from scripts.summary_sections import build_all
 from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
-
-# --------------------------
-# Demo data seed (kept stable for tests)
-# --------------------------
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
+# Exposed helper used by tests and header_overview seeding
 def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Test-exercised helper. Mirrors expected behavior:
-      - If DEMO_MODE=false: pass-through, return (reviewers, []).
-      - If DEMO_MODE=true and reviewers provided: pass-through, return (reviewers, []).
-      - If DEMO_MODE=true and reviewers empty: synthesize 3 reviewers AND emit one event PER reviewer.
-    """
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     if not demo:
         return reviewers, []
-
     if reviewers:
         return reviewers, []
-
     now = _now_utc()
     out_reviewers: List[Dict[str, Any]] = []
     events: List[Dict[str, Any]] = []
-
     seeds = [
         {"id": "rev_demo_1", "origin": "reddit", "score": 0.82},
         {"id": "rev_demo_2", "origin": "rss_news", "score": 0.54},
@@ -46,19 +33,13 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
         rcopy = dict(r)
         rcopy["timestamp"] = _iso(now - timedelta(hours=max(0, 2 - i)))
         out_reviewers.append(rcopy)
-        events.append(
-            {
-                "type": "demo_review_created",
-                "review_id": rcopy["id"],
-                "at": _iso(now - timedelta(hours=max(0, 2 - i))),
-                "meta": {"note": "seeded in demo mode", "version": "v0.6.6"},
-            }
-        )
+        events.append({
+            "type": "demo_review_created",
+            "review_id": rcopy["id"],
+            "at": _iso(now - timedelta(hours=max(0, 2 - i))),
+            "meta": {"note": "seeded in demo mode", "version": "v0.6.6"},
+        })
     return out_reviewers, events
-
-# --------------------------
-# Seed governance demo artifacts when missing
-# --------------------------
 
 def _seed_drift_response_plan(models_dir: Path) -> None:
     ensure_dir(models_dir)
@@ -91,10 +72,6 @@ def _seed_retrain_plan(models_dir: Path) -> None:
         "demo": True,
     }
     jpath.write_text(json.dumps(plan))
-
-# --------------------------
-# NEW: Seed CI stub artifacts for upload globs (demo-friendly)
-# --------------------------
 
 _PNG_1x1_BYTES = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
@@ -188,10 +165,6 @@ def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> Non
             "note": "Created so CI artifact upload models/v*/** has a match during demos."
         }, indent=2))
 
-# --------------------------
-# Build demo summary markdown
-# --------------------------
-
 @dataclass
 class _Ctx(SummaryContext):
     logs_dir: Path
@@ -215,7 +188,6 @@ def main() -> None:
     ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
 
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
-    # Seed always (benign); ensures CI sections have inputs
     _seed_drift_response_plan(models)
     _seed_retrain_plan(models)
     _seed_ci_stub_artifacts(models, arts, logs)
@@ -225,12 +197,12 @@ def main() -> None:
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
 
-    # Single header only. If first line already looks like a title emitted by header_overview, don’t duplicate.
+    # Add a single header if the first line isn't already a title line
     header = "MoonWire CI Demo Summary"
     if not md_lines or not md_lines[0].strip().lower().startswith("moonwire ci demo summary"):
         md_lines = [header] + md_lines
 
-    # Single footer only. build_all already adds one line; don’t add a second copy.
+    # build_all already appends one footer; don't add another.
     _write_md(md_lines, arts / "demo_summary.md")
 
 if __name__ == "__main__":
