@@ -21,25 +21,19 @@ def _now_utc() -> datetime:
 
 def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Test-exercised helper. Mirrors expected behavior:
-      - If DEMO_MODE=false: pass-through, return (reviewers, []).
-      - If DEMO_MODE=true and reviewers provided: pass-through, return (reviewers, []).
-      - If DEMO_MODE=true and reviewers empty: synthesize 3 reviewers AND emit one event PER reviewer.
-        (Tests assert len(events) == len(reviewers).)
+    - Non-demo: pass-through (reviewers, []).
+    - Demo + reviewers provided: pass-through (reviewers, []).
+    - Demo + reviewers empty: synthesize 3 reviewers AND emit one event per reviewer.
     """
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     if not demo:
         return reviewers, []
-
     if reviewers:
-        # pass-through, no events (tests expect [])
         return reviewers, []
 
     now = _now_utc()
     out_reviewers: List[Dict[str, Any]] = []
     events: List[Dict[str, Any]] = []
-
-    # deterministic 3 reviewers
     seeds = [
         {"id": "rev_demo_1", "origin": "reddit", "score": 0.82},
         {"id": "rev_demo_2", "origin": "rss_news", "score": 0.54},
@@ -49,7 +43,6 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
         rcopy = dict(r)
         rcopy["timestamp"] = _iso(now - timedelta(hours=max(0, 2 - i)))
         out_reviewers.append(rcopy)
-        # one event per reviewer (no extra summary event)
         events.append(
             {
                 "type": "demo_review_created",
@@ -58,7 +51,6 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
                 "meta": {"note": "seeded in demo mode", "version": "v0.6.6"},
             }
         )
-
     return out_reviewers, events
 
 # --------------------------
@@ -66,7 +58,6 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
 # --------------------------
 
 def _seed_drift_response_plan(models_dir: Path) -> None:
-    """Create a benign 'no candidates' drift plan for CI rendering."""
     ensure_dir(models_dir)
     jpath = models_dir / "drift_response_plan.json"
     if jpath.exists():
@@ -85,7 +76,6 @@ def _seed_drift_response_plan(models_dir: Path) -> None:
     jpath.write_text(json.dumps(plan))
 
 def _seed_retrain_plan(models_dir: Path) -> None:
-    """Create a benign 'plan empty' retrain JSON for CI rendering."""
     ensure_dir(models_dir)
     jpath = models_dir / "retrain_plan.json"
     if jpath.exists():
@@ -100,10 +90,9 @@ def _seed_retrain_plan(models_dir: Path) -> None:
     jpath.write_text(json.dumps(plan))
 
 # --------------------------
-# NEW: Seed CI stub artifacts for upload globs (demo-friendly)
+# CI stub artifacts (demo-friendly)
 # --------------------------
 
-# minimal valid 1x1 PNG (black) to avoid matplotlib dependency
 _PNG_1x1_BYTES = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
     b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0bIDAT\x08\xd7c`\x00\x00"
@@ -111,11 +100,10 @@ _PNG_1x1_BYTES = (
 )
 
 def _write_png_placeholder(path: Path, title_text: str = "") -> None:
-    """Write a tiny valid PNG. If matplotlib is available, write a labeled plot; else 1x1 PNG."""
     try:
         import matplotlib
         matplotlib.use("Agg", force=True)
-        import matplotlib.pyplot as plt  # noqa
+        import matplotlib.pyplot as plt  # noqa: E402
         ensure_dir(path.parent)
         fig = plt.figure(figsize=(3, 2), dpi=100)
         ax = fig.add_subplot(111)
@@ -131,13 +119,8 @@ def _write_png_placeholder(path: Path, title_text: str = "") -> None:
     path.write_bytes(_PNG_1x1_BYTES)
 
 def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Path) -> None:
-    """
-    Seed placeholder files so upload steps succeed in demo/no-upstream contexts.
-    Only writes files that are missing.
-    """
     ensure_dir(models_dir); ensure_dir(artifacts_dir); ensure_dir(logs_dir)
 
-    # JSON/JSONL stubs
     cal_per_origin = models_dir / "calibration_per_origin.json"
     if not cal_per_origin.exists():
         cal_per_origin.write_text(json.dumps({
@@ -173,7 +156,6 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
             "meta": {"note": "seeded for CI uploads"}
         }) + "\n")
 
-    # PNG stubs matching upload globs
     _write_png_placeholder(artifacts_dir / "reddit_activity_demo.png", "reddit activity (demo)")
     _write_png_placeholder(artifacts_dir / "reddit_bursts_demo.png", "reddit bursts (demo)")
     _write_png_placeholder(artifacts_dir / "retrain_eval_demo.png", "retrain eval (demo)")
@@ -183,18 +165,12 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
     _write_png_placeholder(artifacts_dir / "drift_response_backtest_demo.png", "drift backtest (demo)")
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
-    """
-    Create a tiny versioned directory so the workflow's 'models/<version>/**' upload
-    always finds at least one file during demo runs.
-    Never overwrites real artifacts.
-    """
     vdir = ensure_dir(models_dir / version)
     has_real = any((vdir / name).exists() for name in (
         "model.joblib", "model.meta.json", "README.txt", "README.md"
     ))
     if has_real:
         return
-
     readme = vdir / "README.txt"
     meta = vdir / "stub.meta.json"
     now = _now_utc()
@@ -227,48 +203,92 @@ class _Ctx(SummaryContext):
     caches: Dict[str, Any] = field(default_factory=dict)
 
 # --------------------------
-# Markdown helpers
+# Markdown assembly / normalization
 # --------------------------
 
-HEADER_LINE = "MoonWire CI Demo Summary"
+HEADER_PLAIN = "MoonWire CI Demo Summary"
+HEADER_DETAILED_PREFIX = "MoonWire Demo Summary —"
 FOOTER_LINE = "Job summary generated at run-time"
+
+# Unicode line/paragraph/next-line separators we’ve observed in CI logs
+_SEP_CHARS = ["\u2028", "\u2029", "\u0085", "\r\n", "\r", "\n"]
+
+def _explode_weird_lines(lines: List[str]) -> List[str]:
+    """
+    Split any line that accidentally contains embedded line/paragraph separators
+    into multiple clean lines, so our de-dupe can see them.
+    """
+    out: List[str] = []
+    for ln in lines:
+        parts = [ln]
+        for sep in _SEP_CHARS:
+            tmp: List[str] = []
+            for p in parts:
+                tmp.extend(p.split(sep))
+            parts = tmp
+        out.extend(p.strip() for p in parts if p is not None)
+    return out
 
 def _normalize_whole_markdown(lines: List[str]) -> List[str]:
     """
-    Final end-to-end normalization across the *entire* assembled summary.
-    Handles duplicates introduced by individual sections and by the wrapper.
-      - Keep first HEADER_LINE; drop subsequent exact matches anywhere.
-      - Keep only the last FOOTER_LINE.
-      - Collapse consecutive blank lines.
+    Global cleanup:
+      • Prefer a single timestamped header if present; otherwise keep one plain header.
+      • Drop all extra plain headers anywhere in the body.
+      • Keep only one footer, placed at the end.
+      • Collapse consecutive blank lines.
+      • Be robust to Unicode line separators that merged lines.
     """
+    # First split odd embedded separators so we can reason line-by-line
+    exploded = _explode_weird_lines(lines)
+
+    demo_header_line: str | None = None
+    body: List[str] = []
+    saw_plain_header = False
+
+    for ln in exploded:
+        s = ln.strip()
+        if not s:
+            body.append("")  # keep blanks for later collapse
+            continue
+        # Capture the first detailed (timestamped) header
+        if s.startswith(HEADER_DETAILED_PREFIX) and demo_header_line is None:
+            demo_header_line = s
+            continue
+        # Drop any plain header occurrences; remember we saw at least one
+        if s == HEADER_PLAIN:
+            saw_plain_header = True
+            continue
+        # Drop any footer lines for now; we’ll add a single one at the end
+        if s == FOOTER_LINE:
+            continue
+        body.append(s)
+
+    # Construct final header
     out: List[str] = []
-    seen_header = False
-    footer_positions: List[int] = []
+    if demo_header_line is not None:
+        out.append(HEADER_PLAIN)  # keep the short product title
+        out.append(demo_header_line)  # then the timestamped proof header
+    elif saw_plain_header:
+        out.append(HEADER_PLAIN)
+    else:
+        # If neither was found (edge case), add a single plain header
+        out.append(HEADER_PLAIN)
 
-    for ln in lines:
-        if ln.strip() == HEADER_LINE:
-            if seen_header:
-                continue
-            seen_header = True
-        if ln.strip() == FOOTER_LINE:
-            footer_positions.append(len(out))
-        out.append(ln)
-
-    if len(footer_positions) > 1:
-        keep_last = footer_positions[-1]
-        to_drop = set(footer_positions[:-1])
-        out = [ln for idx, ln in enumerate(out) if not (ln.strip() == FOOTER_LINE and idx in to_drop)]
-
+    # Append body, collapsing duplicate consecutive blanks
     compact: List[str] = []
     prev_blank = False
-    for ln in out:
-        is_blank = (ln.strip() == "")
+    for s in body:
+        is_blank = (s == "")
         if is_blank and prev_blank:
             continue
-        compact.append(ln)
+        compact.append(s)
         prev_blank = is_blank
+    out.extend(compact)
 
-    return compact
+    # Ensure exactly one footer, at the very end
+    if not out or out[-1] != FOOTER_LINE:
+        out.append(FOOTER_LINE)
+    return out
 
 def _write_md(md_lines: List[str], out_path: Path) -> None:
     ensure_dir(out_path.parent)
@@ -288,33 +308,26 @@ def main() -> None:
 
     # ensure governance artifacts exist for CI rendering
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
-    if demo:
-        _seed_drift_response_plan(models)
-        _seed_retrain_plan(models)
-    else:
-        # Even in non-demo, write harmless stubs if completely missing
-        _seed_drift_response_plan(models)
-        _seed_retrain_plan(models)
+    _seed_drift_response_plan(models)   # safe in either mode
+    _seed_retrain_plan(models)          # safe in either mode
 
-    # Stub artifacts so upload globs always match (demo/no-upstream)
+    # stub artifacts so upload globs always match
     _seed_ci_stub_artifacts(models, arts, logs)
 
     # ensure versioned bundle exists in demo to satisfy models/v0.5.1/** upload
     if demo:
         _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
-    # assemble markdown
+    # assemble markdown from sections
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
-    body_lines = build_all(ctx)
+    section_lines = build_all(ctx)
 
-    # Wrap with a single header and footer, then normalize globally
-    header = [HEADER_LINE]
-    footer = [FOOTER_LINE]
-    all_lines = header + body_lines + footer
-    all_lines = _normalize_whole_markdown(all_lines)
+    # Wrap with simple header/footer and then normalize globally
+    raw_lines: List[str] = [HEADER_PLAIN] + section_lines + [FOOTER_LINE]
+    final_lines = _normalize_whole_markdown(raw_lines)
 
     # write to artifacts
-    _write_md(all_lines, arts / "demo_summary.md")
+    _write_md(final_lines, arts / "demo_summary.md")
 
 if __name__ == "__main__":
     main()
