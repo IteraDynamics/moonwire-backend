@@ -117,6 +117,8 @@ _PNG_1x1_BYTES = (
 
 def _write_png_placeholder(path: Path, title_text: str = "") -> None:
     """Write a tiny valid PNG. If matplotlib is available, write a labeled plot; else 1x1 PNG."""
+    if path.exists():
+        return  # never overwrite real artifacts
     try:
         import matplotlib
         matplotlib.use("Agg", force=True)
@@ -178,7 +180,7 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
             "meta": {"note": "seeded for CI uploads"}
         }) + "\n")
 
-    # PNG stubs matching upload globs
+    # PNG stubs matching upload globs (only if missing)
     # Reddit plots
     _write_png_placeholder(artifacts_dir / "reddit_activity_demo.png", "reddit activity (demo)")
     _write_png_placeholder(artifacts_dir / "reddit_bursts_demo.png", "reddit bursts (demo)")
@@ -191,6 +193,13 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
     # Drift response plots
     _write_png_placeholder(artifacts_dir / "drift_response_timeline.png", "drift timeline (demo)")
     _write_png_placeholder(artifacts_dir / "drift_response_backtest_demo.png", "drift backtest (demo)")
+
+    # NEW (Task 2): Model Performance Trend plots
+    _write_png_placeholder(artifacts_dir / "model_performance_trend_metrics.png", "performance metrics (demo)")
+    _write_png_placeholder(artifacts_dir / "model_performance_trend_alerts.png", "performance alerts (demo)")
+
+    # Nice-to-have: model lineage graph placeholder (if the lineage module didn’t run)
+    _write_png_placeholder(artifacts_dir / "model_lineage_graph.png", "model lineage (demo)")
 
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
@@ -272,7 +281,7 @@ def main() -> None:
     if demo:
         _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
-    # assemble markdown
+    # assemble markdown via section registry (includes Model Lineage + Performance Trend)
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
 
