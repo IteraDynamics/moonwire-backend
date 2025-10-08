@@ -36,18 +36,20 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"
+          DEMO_MODE: "true"          # seed-friendly for CI
         run: |
           python -m src.ml.train_trigger_model --days 14 --interval hour
           echo "Models in ./models:"
           ls -lah models || true
 
+      # --- Assert logistic artifacts exist ---
       - name: Assert logistic artifacts exist
         if: ${{ success() }}
         run: |
           test -f models/trigger_likelihood_v0.joblib    || (echo "missing logistic model" && exit 1)
           test -f models/trigger_likelihood_v0.meta.json || (echo "missing logistic meta"  && exit 1)
 
+      # --- Upload logistic artifacts (non-versioned) ---
       - name: Upload logistic model artifacts
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -64,8 +66,8 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"
-          TRAINING_JOIN_WINDOW_MIN: "5"
+          DEMO_MODE: "true"              # seed demo rows if logs empty
+          TRAINING_JOIN_WINDOW_MIN: "5"  # ±5 min join window
         run: |
           python -m src.ml.training_data
           echo "Training data status:"
@@ -86,6 +88,7 @@ jobs:
           ls -lah models || true
           ls -lah "models/$MODEL_VERSION" || true
 
+      # --- Upload retrained artifacts (versioned) ---
       - name: Upload retrained model artifacts (v0.5.1)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -96,7 +99,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # --- Prep artifacts dir ---
+      # --- Prep artifacts dir for summary build ---
       - name: Prep artifacts dir
         if: ${{ success() }}
         run: mkdir -p artifacts
@@ -118,36 +121,45 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
+          # Keep most sections demo-friendly unless real creds exist
           DEMO_MODE: "true"
-          MW_DEMO: "false"
+          MW_DEMO: "false"               # Market Context should use REAL data when key present
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
           MW_CG_BASE_URL: "https://api.coingecko.com/api/v3"
           MPLBACKEND: "Agg"
           DEMO_RICH_SCORES: "true"
+          # knobs for visibility in CI
           TL_DRIFT_Z_THRESHOLD: "0.5"
           TL_DRIFT_PER_FEATURE_PENALTY: "0.1"
           METRICS_MIN_LABELS: "5"
           METRICS_LOOKBACK_HOURS: "72"
           METRICS_MIN_LABELS_ORIGIN: "3"
           TL_LOG_FALLBACK_ORIGIN: "rss_news"
+          # accuracy-by-version snapshot
           MW_ACCURACY_WINDOW_H: "72"
+          # calibration & reliability defaults
           MW_CAL_WINDOW_H: "72"
           MW_CAL_BINS: "10"
           MW_CAL_MIN_LABELS: "50"
           MW_CAL_MAX_ECE: "0.06"
+          # enable per-origin section + align paths
           MW_CAL_PER_ORIGIN: "true"
           ARTIFACTS_DIR: ${{ github.workspace }}/artifacts
+          # CoinGecko knobs (safe defaults)
           MW_CG_COINS: "bitcoin,ethereum,solana"
           MW_CG_VS_CURRENCY: "usd"
           MW_CG_LOOKBACK_H: "72"
           MW_CG_RATE_LIMIT_PER_MIN: "25"
+          # Reddit lite ingest knobs (RSS mode by default)
           MW_REDDIT_MODE: "rss"
           MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
           MW_REDDIT_SORT: "new"
           MW_REDDIT_LOOKBACK_H: "72"
+          # Twitter Lite (demo by default unless token provided)
           MW_TWITTER_MODE: "demo"
           MW_TWITTER_KEYWORDS: "bitcoin,ethereum,solana,crypto"
           MW_TWITTER_LOOKBACK_H: "72"
+          # --- Drift Response knobs ---
           MW_DRIFT_ECE_THRESH: "0.06"
           MW_DRIFT_MIN_BUCKETS: "3"
           MW_DRIFT_GRACE_H: "6"
@@ -157,6 +169,7 @@ jobs:
           MW_THRESHOLD_MAX_SHIFT: "0.10"
           MW_THRESHOLD_MIN_PRECISION: "0.75"
           MW_THRESHOLD_MIN_LABELS: "10"
+          # --- Retrain Automation knobs ---
           MW_RETRAIN_ACTION: "dryrun"
           MW_RETRAIN_MIN_LABELS: "300"
           MW_RETRAIN_LOOKBACK_DAYS: "30"
@@ -164,31 +177,19 @@ jobs:
           MW_RETRAIN_EVAL_HOLDOUT_DAYS: "7"
           MW_RETRAIN_PROMOTION_CRITERIA: "precision_delta_min=0.01,ece_delta_max=-0.01,f1_delta_min=0"
           MW_RETRAIN_MAX_CANDIDATES: "3"
+          # --- Cross-Origin Correlation ---
           MW_CORR_LOOKBACK_H: "72"
+          # --- NEW: Lead–Lag Analysis ---
           MW_LEADLAG_LOOKBACK_H: "72"
           MW_LEADLAG_MAX_SHIFT_H: "12"
           MW_LEADLAG_N_PERM: "100"
         run: python scripts/mw_demo_summary.py
 
-      # --- Upload governance & analytics artifacts (existing + new) ---
-      - name: Upload model lineage JSON
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: model-lineage
-          path: models/model_lineage.json
-          if-no-files-found: ignore
-          retention-days: 14
+      # -----------------------------
+      # Artifact uploads begin here
+      # -----------------------------
 
-      - name: Upload model lineage plot
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: model-lineage-plots
-          path: artifacts/model_lineage_graph.png
-          if-no-files-found: ignore
-          retention-days: 14
-
+      # --- Drift Response artifacts ---
       - name: Upload drift response plan
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -218,6 +219,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Retrain Automation artifacts ---
       - name: Upload retrain plan
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -239,6 +241,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Model registry snapshot ---
       - name: Upload model registry
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -248,6 +251,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Calibration / Reliability artifacts ---
       - name: Upload calibration reliability JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -275,6 +279,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Market Context artifacts ---
       - name: Upload market context JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -295,6 +300,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Social Context artifacts ---
       - name: Upload social reddit context
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -315,6 +321,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Cross-Origin Correlation artifacts ---
       - name: Upload cross-origin correlation JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -335,6 +342,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Lead–Lag Analysis artifacts ---
       - name: Upload lead–lag analysis JSON
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
@@ -355,12 +363,56 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # --- Model Lineage & Provenance artifacts ---
+      - name: Upload model lineage JSON
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-lineage
+          path: models/model_lineage.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload model lineage plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-lineage-plots
+          path: artifacts/model_lineage_graph.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- NEW: Model Performance Trend artifacts ---
+      - name: Upload model performance trend
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-performance-trend
+          path: models/model_performance_trend.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload model performance trend plots
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-performance-trend-plots
+          path: |
+            artifacts/model_performance_trend_metrics.png
+            artifacts/model_performance_trend_alerts.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # --- Show artifacts & publish summary ---
       - name: Show artifacts (debug)
         if: ${{ success() }}
         run: |
-          echo "Artifacts in repo root:"; ls -lah
-          echo "Artifacts in ./artifacts:"; ls -lah artifacts || true
-          echo "Models in ./models:"; ls -lah models || true
+          echo "Artifacts in repo root:"
+          ls -lah
+          echo "Artifacts in ./artifacts:"
+          ls -lah artifacts || true
+          echo "Models in ./models:"
+          ls -lah models || true
           test -f artifacts/demo_summary.md || (echo "demo_summary.md not found" && exit 1)
 
       - name: Publish CI summary
