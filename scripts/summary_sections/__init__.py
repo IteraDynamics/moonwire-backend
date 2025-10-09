@@ -2,23 +2,26 @@
 from __future__ import annotations
 
 """
-Package entrypoint for CI summary sections.
+Summary sections entrypoint.
 
-Fixes:
-  • Removes eager top-level imports that caused circular imports in tests.
-  • Uses lazy module loading via importlib when sections are accessed or built.
-  • Restores yesterday's section order and error formatting.
-  • Adds the two new blocks (model_performance_trend, model_governance_actions).
+• No eager imports (prevents circulars).
+• Detects which sections actually exist; only builds those.
+• Keeps stable preferred order (same as yesterday’s merge),
+  but silently skips missing modules instead of spamming errors.
+• Exposes modules lazily so `from scripts.summary_sections import header_overview`
+  still works when present.
 
-This module intentionally does NOT emit any header text. The header block is
-owned by the 'header_overview' section itself.
+New sections supported:
+  - model_performance_trend
+  - model_governance_actions
 """
 
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Any
 import importlib
+import importlib.util
 
-# --- Section order (restored) ---
-SECTION_ORDER: List[str] = [
+# Preferred order (we’ll filter this list down to modules that exist)
+_PREFERRED_ORDER: List[str] = [
     "header_overview",
     "market_context",
     "social_reddit_context",
@@ -27,15 +30,15 @@ SECTION_ORDER: List[str] = [
     "leadlag_analysis",
     "drift_response",
     "model_lineage",
-    "model_performance_trend",   # new
-    "model_governance_actions",  # new
+    "model_performance_trend",
+    "model_governance_actions",  # lives under scripts.governance
     "explainability",
     "signal_quality_summary",
     "thresholds",
     "source_yield_plan",
 ]
 
-# Map logical section name -> fully qualified module path
+# Logical name -> module path
 _SECTION_MODULES: Dict[str, str] = {
     "header_overview": "scripts.summary_sections.header_overview",
     "market_context": "scripts.summary_sections.market_context",
@@ -46,7 +49,6 @@ _SECTION_MODULES: Dict[str, str] = {
     "drift_response": "scripts.summary_sections.drift_response",
     "model_lineage": "scripts.summary_sections.model_lineage",
     "model_performance_trend": "scripts.summary_sections.model_performance_trend",
-    # lives under scripts.governance but exposed here as a section:
     "model_governance_actions": "scripts.governance.model_governance_actions",
     "explainability": "scripts.summary_sections.explainability",
     "signal_quality_summary": "scripts.summary_sections.signal_quality_summary",
@@ -54,56 +56,48 @@ _SECTION_MODULES: Dict[str, str] = {
     "source_yield_plan": "scripts.summary_sections.source_yield_plan",
 }
 
-__all__ = list(_SECTION_MODULES.keys()) + ["build_all"]
+__all__ = list(_SECTION_MODULES.keys()) + ["build_all", "available_sections"]
 
 
-def _load_section(name: str):
-    """Lazy import a section module by logical name."""
-    mod_path = _SECTION_MODULES.get(name)
-    if not mod_path:
-        raise ModuleNotFoundError(f"No module named 'scripts.summary_sections.{name}'")
-    return importlib.import_module(mod_path)
+def _exists(mod_path: str) -> bool:
+    return importlib.util.find_spec(mod_path) is not None
+
+
+def available_sections() -> List[str]:
+    """Return the sections that actually exist in this checkout, in preferred order."""
+    out: List[str] = []
+    for name in _PREFERRED_ORDER:
+        mpath = _SECTION_MODULES.get(name)
+        if mpath and _exists(mpath):
+            out.append(name)
+    return out
+
+
+def _load(name: str):
+    mpath = _SECTION_MODULES[name]
+    return importlib.import_module(mpath)
 
 
 def __getattr__(name: str):
-    """
-    Allow `from scripts.summary_sections import header_overview` to work
-    without eager imports. This is called only on demand.
-    """
-    if name in _SECTION_MODULES:
-        return _load_section(name)
+    if name in _SECTION_MODULES and _exists(_SECTION_MODULES[name]):
+        return _load(name)
+    # keep normal AttributeError semantics
     raise AttributeError(name)
-
-
-def _safe_append(mod: Any) -> Callable[[List[str], Any], None]:
-    """
-    Wrap mod.append(md, ctx) and on error emit a single ❌ line
-    (matching existing CI formatting).
-    """
-    def _call(md: List[str], ctx: Any) -> None:
-        try:
-            mod.append(md, ctx)  # type: ignore[attr-defined]
-        except Exception as e:
-            sec_name = getattr(mod, "__name__", str(mod)).split(".")[-1]
-            md.append(f"❌ scripts.summary_sections.{sec_name} failed: {e}")
-    return _call
 
 
 def build_all(ctx: Any) -> List[str]:
     """
-    Build the entire markdown by running each section in SECTION_ORDER.
-    No headers are injected here — header_overview is responsible for the top block.
+    Build the markdown by running append(md, ctx) for each available section.
+    We don’t print headers here—`header_overview` owns the top header.
     """
     md: List[str] = []
-
-    for name in SECTION_ORDER:
+    for name in available_sections():
         try:
-            mod = _load_section(name)
+            mod = _load(name)
+            mod.append(md, ctx)  # type: ignore[attr-defined]
         except Exception as e:
-            # If truly missing, keep yesterday's failure style
-            md.append(f"❌ scripts.summary_sections.{name} failed: {e}")
-            continue
-
-        _safe_append(mod)(md, ctx)
-
+            # Single-line failure (matches existing CI style) but only
+            # for sections that actually exist; non-existent ones are skipped.
+            sec_mod = _SECTION_MODULES.get(name, f"scripts.summary_sections.{name}")
+            md.append(f"❌ {sec_mod} failed: {e}")
     return md
