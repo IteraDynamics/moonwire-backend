@@ -12,12 +12,14 @@ from typing import Any, Dict, List, Tuple
 from scripts.summary_sections import build_all
 from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
 
+
 # --------------------------
 # Demo data seed (kept stable for tests)
 # --------------------------
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
+
 
 def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
@@ -61,8 +63,9 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
 
     return out_reviewers, events
 
+
 # --------------------------
-# Seed governance/demo artifacts when missing
+# Seed governance demo artifacts when missing
 # --------------------------
 
 def _seed_drift_response_plan(models_dir: Path) -> None:
@@ -84,6 +87,7 @@ def _seed_drift_response_plan(models_dir: Path) -> None:
     }
     jpath.write_text(json.dumps(plan))
 
+
 def _seed_retrain_plan(models_dir: Path) -> None:
     """Create a benign 'plan empty' retrain JSON for CI rendering."""
     ensure_dir(models_dir)
@@ -98,6 +102,7 @@ def _seed_retrain_plan(models_dir: Path) -> None:
         "demo": True,
     }
     jpath.write_text(json.dumps(plan))
+
 
 # --------------------------
 # NEW: Seed CI stub artifacts for upload globs (demo-friendly)
@@ -174,13 +179,19 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
         }) + "\n")
 
     # PNG stubs matching upload globs
+    # Reddit plots
     _write_png_placeholder(artifacts_dir / "reddit_activity_demo.png", "reddit activity (demo)")
     _write_png_placeholder(artifacts_dir / "reddit_bursts_demo.png", "reddit bursts (demo)")
+
+    # Retrain plots
     _write_png_placeholder(artifacts_dir / "retrain_eval_demo.png", "retrain eval (demo)")
     _write_png_placeholder(artifacts_dir / "retrain_reliability_demo.png", "retrain reliability (demo)")
     _write_png_placeholder(artifacts_dir / "retrain_confusion_demo.png", "retrain confusion (demo)")
+
+    # Drift response plots
     _write_png_placeholder(artifacts_dir / "drift_response_timeline.png", "drift timeline (demo)")
     _write_png_placeholder(artifacts_dir / "drift_response_backtest_demo.png", "drift backtest (demo)")
+
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
     """
@@ -189,12 +200,14 @@ def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> Non
     Never overwrites real artifacts.
     """
     vdir = ensure_dir(models_dir / version)
+    # if real model files already exist, do nothing
     has_real = any((vdir / name).exists() for name in (
         "model.joblib", "model.meta.json", "README.txt", "README.md"
     ))
     if has_real:
         return
 
+    # write a minimal README and a tiny meta to make the bundle useful in audits
     readme = vdir / "README.txt"
     meta = vdir / "stub.meta.json"
     now = _now_utc()
@@ -211,6 +224,7 @@ def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> Non
             "note": "Created so CI artifact upload models/v*/** has a match during demos."
         }, indent=2))
 
+
 # --------------------------
 # Build demo summary markdown
 # --------------------------
@@ -226,9 +240,11 @@ class _Ctx(SummaryContext):
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     caches: Dict[str, Any] = field(default_factory=dict)
 
+
 def _write_md(md_lines: List[str], out_path: Path) -> None:
     ensure_dir(out_path.parent)
     out_path.write_text("\n".join(md_lines))
+
 
 def main() -> None:
     # workspace paths
@@ -238,27 +254,28 @@ def main() -> None:
     arts = Path(os.getenv("ARTIFACTS_DIR", str(root / "artifacts")))
     ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
 
-    # demo flag
+    # ensure demo governance artifacts exist for CI rendering
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
-
-    # Seed governance artifacts (harmless in non-demo too)
+    # Always seed benign stubs so CI blocks render
     _seed_drift_response_plan(models)
     _seed_retrain_plan(models)
 
     # Seed stub artifacts so upload globs always match (demo/no-upstream)
     _seed_ci_stub_artifacts(models, arts, logs)
 
-    # Ensure versioned bundle exists in demo to satisfy models/v0.5.1/** upload
+    # ensure a versioned bundle exists in demo to satisfy models/v0.5.1/** upload
     if demo:
         _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
-    # assemble markdown via sections (header emitted by header_overview ONLY)
+    # assemble markdown (NO manual H1 to avoid duplicates in CI)
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
 
-    # write to artifacts (no additional header here!)
-    md_lines.append("Job summary generated at run-time")
-    _write_md(md_lines, arts / "demo_summary.md")
+    # write to artifacts; keep the trailing note
+    all_lines = md_lines + ["Job summary generated at run-time"]
+
+    _write_md(all_lines, arts / "demo_summary.md")
+
 
 if __name__ == "__main__":
     main()
