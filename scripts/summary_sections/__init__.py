@@ -6,7 +6,6 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from .common import SummaryContext
 
-# Utility: safe import — returns (module, None) or (None, reason)
 def _try_import(name: str) -> Tuple[Optional[Any], Optional[str]]:
     try:
         return importlib.import_module(f"scripts.summary_sections.{name}"), None
@@ -15,7 +14,6 @@ def _try_import(name: str) -> Tuple[Optional[Any], Optional[str]]:
     except Exception as e:
         return None, f"error: {e}"
 
-# Utility: call section.append if present; swallow errors to avoid messy CI noise
 def _safe_append(mod: Any, md: List[str], ctx: SummaryContext, **kwargs: Any) -> None:
     if not mod:
         return
@@ -25,19 +23,16 @@ def _safe_append(mod: Any, md: List[str], ctx: SummaryContext, **kwargs: Any) ->
     try:
         fn(md, ctx, **kwargs)
     except TypeError:
-        # Some sections take no extra kwargs
         fn(md, ctx)
     except Exception:
-        # Hard-failures inside sections should not break the whole summary
+        # swallow to keep CI summary resilient
         pass
 
-# Public build function used by mw_demo_summary.py
 def build_all(ctx: SummaryContext) -> List[str]:
     md: List[str] = []
 
-    # Load only the sections that actually exist in this workspace.
     order = [
-        "header_overview",               # emits the SINGLE header block
+        "header_overview",               # single header-ish block (NO H1)
         "market_context",
         "social_reddit_context",
         "social_twitter_context",
@@ -59,9 +54,11 @@ def build_all(ctx: SummaryContext) -> List[str]:
         if mod:
             modules[name] = mod
 
-    # Append in order; missing modules are silently skipped.
-    _safe_append(modules.get("header_overview"), md, ctx,
-                 reviewers=[], threshold=0.5, sig_id="demo", triggered_log=[])
+    # Header first (accepts compatibility kwargs)
+    _safe_append(
+        modules.get("header_overview"), md, ctx,
+        reviewers=[], threshold=0.5, sig_id="demo", triggered_log=[]
+    )
 
     for name in order:
         if name == "header_overview":
