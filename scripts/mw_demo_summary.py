@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-# Summary sections entrypoint
+# Summary sections entrypoint (keep main’s behavior)
 from scripts.summary_sections import build_all
 from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
 
@@ -179,16 +179,11 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
         }) + "\n")
 
     # PNG stubs matching upload globs
-    # Reddit plots
     _write_png_placeholder(artifacts_dir / "reddit_activity_demo.png", "reddit activity (demo)")
     _write_png_placeholder(artifacts_dir / "reddit_bursts_demo.png", "reddit bursts (demo)")
-
-    # Retrain plots
     _write_png_placeholder(artifacts_dir / "retrain_eval_demo.png", "retrain eval (demo)")
     _write_png_placeholder(artifacts_dir / "retrain_reliability_demo.png", "retrain reliability (demo)")
     _write_png_placeholder(artifacts_dir / "retrain_confusion_demo.png", "retrain confusion (demo)")
-
-    # Drift response plots
     _write_png_placeholder(artifacts_dir / "drift_response_timeline.png", "drift timeline (demo)")
     _write_png_placeholder(artifacts_dir / "drift_response_backtest_demo.png", "drift backtest (demo)")
 
@@ -254,25 +249,28 @@ def main() -> None:
     arts = Path(os.getenv("ARTIFACTS_DIR", str(root / "artifacts")))
     ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
 
-    # Always seed benign stubs so CI blocks render
+    # demo flag
+    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
+
+    # ensure governance artifacts exist for CI rendering (benign if present)
     _seed_drift_response_plan(models)
     _seed_retrain_plan(models)
 
     # Seed stub artifacts so upload globs always match (demo/no-upstream)
     _seed_ci_stub_artifacts(models, arts, logs)
 
-    # ensure a versioned bundle exists in demo to satisfy models/v0.5.1/** upload
-    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
+    # ensure versioned bundle exists in demo to satisfy models/v0.5.1/** upload
     if demo:
         _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
-    # assemble markdown (NO manual H1 to avoid duplicates in CI)
+    # assemble markdown
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
 
-    # write to artifacts; keep the trailing note
+    # DO NOT prepend any header here — header_overview owns the top block
     all_lines = md_lines + ["Job summary generated at run-time"]
 
+    # write to artifacts
     _write_md(all_lines, arts / "demo_summary.md")
 
 
