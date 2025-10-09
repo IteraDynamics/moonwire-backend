@@ -254,8 +254,6 @@ def main() -> None:
     arts = Path(os.getenv("ARTIFACTS_DIR", str(root / "artifacts")))
     ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
 
-    # ensure demo governance artifacts exist for CI rendering
-    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     # Always seed benign stubs so CI blocks render
     _seed_drift_response_plan(models)
     _seed_retrain_plan(models)
@@ -264,6 +262,7 @@ def main() -> None:
     _seed_ci_stub_artifacts(models, arts, logs)
 
     # ensure a versioned bundle exists in demo to satisfy models/v0.5.1/** upload
+    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     if demo:
         _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
