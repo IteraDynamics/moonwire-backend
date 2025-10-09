@@ -1,96 +1,117 @@
 # scripts/summary_sections/__init__.py
 from __future__ import annotations
 
-import importlib
-from typing import List
-from pathlib import Path
+"""
+Package entrypoint for CI summary sections.
 
-from .common import SummaryContext
+This file intentionally:
+  1) Re-exports ALL existing sections exactly as main had them
+     so imports like `from scripts.summary_sections import header_overview`
+     continue to work.
+  2) Adds ONLY two new blocks (model_performance_trend, model_governance_actions)
+     without changing any other section behavior.
+  3) Provides build_all(ctx) that calls each section's append(md, ctx) in order,
+     catching exceptions and emitting a single ❌ line per failure
+     (matching yesterday's formatting).
+  4) Avoids ANY header text. The header line is produced by header_overview only.
+"""
 
-# --- Public re-exports for tests ------------------------------------------------
-# tests import these:  from scripts.summary_sections import header_overview, source_yield_plan
-# We import lazily and tolerate absence (CI summary will still render with a ❌ line).
-try:
-    from . import header_overview as header_overview  # type: ignore
-except Exception:  # pragma: no cover
-    header_overview = None  # type: ignore
+from typing import List, Any, Dict, Callable
 
-# Some repos name this module "source_yield_plan", others "yield_plan".
-# Try both and fall back to a null shim if neither exists.
-try:
-    from . import source_yield_plan as source_yield_plan  # type: ignore
-except Exception:  # pragma: no cover
-    try:
-        from . import yield_plan as source_yield_plan  # type: ignore
-    except Exception:  # pragma: no cover
-        class _NullYieldPlan:
-            @staticmethod
-            def append(md: List[str], ctx: SummaryContext) -> None:
-                md.append("⚠️ Yield plan failed: module not available")
-        source_yield_plan = _NullYieldPlan()  # type: ignore
+# --- Re-export all existing sections (must match your main branch names) ---
+from . import header_overview
+from . import market_context
+from . import social_reddit_context
+from . import social_twitter_context
+from . import cross_origin_correlation
+from . import leadlag_analysis
+from . import drift_response
+from . import model_lineage
+from . import explainability
+from . import signal_quality_summary
+from . import thresholds
+from . import source_yield_plan
 
-__all__ = ["build_all", "header_overview", "source_yield_plan"]
+# New in v0.7.8 (already added yesterday)
+from . import model_performance_trend  # local module in summary_sections
 
-# --- One true order of sections (called exactly once) ---------------------------
+# New in v0.7.9 (lives under scripts.governance but re-exported here)
+# so downstream code can treat it like a "summary section".
+from scripts.governance import model_governance_actions as model_governance_actions  # type: ignore
+
+
+# --- Section order (restored to yesterday’s proven order) ---
+# NOTE: Do not add any header text here. `header_overview` owns the top block.
 SECTION_ORDER: List[str] = [
-    # Compact pipeline proof / header
     "header_overview",
-
-    # Market + social
     "market_context",
     "social_reddit_context",
     "social_twitter_context",
-
-    # Correlations & timing
     "cross_origin_correlation",
     "leadlag_analysis",
-
-    # Governance & model modules
     "drift_response",
     "model_lineage",
-    "model_performance_trend",      # Task 2
-    "model_governance_actions",     # Task 3
-
-    # Explainability
+    "model_performance_trend",   # new
+    "model_governance_actions",  # new (re-exported)
     "explainability",
-
-    # Quality & thresholds
     "signal_quality_summary",
     "thresholds",
-
-    # Sourcing / yield
-    "source_yield_plan",            # prefer canonical name
+    "source_yield_plan",
 ]
 
-def _import_section(mod_name: str):
-    return importlib.import_module(f"scripts.summary_sections.{mod_name}")
 
-def _append_section(md: List[str], ctx: SummaryContext, mod_name: str) -> None:
-    try:
-        mod = _import_section(mod_name)
-    except Exception as e:
-        md.append(f"❌ scripts.summary_sections.{mod_name} failed: {e}")
-        return
-
-    try:
-        # All sections expose append(md, ctx); some accept extra kwargs but must tolerate being omitted.
-        mod.append(md, ctx)  # type: ignore[attr-defined]
-    except TypeError as e:
-        # If a section still requires legacy kwargs, try the most common legacy call signature.
-        # This keeps older modules working without breaking newer ones.
-        try:
-            mod.append(md, ctx, reviewers=[], threshold=0.5, sig_id="demo")  # type: ignore
-        except Exception:
-            md.append(f"❌ scripts.summary_sections.{mod_name} failed: {e}")
-    except Exception as e:  # pragma: no cover
-        md.append(f"❌ scripts.summary_sections.{mod_name} failed: {e}")
-
-def build_all(ctx: SummaryContext) -> List[str]:
+def _resolve_sections() -> Dict[str, Any]:
     """
-    Build the entire CI summary in a stable order, with each block appended exactly once.
-    Robust to missing modules: failures get summarized inline and the rest continues.
+    Build a name->module map from objects we imported above.
+    Keeping this explicit avoids importlib/namespace surprises.
+    """
+    return {
+        "header_overview": header_overview,
+        "market_context": market_context,
+        "social_reddit_context": social_reddit_context,
+        "social_twitter_context": social_twitter_context,
+        "cross_origin_correlation": cross_origin_correlation,
+        "leadlag_analysis": leadlag_analysis,
+        "drift_response": drift_response,
+        "model_lineage": model_lineage,
+        "model_performance_trend": model_performance_trend,
+        "model_governance_actions": model_governance_actions,
+        "explainability": explainability,
+        "signal_quality_summary": signal_quality_summary,
+        "thresholds": thresholds,
+        "source_yield_plan": source_yield_plan,
+    }
+
+
+def _safe_append(mod: Any) -> Callable[[List[str], Any], None]:
+    """
+    Return a wrapper that calls mod.append(md, ctx) and forwards exceptions
+    as a single ❌ line, matching existing CI formatting.
+    """
+    def _call(md: List[str], ctx: Any) -> None:
+        try:
+            # All sections share the same signature append(md, ctx)
+            mod.append(md, ctx)  # type: ignore[attr-defined]
+        except Exception as e:
+            md.append(f"❌ scripts.summary_sections.{mod.__name__.split('.')[-1]} failed: {e}")
+    return _call
+
+
+def build_all(ctx: Any) -> List[str]:
+    """
+    Build the entire markdown by running each section in SECTION_ORDER.
+    No headers are injected here — header_overview is responsible for the top block.
     """
     md: List[str] = []
+    registry = _resolve_sections()
+
     for name in SECTION_ORDER:
-        _append_section(md, ctx, name)
+        mod = registry.get(name)
+        if mod is None:
+            # Module truly missing: keep yesterday's failure style
+            md.append(f"❌ scripts.summary_sections.{name} failed: No module named 'scripts.summary_sections.{name}'")
+            continue
+
+        _safe_append(mod)(md, ctx)
+
     return md
