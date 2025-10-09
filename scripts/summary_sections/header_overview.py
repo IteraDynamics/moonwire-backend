@@ -1,78 +1,84 @@
 # scripts/summary_sections/header_overview.py
-"""
-Header/overview block for the CI summary.
-- Backward-compatible: can be called as append(md, ctx) (registry call),
-  or with optional reviewers/threshold/sig_id/triggered_log for richer context.
-"""
 from __future__ import annotations
-from typing import List, Optional, Sequence, Dict, Any
-from .common import SummaryContext, _iso
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
 
-def _fmt_weight(w: float) -> str:
-    # keep it simple; adjust mapping as needed
-    if w >= 0.8: return "very high"
-    if w >= 0.5: return "high"
-    if w >= 0.2: return "medium"
-    if w > 0.0:  return "low"
-    return "very low"
-
-def _render_reviewers(reviewers: Sequence[Dict[str, Any]]) -> List[str]:
-    lines: List[str] = []
-    for r in reviewers:
-        name = r.get("id") or r.get("name") or "reviewer"
-        w = float(r.get("weight", 0.0) or 0.0)
-        lines.append(f"• **{name}** → {_fmt_weight(w)}")
-    return lines
+from .common import (
+    SummaryContext,
+    red,
+    weight_to_label,
+)
 
 def append(
     md: List[str],
     ctx: SummaryContext,
     *,
-    reviewers: Optional[Sequence[Dict[str, Any]]] = None,
-    threshold: float = 0.5,
-    sig_id: str = "demo",
-    triggered_log: Optional[Sequence[Dict[str, Any]]] = None,
+    reviewers: List[Dict[str, Any]],
+    threshold: float,
+    sig_id: str,
+    triggered_log: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """
-    Append the header/overview block.
-
-    Parameters are optional so this function can be called from the registry
-    (which passes only md, ctx) without errors.
+    Writes the summary header, reviewer list, and origin breakdown.
+    NOTE: We intentionally do NOT write a top-level '# MoonWire CI Demo Summary' H1
+    to avoid duplicating the job's heading in the GitHub summary step.
     """
-    # Defaults if nothing is provided
-    reviewers = list(reviewers or [
-        {"id": "rev_demo_1", "weight": 0.0},
-        {"id": "rev_demo_2", "weight": 0.0},
-        {"id": "rev_demo_3", "weight": 0.0},
-    ])
-    combined = float(sum(float(r.get("weight", 0.0) or 0.0) for r in reviewers))
-    triggered = bool(triggered_log) and any(bool(e.get("triggered")) for e in triggered_log or [])
-    verdict = "TRIGGER" if (combined >= threshold or triggered) else "NO TRIGGER"
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Basic per-origin line; keep harmless if ctx has nothing
-    origin_line = "• no origin data"
-    try:
-        if ctx.origins_rows:
-            # ctx.origins_rows may be list of dicts with "origin" and maybe counts/window
-            uniq = sorted({str(row.get("origin", "?")) for row in ctx.origins_rows})
-            if uniq:
-                origin_line = "• " + ", ".join(uniq)
-    except Exception:
-        pass
+    # Totals
+    total_weight = round(sum(r.get("weight", 0.0) for r in reviewers), 2)
+    would_trigger = total_weight >= float(threshold)
 
-    ts = _iso()  # current UTC ISO8601 (common._iso supports zero-arg now)
+    # Last retrain trigger time for the same signal_id (best-effort)
+    last_trig = None
+    if triggered_log:
+        try:
+            last_trig = max(
+                (t for t in triggered_log if t.get("signal_id") == sig_id),
+                key=lambda x: x.get("timestamp", 0),
+                default=None,
+            )
+        except Exception:
+            last_trig = None
 
-    block = [
-        "MoonWire CI Demo Summary",
-        f"MoonWire Demo Summary — {ts}",
-        "Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.",
-        f"• Signal: {sig_id}",
-        f"• Unique reviewers: {len(reviewers)}",
-        f"• Combined weight: {combined:.1f}",
-        f"• Threshold: {threshold:.1f} → {verdict}",
-        "Reviewers (redacted):",
-        *(_render_reviewers(reviewers) or ["• (no reviewers)"]),
-        "Signal origin breakdown (last 7 days):",
-        origin_line,
-    ]
-    md.append("\n".join(block))
+    # ---- Header line (no extra H1) ----
+    md.append(f"MoonWire Demo Summary — {now_iso}")
+    md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.")
+    md.append(f"- **Signal:** `{red(sig_id)}`")
+    md.append(f"- **Unique reviewers:** {len(reviewers)}")
+    md.append(f"- **Combined weight:** **{total_weight}**")
+    md.append(f"- **Threshold:** **{threshold}** → **{'TRIGGERS' if would_trigger else 'NO TRIGGER'}**")
+    if last_trig:
+        md.append(f"- **Last retrain trigger logged:** {last_trig.get('timestamp','')}")
+
+    # ---- Reviewers (hashed/redacted) ----
+    md.append("\n**Reviewers (redacted):**")
+    if reviewers:
+        for r in reviewers:
+            rid = r.get("id", "")
+            w = float(r.get("weight", 0.0))
+            md.append(f"- `{red(rid)}` → {weight_to_label(w)}")
+    else:
+        md.append("- _none found in this run_")
+
+    # ---- Origin breakdown (from ctx.origins_rows) ----
+    md.append("\n**Signal origin breakdown (last 7 days):**")
+    rows = ctx.origins_rows or []
+    if rows:
+        for o in rows:
+            origin = o.get("origin", "unknown")
+            cnt = o.get("count", 0)
+            pct = o.get("percent")
+            # Format percent whether it's numeric or pre-formatted
+            try:
+                if pct is None:
+                    pct_s = "0%"
+                elif isinstance(pct, (int, float)):
+                    pct_s = f"{float(pct):.1f}%"
+                else:
+                    pct_s = str(pct)
+            except Exception:
+                pct_s = "n/a"
+            md.append(f"- {origin}: {cnt} ({pct_s})")
+    else:
+        md.append("- _no origin data_")
