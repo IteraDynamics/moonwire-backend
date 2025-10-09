@@ -8,40 +8,33 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-# Summary sections entrypoint (keep main’s behavior)
-from scripts.summary_sections import build_all
+from scripts.summary_sections import build_all  # header handled inside header_overview
 from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
 
-
-# --------------------------
-# Demo data seed (kept stable for tests)
-# --------------------------
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
 
+# --------------------------
+# Demo data seed (kept stable for tests)
+# --------------------------
 def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Test-exercised helper. Mirrors expected behavior:
-      - If DEMO_MODE=false: pass-through, return (reviewers, []).
-      - If DEMO_MODE=true and reviewers provided: pass-through, return (reviewers, []).
-      - If DEMO_MODE=true and reviewers empty: synthesize 3 reviewers AND emit one event PER reviewer.
-        (Tests assert len(events) == len(reviewers).)
+    If DEMO_MODE=true and no reviewers provided, synthesize 3 reviewers
+    and one event per reviewer. Otherwise pass-through.
     """
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     if not demo:
         return reviewers, []
 
     if reviewers:
-        # pass-through, no events (tests expect [])
         return reviewers, []
 
     now = _now_utc()
     out_reviewers: List[Dict[str, Any]] = []
     events: List[Dict[str, Any]] = []
 
-    # deterministic 3 reviewers
     seeds = [
         {"id": "rev_demo_1", "origin": "reddit", "score": 0.82},
         {"id": "rev_demo_2", "origin": "rss_news", "score": 0.54},
@@ -51,7 +44,6 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
         rcopy = dict(r)
         rcopy["timestamp"] = _iso(now - timedelta(hours=max(0, 2 - i)))
         out_reviewers.append(rcopy)
-        # one event per reviewer (no extra summary event)
         events.append(
             {
                 "type": "demo_review_created",
@@ -65,18 +57,15 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
 
 
 # --------------------------
-# Seed governance demo artifacts when missing
+# Seed governance demo artifacts (benign defaults, non-destructive)
 # --------------------------
-
 def _seed_drift_response_plan(models_dir: Path) -> None:
-    """Create a benign 'no candidates' drift plan for CI rendering."""
     ensure_dir(models_dir)
     jpath = models_dir / "drift_response_plan.json"
     if jpath.exists():
         return
-    now = _now_utc()
     plan = {
-        "generated_at": _iso(now),
+        "generated_at": _iso(_now_utc()),
         "window_hours": 72,
         "grace_hours": int(os.getenv("MW_DRIFT_GRACE_H", "6")),
         "min_buckets": int(os.getenv("MW_DRIFT_MIN_BUCKETS", "3")),
@@ -89,14 +78,12 @@ def _seed_drift_response_plan(models_dir: Path) -> None:
 
 
 def _seed_retrain_plan(models_dir: Path) -> None:
-    """Create a benign 'plan empty' retrain JSON for CI rendering."""
     ensure_dir(models_dir)
     jpath = models_dir / "retrain_plan.json"
     if jpath.exists():
         return
-    now = _now_utc()
     plan = {
-        "generated_at": _iso(now),
+        "generated_at": _iso(_now_utc()),
         "action_mode": os.getenv("MW_RETRAIN_ACTION", "dryrun"),
         "candidates": [],
         "demo": True,
@@ -105,10 +92,8 @@ def _seed_retrain_plan(models_dir: Path) -> None:
 
 
 # --------------------------
-# NEW: Seed CI stub artifacts for upload globs (demo-friendly)
+# CI stub artifacts (keep upload globs happy)
 # --------------------------
-
-# minimal valid 1x1 PNG (black) to avoid matplotlib dependency
 _PNG_1x1_BYTES = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
     b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0bIDAT\x08\xd7c`\x00\x00"
@@ -116,7 +101,6 @@ _PNG_1x1_BYTES = (
 )
 
 def _write_png_placeholder(path: Path, title_text: str = "") -> None:
-    """Write a tiny valid PNG. If matplotlib is available, write a labeled plot; else 1x1 PNG."""
     try:
         import matplotlib
         matplotlib.use("Agg", force=True)
@@ -135,14 +119,10 @@ def _write_png_placeholder(path: Path, title_text: str = "") -> None:
     ensure_dir(path.parent)
     path.write_bytes(_PNG_1x1_BYTES)
 
+
 def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Path) -> None:
-    """
-    Seed placeholder files so upload steps succeed in demo/no-upstream contexts.
-    Only writes files that are missing.
-    """
     ensure_dir(models_dir); ensure_dir(artifacts_dir); ensure_dir(logs_dir)
 
-    # JSON/JSONL stubs
     cal_per_origin = models_dir / "calibration_per_origin.json"
     if not cal_per_origin.exists():
         cal_per_origin.write_text(json.dumps({
@@ -178,7 +158,7 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
             "meta": {"note": "seeded for CI uploads"}
         }) + "\n")
 
-    # PNG stubs matching upload globs
+    # minimal plots
     _write_png_placeholder(artifacts_dir / "reddit_activity_demo.png", "reddit activity (demo)")
     _write_png_placeholder(artifacts_dir / "reddit_bursts_demo.png", "reddit bursts (demo)")
     _write_png_placeholder(artifacts_dir / "retrain_eval_demo.png", "retrain eval (demo)")
@@ -189,20 +169,12 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
 
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
-    """
-    Create a tiny versioned directory so the workflow's 'models/<version>/**' upload
-    always finds at least one file during demo runs.
-    Never overwrites real artifacts.
-    """
     vdir = ensure_dir(models_dir / version)
-    # if real model files already exist, do nothing
     has_real = any((vdir / name).exists() for name in (
         "model.joblib", "model.meta.json", "README.txt", "README.md"
     ))
     if has_real:
         return
-
-    # write a minimal README and a tiny meta to make the bundle useful in audits
     readme = vdir / "README.txt"
     meta = vdir / "stub.meta.json"
     now = _now_utc()
@@ -221,9 +193,8 @@ def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> Non
 
 
 # --------------------------
-# Build demo summary markdown
+# Context + output
 # --------------------------
-
 @dataclass
 class _Ctx(SummaryContext):
     logs_dir: Path
@@ -242,36 +213,34 @@ def _write_md(md_lines: List[str], out_path: Path) -> None:
 
 
 def main() -> None:
-    # workspace paths
     root = Path(".").resolve()
     models = root / "models"
     logs = root / "logs"
     arts = Path(os.getenv("ARTIFACTS_DIR", str(root / "artifacts")))
     ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
 
-    # demo flag
-    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
-
-    # ensure governance artifacts exist for CI rendering (benign if present)
+    # Seed benign artifacts
     _seed_drift_response_plan(models)
     _seed_retrain_plan(models)
-
-    # Seed stub artifacts so upload globs always match (demo/no-upstream)
     _seed_ci_stub_artifacts(models, arts, logs)
 
-    # ensure versioned bundle exists in demo to satisfy models/v0.5.1/** upload
+    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     if demo:
         _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
-    # assemble markdown
+    # Build sections — DO NOT add any extra headers here.
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
 
-    # DO NOT prepend any header here — header_overview owns the top block
-    all_lines = md_lines + ["Job summary generated at run-time"]
+    # Fallback header only if header_overview wasn’t available/added
+    if not any(line.startswith("MoonWire Demo Summary") or line.startswith("MoonWire CI Demo Summary")
+               for line in md_lines):
+        md_lines.insert(0, "MoonWire CI Demo Summary")
 
-    # write to artifacts
-    _write_md(all_lines, arts / "demo_summary.md")
+    # trailing footer
+    md_lines.append("Job summary generated at run-time")
+
+    _write_md(md_lines, arts / "demo_summary.md")
 
 
 if __name__ == "__main__":
