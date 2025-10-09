@@ -27,13 +27,11 @@ from typing import List, Dict, Any, Tuple
 from pathlib import Path
 import os
 import json
-import math
 from datetime import datetime, timezone
 
-# Use the shared helpers/types without importing optional sections to avoid cycles
 from scripts.summary_sections.common import SummaryContext, ensure_dir
 
-# --- plotting (headless) ---
+# plotting (headless)
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -279,8 +277,8 @@ def append(md: List[str], ctx: SummaryContext) -> None:
     # PNG artifact (required by tests)
     _write_actions_plot(actions, str(arts / "model_governance_actions.png"))
 
-    # Markdown block (concise)
-    md.append("\n🧭 Model Governance Actions (72h)")
+    # Markdown block (concise) — NO leading newline to satisfy tests
+    md.append("🧭 Model Governance Actions (72h)")
     if not actions:
         md.append("no actions proposed")
     else:
