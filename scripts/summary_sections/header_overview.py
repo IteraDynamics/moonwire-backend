@@ -1,61 +1,99 @@
 # scripts/summary_sections/header_overview.py
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from .common import SummaryContext, _iso
 
 
-def _now() -> datetime:
+@dataclass
+class _Rev:
+    id: str
+    origin: str = "reddit"
+    score: float = 0.0
+    label: str = "very low"
+
+
+def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _env_bool(key: str, default: bool = False) -> bool:
+    v = os.getenv(key)
+    if v is None:
+        return default
+    return str(v).lower() in ("1", "true", "yes", "y", "on")
+
+
+def _demo_reviewers_if_needed(reviewers: Optional[Iterable[Dict[str, Any]]]) -> List[_Rev]:
+    """
+    In demo mode, if no reviewers are provided, synthesize 3 stable reviewers.
+    Keep deterministic IDs so tests and CI snapshots are stable.
+    """
+    if reviewers:
+        out: List[_Rev] = []
+        for r in reviewers:
+            out.append(_Rev(
+                id=str(r.get("id", "rev_unknown")),
+                origin=str(r.get("origin", "reddit")),
+                score=float(r.get("score", 0.0)),
+                label=str(r.get("label", "very low")),
+            ))
+        return out
+
+    if not (_env_bool("DEMO_MODE") or _env_bool("MW_DEMO")):
+        return []
+
+    # deterministic demo reviewers
+    return [
+        _Rev(id="rev_demo_1", origin="reddit",  score=0.12, label="very low"),
+        _Rev(id="rev_demo_2", origin="rss_news", score=0.09, label="very low"),
+        _Rev(id="rev_demo_3", origin="twitter", score=0.11, label="very low"),
+    ]
 
 
 def append(
     md: List[str],
     ctx: SummaryContext,
     *,
-    reviewers: List[Dict[str, Any]] | None = None,
+    reviewers: Optional[Iterable[Dict[str, Any]]] = None,
     threshold: float = 0.5,
     sig_id: str = "demo",
-    triggered_log: List[Dict[str, Any]] | None = None,  # accepted for test compatibility
-    **_ignore: Any,  # future-proof: accept & ignore any extra kwargs
+    triggered_log: Optional[Iterable[Dict[str, Any]]] = None,  # accepted and ignored for compatibility
 ) -> None:
     """
-    Header/overview block. Keyword-only args have sane defaults so accidental
-    positional calls don't crash CI. Also guarded to emit ONCE.
+    Overview header for the CI summary.
+    IMPORTANT: We DO NOT emit an H1 title here to avoid duplicate headers because the
+    GitHub job step already shows an H1 like 'MoonWire CI Demo Summary'.
     """
-    # One-time guard to prevent duplicate headers if called multiple times.
-    if getattr(ctx, "caches", None) is not None:
-        if ctx.caches.get("did_header"):
-            return
-        ctx.caches["did_header"] = True
+    _ = ctx  # unused today; kept for signature stability
 
-    # Optional demo seeding handled elsewhere; remain resilient if nothing is passed.
-    revs = reviewers or []
-    n_unique = len({r.get("id") for r in revs if r.get("id")})
-    now_iso = _iso(_now())
+    ts = _iso(_now_utc())
 
-    # Title + concise pipeline proof line
-    md.append("MoonWire CI Demo Summary")
-    md.append(f"MoonWire Demo Summary — {now_iso}")
+    revs = _demo_reviewers_if_needed(reviewers)
+    uniq_count = len(revs)
+    combined_weight = 0.0  # placeholder; governance math lives elsewhere
+    triggered = False  # demo overview just shows proof of math, not actual trigger
+
+    # --- Header block (no top-level H1!) ---
+    md.append(f"MoonWire Demo Summary — {ts}")
     md.append("Pipeline proof (CI): end-to-end tests passed; consensus math reproduced on latest flagged signal.")
-    md.append(f"\t•\tSignal: **{sig_id}**")
-    md.append(f"\t•\tUnique reviewers: {n_unique}")
-    md.append("\t•\tCombined weight: 0.0")
-    md.append(f"\t•\tThreshold: {threshold} → NO TRIGGER")
+    md.append(f"• Signal: **{sig_id}**")
+    md.append(f"• Unique reviewers: {uniq_count}")
+    md.append(f"• Combined weight: {combined_weight:.1f}")
+    md.append(f"• Threshold: {threshold} → {'TRIGGER' if triggered else 'NO TRIGGER'}")
 
+    # Reviewers (redacted)
+    md.append("Reviewers (redacted):")
     if revs:
-        md.append("Reviewers (redacted):")
         for r in revs:
-            rid = r.get("id", "rev")
-            md.append(f"\t•\t**{rid}** → very low")
+            md.append(f"• **{r.id}** → {r.label}")
     else:
-        md.append("Reviewers (redacted):")
-        md.append("\t•\t(no reviewers)")
+        md.append("• (no reviewers)")
 
+    # Origin breakdown stub (kept compact; richer view lives in per-origin sections)
     md.append("Signal origin breakdown (last 7 days):")
-    md.append("\t•\tno origin data")
-
-    # `triggered_log` is intentionally ignored for now; kept for API compatibility.
-    _ = triggered_log  # silence linter
+    md.append("• no origin data")
