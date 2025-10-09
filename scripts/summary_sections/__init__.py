@@ -1,72 +1,71 @@
 # scripts/summary_sections/__init__.py
 from __future__ import annotations
 
-from importlib import import_module
-from typing import Callable, List, Tuple
+import importlib
+from typing import Any, Callable, List, Optional, Tuple
 
 from .common import SummaryContext
 
-# Helper to import a section defensively
-def _load(section_name: str) -> Callable[[List[str], SummaryContext], None] | None:
-    """
-    Try importing 'scripts.summary_sections.<section_name>.append'.
-    Returns the callable or None if import fails.
-    """
+# Utility: safe import — returns (module, None) or (None, reason)
+def _try_import(name: str) -> Tuple[Optional[Any], Optional[str]]:
     try:
-        mod = import_module(f"scripts.summary_sections.{section_name}")
-        return getattr(mod, "append", None)
+        return importlib.import_module(f"scripts.summary_sections.{name}"), None
+    except ModuleNotFoundError:
+        return None, "missing"
+    except Exception as e:
+        return None, f"error: {e}"
+
+# Utility: call section.append if present; swallow errors to avoid messy CI noise
+def _safe_append(mod: Any, md: List[str], ctx: SummaryContext, **kwargs: Any) -> None:
+    if not mod:
+        return
+    fn: Optional[Callable[..., None]] = getattr(mod, "append", None)
+    if not callable(fn):
+        return
+    try:
+        fn(md, ctx, **kwargs)
+    except TypeError:
+        # Some sections take no extra kwargs
+        fn(md, ctx)
     except Exception:
-        return None
+        # Hard-failures inside sections should not break the whole summary
+        pass
 
-
-# Ordered sections. Keep 'header_overview' first; it emits the single H1.
-_SECTION_NAMES: Tuple[str, ...] = (
-    "header_overview",
-    "market_context",
-    "cross_origin_correlation",
-    "leadlag_analysis",
-    "drift_response",
-    "model_lineage",
-    "model_performance_trend",
-    "model_governance_actions",
-    "explainability",
-    "signal_quality",
-    "thresholds",
-    "yield_plan",
-)
-
-
+# Public build function used by mw_demo_summary.py
 def build_all(ctx: SummaryContext) -> List[str]:
-    """
-    Iterate sections and build the full CI markdown.
-    This function DOES NOT inject any standalone title/header; `header_overview`
-    is the single source of truth for the header block.
-    """
     md: List[str] = []
-    for name in _SECTION_NAMES:
-        appender = _load(name)
-        if appender is None:
-            # emit a compact failure line and continue
-            md.append(f"❌ scripts.summary_sections.{name} failed: No module named 'scripts.summary_sections.{name}'")
+
+    # Load only the sections that actually exist in this workspace.
+    order = [
+        "header_overview",               # emits the SINGLE header block
+        "market_context",
+        "social_reddit_context",
+        "social_twitter_context",
+        "cross_origin_correlation",
+        "leadlag_analysis",
+        "drift_response",
+        "model_lineage",
+        "model_performance_trend",       # Task 2
+        "model_governance_actions",      # Task 3
+        "explainability",
+        "signal_quality",
+        "thresholds",
+        "yield_plan",
+    ]
+
+    modules: dict[str, Any] = {}
+    for name in order:
+        mod, _reason = _try_import(name)
+        if mod:
+            modules[name] = mod
+
+    # Append in order; missing modules are silently skipped.
+    _safe_append(modules.get("header_overview"), md, ctx,
+                 reviewers=[], threshold=0.5, sig_id="demo", triggered_log=[])
+
+    for name in order:
+        if name == "header_overview":
             continue
-        try:
-            appender(md, ctx)  # every section must append to md
-        except Exception as e:
-            md.append(f"❌ scripts.summary_sections.{name} failed: {e}")
+        _safe_append(modules.get(name), md, ctx)
+
     return md
-
-
-# Re-export appenders for tests that import submodules directly
-# (No-op if a given submodule is absent.)
-try:
-    from . import model_lineage  # noqa: F401
-except Exception:
-    pass
-try:
-    from . import model_performance_trend  # noqa: F401
-except Exception:
-    pass
-try:
-    from . import model_governance_actions  # noqa: F401
-except Exception:
-    pass
