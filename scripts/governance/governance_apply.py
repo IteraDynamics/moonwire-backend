@@ -9,7 +9,7 @@ Public API: append(md, ctx)
 """
 
 from __future__ import annotations
-import json, os, math, random
+import json, os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -92,7 +92,6 @@ def _guardrails_from_env() -> Guardrails:
 # --- metrics extraction from trend (best-effort; resilient) ---
 
 def _metrics_for_version(trend: Dict[str, Any], version: str) -> Dict[str, Any]:
-    # Try to locate a per-version block in trend; accept any keys present.
     for v in trend.get("versions", []):
         if str(v.get("version")) == str(version):
             return {
@@ -104,7 +103,6 @@ def _metrics_for_version(trend: Dict[str, Any], version: str) -> Dict[str, Any]:
                 "precision_trend": str(v.get("precision_trend","") or ""),
                 "ece_trend": str(v.get("ece_trend","") or ""),
             }
-    # Not found — return neutral metrics; demo/apply will still be guarded by defaults.
     return {
         "labels": 0, "precision": 0.0, "ece": 1.0,
         "precision_delta": 0.0, "ece_delta": 0.0,
@@ -151,7 +149,6 @@ def _parent_of(version: str, lineage: Dict[str, Any]) -> Optional[str]:
             return vs[idx-1]
     except ValueError:
         pass
-    # fallback: if not found, try previous by semantic sort? Keep simple.
     return vs[0] if vs else None
 
 # --- decision & application ---
@@ -191,11 +188,9 @@ def _apply_action(models_dir: Path, action: str, version: str, lineage: Dict[str
             _write_current_model(models_dir, parent)
             return True, parent
         return False, None
-    # observe → no change
     return False, None
 
 def _demo_seed(applied: List[Dict[str, Any]], skipped: List[Dict[str, Any]], have_any: bool) -> None:
-    # Guarantee at least one applied and one skipped in demo/dryrun contexts.
     if not have_any:
         applied.append({
             "version": "v0.7.7", "action":"promote",
@@ -208,7 +203,6 @@ def _demo_seed(applied: List[Dict[str, Any]], skipped: List[Dict[str, Any]], hav
         })
 
 def _make_reversal_plan() -> Dict[str, Any]:
-    # Simple, consistent plan
     return {
         "window_hours": 12,
         "trigger": "precision_regression|-0.02|any"
@@ -218,24 +212,22 @@ def _make_reversal_plan() -> Dict[str, Any]:
 
 def _plot_timeline(arts: Path, applied: List[Dict[str, Any]], skipped: List[Dict[str, Any]]) -> None:
     try:
-        import matplotlib.pyplot as plt  # matplotlib is standard in CI image
+        import matplotlib.pyplot as plt
         _ensure_dir(arts)
         xs: List[float] = []
         ys: List[float] = []
-        cs: List[str] = []
         labels: List[str] = []
 
-        # Plot with simple numeric timeline (index), no styles/colors specified
         i = 0
         for a in applied:
-            xs.append(i); ys.append(1.0); cs.append("applied"); labels.append(f"{a['action']}:{a['version']}")
+            xs.append(i); ys.append(1.0); labels.append(f"{a['action']}:{a['version']}")
             i += 1
         for s in skipped:
-            xs.append(i); ys.append(0.0); cs.append("skipped"); labels.append(f"{s['action']}:{s['version']}")
+            xs.append(i); ys.append(0.0); labels.append(f"{s['action']}:{s['version']}")
             i += 1
 
-        plt.figure()  # single plot
-        plt.scatter(xs, ys)  # default colors (no explicit color/style)
+        plt.figure()
+        plt.scatter(xs, ys)
         for x, y, lab in zip(xs, ys, labels):
             plt.text(x, y + 0.03, lab, fontsize=8, rotation=30)
         plt.yticks([0.0, 1.0], ["skipped", "applied"])
@@ -246,7 +238,6 @@ def _plot_timeline(arts: Path, applied: List[Dict[str, Any]], skipped: List[Dict
         plt.savefig(out)
         plt.close()
     except Exception:
-        # Best effort: create a tiny placeholder file so tests/CI can still pass existence checks
         out = arts / "governance_apply_timeline.png"
         _ensure_dir(arts)
         try:
@@ -262,20 +253,17 @@ def append(md: List[str], ctx: Any) -> None:
     Emits: models/governance_apply_result.json, logs/governance_apply.jsonl (append),
            artifacts/governance_apply_timeline.png, and a CI markdown block line.
     """
-    # Resolve dirs
     models = Path(getattr(ctx, "models_dir", "models") or "models")
     arts = Path(getattr(ctx, "artifacts_dir", "artifacts") or "artifacts")
     logs = Path(getattr(ctx, "logs_dir", "logs") or "logs")
     _ensure_dir(models); _ensure_dir(arts); _ensure_dir(logs)
 
-    # Inputs
     plan = _read_json(models / "model_governance_actions.json") or {}
     lineage = _read_json(models / "model_lineage.json") or {}
     trend = _read_json(models / "model_performance_trend.json") or {}
 
     actions = plan.get("actions", []) if isinstance(plan.get("actions"), list) else []
 
-    # Env / mode
     mode = (_env("MW_GOV_APPLY_MODE", "dryrun") or "dryrun").strip().lower()
     if mode not in ("dryrun","apply"):
         mode = "dryrun"
@@ -283,7 +271,6 @@ def append(md: List[str], ctx: Any) -> None:
 
     guards = _guardrails_from_env()
 
-    # Cooldown source
     ledger_path = logs / "governance_apply.jsonl"
     ledger_rows = _load_jsonl_latest(ledger_path)
 
@@ -292,31 +279,26 @@ def append(md: List[str], ctx: Any) -> None:
 
     current_before = _current_model(models_dir=models)
 
-    # Evaluate each recommended action
     for a in actions:
         ver = str(a.get("version") or "")
         act = str(a.get("action") or "")
         conf = float(a.get("confidence", 0.0) or 0.0)
 
-        # cooldown check
         hours_since = _last_action_hours(ledger_rows, ver)
         if hours_since is not None and hours_since < guards.cooldown_h:
             skipped.append({"version": ver, "action": act, "reason": ["cooldown"], "confidence": conf})
             continue
 
-        # guardrails
         metrics = _metrics_for_version(trend, ver)
         ok, reasons = _passes_guardrails(metrics, guards)
         if not ok:
             skipped.append({"version": ver, "action": act, "reason": reasons, "confidence": conf})
             continue
 
-        # observe never mutates, but we still count as "applied" decision
         if act == "observe":
             applied.append({"version": ver, "action": act, "reason": reasons, "confidence": conf})
             continue
 
-        # promote/rollback
         if mode == "apply":
             did, newv = _apply_action(models, act, ver, lineage)
             if did:
@@ -334,19 +316,15 @@ def append(md: List[str], ctx: Any) -> None:
                     "reasons": reasons,
                 })
             else:
-                skipped.append({"version": ver, "action": act, "reason": reasons + ["no_parent"] if act=="rollback" else reasons, "confidence": conf})
+                skipped.append({"version": ver, "action": act, "reason": reasons + (["no_parent"] if act=="rollback" else []), "confidence": conf})
         else:
-            # dryrun
             applied.append({"version": ver, "action": act, "reason": reasons, "confidence": conf})
 
-    # Demo guarantee
     if demo:
         _demo_seed(applied, skipped, have_any=bool(applied))
 
-    # Reversal plan
     reversal = _make_reversal_plan()
 
-    # Write result JSON
     result = {
         "generated_at": _iso(),
         "mode": mode,
@@ -358,14 +336,8 @@ def append(md: List[str], ctx: Any) -> None:
     }
     (models / "governance_apply_result.json").write_text(json.dumps(result, indent=2))
 
-    # Plot artifact
     _plot_timeline(arts, applied, skipped)
 
-    # CI markdown line
-    # Example:
-    # 🧭 Governance Apply (72 h, mode: dryrun)
-    # applied: v0.7.7 promote (0.91) | skipped: v0.7.5 rollback [cooldown]
-    # reversal plan: monitor 12 h for precision regression ≥ 0.02
     def _fmt_applied() -> str:
         if not applied:
             return "none"
@@ -376,6 +348,7 @@ def append(md: List[str], ctx: Any) -> None:
             return "none"
         return ", ".join(f"{x['version']} {x['action']} [{','.join(x.get('reason',[]))}]" for x in skipped)
 
-    md.append("\n🧭 Governance Apply (72 h, mode: %s)" % mode)
+    # IMPORTANT: no leading newline so tests can match startswith("🧭 Governance Apply")
+    md.append("🧭 Governance Apply (72 h, mode: %s)" % mode)
     md.append(f"applied: {_fmt_applied()} | skipped: {_fmt_skipped()}")
     md.append(f"reversal plan: monitor {reversal['window_hours']} h for precision regression ≥ 0.02")
