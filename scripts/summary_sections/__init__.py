@@ -16,6 +16,8 @@ cross_origin_analysis=_try("cross_origin_analysis")
 drift_response=_try("drift_response")
 model_lineage=_try("model_lineage")
 model_performance_trend=_try("model_performance_trend")
+# 👇 Minimal integration: governance section (wrapper)
+model_governance_actions=_try("model_governance_actions")
 retrain_automation=_try("retrain_automation")
 trigger_explainability=_try("trigger_explainability")
 
@@ -47,6 +49,8 @@ def build_all(ctx:SummaryContext)->List[str]:
     _maybe(drift_response,md,ctx,"Automated Drift Response")
     _maybe(model_lineage,md,ctx,"Model Lineage & Provenance")
     _maybe(model_performance_trend,md,ctx,"Model Performance Trends")
+    # 👇 Insert governance right after performance trend
+    _maybe(model_governance_actions,md,ctx,"Model Governance Actions")
     _maybe(retrain_automation,md,ctx,"Retrain Automation")
     _maybe(trigger_explainability,md,ctx,"Trigger Explainability")
     for m in OPTIONAL: _maybe(m,md,ctx,m.__name__)
