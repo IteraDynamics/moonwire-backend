@@ -12,6 +12,17 @@ from typing import Any, Dict, List, Tuple
 from scripts.summary_sections import build_all
 from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
 
+# --- NEW: Optional governance modules (safe import, no hard dependency) ---
+try:
+    from scripts.governance import governance_apply as _gov_apply
+except Exception:
+    _gov_apply = None
+
+try:
+    from scripts.governance import bluegreen_promotion as _bg_sim
+except Exception:
+    _bg_sim = None
+
 
 # --------------------------
 # Demo data seed (kept stable for tests)
@@ -284,6 +295,19 @@ def main() -> None:
     # assemble markdown via section registry (includes Model Lineage + Performance Trend)
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
+
+    # --- NEW: Append governance apply + blue-green simulation, in that order ---
+    if _gov_apply and hasattr(_gov_apply, "append"):
+        try:
+            _gov_apply.append(md_lines, ctx)
+        except Exception as e:
+            md_lines.append(f"> ❌ Governance Apply failed: {e}")
+
+    if _bg_sim and hasattr(_bg_sim, "append"):
+        try:
+            _bg_sim.append(md_lines, ctx)
+        except Exception as e:
+            md_lines.append(f"> ❌ Blue-Green Promotion Simulation failed: {e}")
 
     # prepend a simple header so the CI block has a title
     header = ["MoonWire CI Demo Summary"]
