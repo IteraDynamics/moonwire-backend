@@ -9,8 +9,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 # Summary sections entrypoint
-from scripts.summary_sections import build_all, governance_alerts
+from scripts.summary_sections import build_all
 from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
+
+# Explicit post-registry integrations (do NOT duplicate Governance Apply)
+try:
+    # Task 2
+    from scripts.governance.bluegreen_promotion import append as bluegreen_append
+except Exception:  # keep CI resilient
+    bluegreen_append = None
+
+try:
+    # Task 3
+    from scripts.governance.governance_alerts import run_alerts as governance_run_alerts
+except Exception:
+    governance_run_alerts = None
+
 
 # --------------------------
 # Demo data seed (kept stable for tests)
@@ -104,7 +118,7 @@ def _seed_retrain_plan(models_dir: Path) -> None:
 
 
 # --------------------------
-# NEW: Seed CI stub artifacts for upload globs (demo-friendly)
+# CI stub artifacts (demo-friendly)
 # --------------------------
 
 # minimal valid 1x1 PNG (black) to avoid matplotlib dependency
@@ -200,6 +214,10 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
     # Nice-to-have: model lineage graph placeholder (if the lineage module didn’t run)
     _write_png_placeholder(artifacts_dir / "model_lineage_graph.png", "model lineage (demo)")
 
+    # Task 2: Blue-Green visuals placeholders (only if modules don't produce them)
+    _write_png_placeholder(artifacts_dir / "bluegreen_timeline.png", "blue-green timeline (demo)")
+    _write_png_placeholder(artifacts_dir / "bluegreen_comparison_demo.png", "blue-green compare (demo)")
+
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
     """
@@ -254,6 +272,35 @@ def _write_md(md_lines: List[str], out_path: Path) -> None:
     out_path.write_text("\n".join(md_lines))
 
 
+def _maybe_append_bluegreen(md: List[str], ctx: SummaryContext) -> None:
+    """Call Blue-Green Simulation safely and append a clear failure line if it errors."""
+    if bluegreen_append is None:
+        md.append("❌ Blue-Green Promotion Simulation failed: module not available")
+        return
+    try:
+        bluegreen_append(md, ctx)
+    except Exception as e:
+        md.append(f"❌ Blue-Green Promotion Simulation failed: {e}")
+
+
+def _maybe_run_alerts(md: List[str], ctx: SummaryContext) -> None:
+    """Run Governance Alerts safely and reflect outcome in the CI markdown."""
+    if governance_run_alerts is None:
+        md.append("❌ Governance Alerts failed: module not available")
+        return
+    try:
+        # run_alerts(ctx) returns a small list of lines when in print mode; if not, we still add a header
+        lines = governance_run_alerts(ctx)  # spec: returns lines or None
+        if isinstance(lines, list) and lines:
+            md.extend(lines)
+        else:
+            # If module chose to print/send only, still show a minimal header
+            md.append("📣 Governance Alerts (72 h)")
+            md.append("• Mode: print")
+    except Exception as e:
+        md.append(f"❌ Governance Alerts failed: {e}")
+
+
 def main() -> None:
     # workspace paths
     root = Path(".").resolve()
@@ -268,6 +315,8 @@ def main() -> None:
         _seed_drift_response_plan(models)
         _seed_retrain_plan(models)
     else:
+        # Even in non-demo, write harmless stubs if completely missing,
+        # so CI summary won’t show “no plan available”.
         _seed_drift_response_plan(models)
         _seed_retrain_plan(models)
 
@@ -278,18 +327,15 @@ def main() -> None:
     if demo:
         _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
-    # assemble markdown via section registry (includes Governance Apply + Blue-Green)
+    # assemble markdown via section registry
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
 
-    # NEW (v0.8.2): Run governance alerts after Blue-Green simulation
-    try:
-        if governance_alerts and hasattr(governance_alerts, "run_alerts"):
-            alert_lines = governance_alerts.run_alerts(ctx)
-            if isinstance(alert_lines, list) and alert_lines:
-                md_lines.extend(alert_lines)
-    except Exception as e:
-        md_lines.append(f"\n> ❌ Governance Alerts failed: {e}")
+    # 🔵🟢 Always invoke Blue-Green Simulation after the registry sections
+    _maybe_append_bluegreen(md_lines, ctx)
+
+    # 📣 Always run Governance Alerts after Blue-Green
+    _maybe_run_alerts(md_lines, ctx)
 
     # prepend a simple header so the CI block has a title
     header = ["MoonWire CI Demo Summary"]
