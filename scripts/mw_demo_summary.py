@@ -348,6 +348,8 @@ def main() -> None:
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
     print(f"DEBUG: Full md_lines content: {md_lines}")  # Debug: Full content
+    if not md_lines:
+        print("DEBUG: WARNING - md_lines is empty, check build_all(ctx) in summary_sections/__init__.py")
     # Dedupe headers and footers
     deduped_lines = []
     seen = set()
