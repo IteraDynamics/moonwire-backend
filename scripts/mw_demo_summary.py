@@ -210,6 +210,7 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
 
     # Nice-to-have: model lineage graph placeholder (if the lineage module didn’t run)
     _write_png_placeholder(artifacts_dir / "model_lineage_graph.png", "model lineage (demo)")
+    _write_png_placeholder(artifacts_dir / "signal_quality_by_version_72h.png", "signal quality trend (demo)")
 
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
@@ -262,34 +263,49 @@ class _Ctx(SummaryContext):
 
 def _write_md(md_lines: List[str], out_path: Path) -> None:
     ensure_dir(out_path.parent)
+    # Dedupe and enhance
+    seen = set()
     enhanced_lines = ["🌙 MoonWire CI Demo Summary", "---"]
-    # New Overview
+    # Overview
     enhanced_lines.append("### 🚀 Overview")
     enhanced_lines.append(f"📊 Version: v0.8.2 | Run: 🟢 All checks passed")
     enhanced_lines.append(f"[View Artifacts](https://github.com/MoonWireCEO/moonwire-backend/actions/runs/${{ github.run_id }})")
     enhanced_lines.append("---")
-    for line in md_lines:
-        if line.startswith("### "):
-            # Preserve original headers, enhance with rocket
-            enhanced_lines.append(f"### 🚀 {line[4:]}")
-        elif any(kw in line.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
-            enhanced_lines.append(f"📊 {line}")  # Add chart for metrics
-        elif "|" in line:
-            enhanced_lines.append(line.replace("|", "│"))  # Tweak pipes for better render
-        elif "raw logs" in line.lower():
-            # Find log content until next header or end
-            log_start = md_lines.index(line) + 1
-            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
-            log_content = "\n".join(md_lines[log_start:log_end])
-            enhanced_lines.append(f"### 🚀 Raw Logs")
-            enhanced_lines.append("📋 Detailed logs from this run—click to expand.")
-            enhanced_lines.append("<details><summary>Expand Logs</summary>")
-            enhanced_lines.append(f"\n{log_content}\n")
-            enhanced_lines.append("</details>")
-            enhanced_lines.append("---")
-        else:
-            enhanced_lines.append(line)
-    enhanced_lines.extend(["---", "Job summary generated at run-time",
+    # Process sections in desired order
+    for section in ["Model Performance Trends", "Drift Response", "Automated Drift Response", "Social Context", "Raw Logs"]:
+        for i, line in enumerate(md_lines):
+            if line.startswith(f"### {section}") and f"### {section}" not in seen:
+                seen.add(f"### {section}")
+                enhanced_lines.append(f"### 🚀 {section}")
+                # Capture content until next header or end
+                content_start = i + 1
+                content_end = next((j for j in range(content_start, len(md_lines)) if md_lines[j].startswith("### ")), len(md_lines))
+                content = md_lines[content_start:content_end]
+                for c in content:
+                    if any(kw in c.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
+                        enhanced_lines.append(f"📊 {c}")
+                    elif "|" in c:
+                        enhanced_lines.append(c.replace("|", "│"))  # Tweak pipes
+                    elif c.strip().startswith("visuals:") or "png" in c.lower():
+                        # Replace with proper artifact URL
+                        img_path = c.lower().split()[-1].replace("/home/runner/work/moonwire-backend/moonwire-backend/", "https://github.com/MoonWireCEO/moonwire-backend/raw/main/")
+                        enhanced_lines.append(f"![{section} Visual]({img_path})")
+                    else:
+                        enhanced_lines.append(c)
+                enhanced_lines.append("---")
+            elif "raw logs" in line.lower() and "Raw Logs" not in seen:
+                seen.add("Raw Logs")
+                log_start = md_lines.index(line) + 1
+                log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
+                log_content = "\n".join(md_lines[log_start:log_end])
+                enhanced_lines.append(f"### 🚀 Raw Logs")
+                enhanced_lines.append("📋 Detailed logs from this run—click to expand.")
+                enhanced_lines.append("<details><summary>Expand Logs</summary>")
+                enhanced_lines.append(f"\n{log_content}\n")
+                enhanced_lines.append("</details>")
+                enhanced_lines.append("---")
+    # Append footer once
+    enhanced_lines.extend(["Job summary generated at run-time",
                          "**Status: 🟢 All checks passed** | [Full Repo](https://github.com/MoonWireCEO/moonwire-backend) | Powered by MoonWire v0.8.2"])
     out_path.write_text("\n".join(enhanced_lines))
 
