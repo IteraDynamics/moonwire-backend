@@ -347,6 +347,7 @@ def main() -> None:
     # assemble markdown via section registry
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
+    print(f"DEBUG: Full md_lines content: {md_lines}")  # Debug: Full content
     # Dedupe headers and footers
     deduped_lines = []
     seen = set()
@@ -355,7 +356,7 @@ def main() -> None:
             deduped_lines.append(line)
             seen.add(line)
     # Combine
-    header = ["MoonWire CI Demo Summary"]
+    header = ["🌙 MoonWire CI Demo Summary"]
     all_lines = header + deduped_lines + ["Job summary generated at run-time"]
     _write_md(all_lines, arts / "demo_summary.md")
 
