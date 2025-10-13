@@ -21,13 +21,14 @@ def _try_import_notifications():
     except Exception:
         return None
 
-# NEW: best-effort import for the v0.8.4 dashboard builder
+# >>> NEW: lazy import for the governance dashboard builder
 def _try_import_dashboard():
     try:
         from scripts.dashboard.governance_dashboard import build_dashboard
         return build_dashboard
     except Exception:
         return None
+# <<< NEW
 
 # --------------------------
 # Demo data seed (kept stable for tests)
@@ -342,15 +343,16 @@ def main() -> None:
             # fail-safe: CI summary should still render
             pass
 
-    # NEW: build dashboard artifacts (best-effort)
+    # >>> NEW: build the Governance Dashboard artifacts (best-effort)
     run_dashboard = _try_import_dashboard()
     if run_dashboard:
         try:
-            ctx_side = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
-            run_dashboard(ctx_side)
+            ctx_side_dash = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
+            run_dashboard(ctx_side_dash)
         except Exception:
-            # fail-safe: summary still renders even if dashboard build fails
+            # fail-safe: do not break CI summary rendering
             pass
+    # <<< NEW
 
     # assemble markdown via section registry
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
