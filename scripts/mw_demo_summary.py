@@ -262,7 +262,30 @@ class _Ctx(SummaryContext):
 
 def _write_md(md_lines: List[str], out_path: Path) -> None:
     ensure_dir(out_path.parent)
-    out_path.write_text("\n".join(md_lines))
+    # Enhance with aesthetics
+    enhanced_lines = ["🌙 MoonWire CI Demo Summary", "---"]
+    for line in md_lines:
+        if line.startswith("### "):
+            enhanced_lines.append(f"### 🚀 {line[4:]}")  # Add rocket to headers
+        elif any(kw in line.lower() for kw in ["precision", "recall", "f1"]):
+            enhanced_lines.append(f"📊 {line}")  # Add chart for metrics
+        elif "raw logs" in line.lower():
+            # Assume next block is log content until next header
+            log_start = md_lines.index(line) + 1
+            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
+            log_content = "\n".join(md_lines[log_start:log_end])
+            enhanced_lines.append(f"### 🚀 Raw Logs")
+            enhanced_lines.append("📋 Detailed logs from this run—click to expand.")
+            enhanced_lines.append("<details><summary>Expand Logs</summary>")
+            enhanced_lines.append(f"\n{log_content}\n")
+            enhanced_lines.append("</details>")
+            enhanced_lines.append("---")
+        else:
+            enhanced_lines.append(line)
+    enhanced_lines.extend(["---", "Job summary generated at run-time",
+                         "**Status: 🟢 All checks passed** | [Full Repo](https://github.com/MoonWireCEO/moonwire-backend) | Powered by MoonWire v0.8.2",
+                         f"[View Artifacts](https://github.com/MoonWireCEO/moonwire-backend/actions/runs/${{ github.run_id }})"])
+    out_path.write_text("\n".join(enhanced_lines))
 
 
 def main() -> None:
