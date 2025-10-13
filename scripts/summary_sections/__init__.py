@@ -10,6 +10,7 @@ def _try(name: str):
     except Exception:
         return None
 
+# Core sections (unchanged behavior)
 market_context = _try("market_context")
 social_context_reddit = _try("social_context_reddit")
 social_context_twitter = _try("social_context_twitter")
@@ -21,22 +22,23 @@ model_performance_trend = _try("model_performance_trend")
 retrain_automation = _try("retrain_automation")
 trigger_explainability = _try("trigger_explainability")
 
-# v0.8.0
-governance_apply = _try("../governance/governance_apply") or _try("governance_apply")
-# v0.8.1
-bluegreen_promotion = _try("../governance/bluegreen_promotion") or _try("bluegreen_promotion")
-# v0.8.2 (alerts are run from mw_demo_summary, not as a section)
-governance_alerts = _try("../governance/governance_alerts") or _try("governance_alerts")
-
-OPTIONAL = []
+# Optional sections (loaded if present)
+OPTIONAL: List[object] = []
 for name in (
     "signal_quality_per_version",
     "threshold_quality_per_origin",
     "threshold_recommendations",
     "threshold_backtest",
     "threshold_auto_apply",
+    # keep header optional / not required by user right now
     "header_overview",
     "source_yield_plan",
+    # prior tasks:
+    "governance_apply_section",          # if you had a separate section module
+    "bluegreen_promotion_section",       # if you had a separate section module
+    "governance_alerts_section",         # if you had a separate section module
+    # NEW in v0.8.3:
+    "governance_notifications_section",
 ):
     m = _try(name)
     if m:
@@ -62,16 +64,9 @@ def build_all(ctx: SummaryContext) -> List[str]:
     _maybe(drift_response, md, ctx, "Automated Drift Response")
     _maybe(model_lineage, md, ctx, "Model Lineage & Provenance")
     _maybe(model_performance_trend, md, ctx, "Model Performance Trends")
-
-    # Governance features
-    if governance_apply:
-        _maybe(governance_apply, md, ctx, "Governance Apply")
-    if bluegreen_promotion:
-        _maybe(bluegreen_promotion, md, ctx, "Blue-Green Promotion Simulation")
-
     _maybe(retrain_automation, md, ctx, "Retrain Automation")
     _maybe(trigger_explainability, md, ctx, "Trigger Explainability")
-
+    # Optional, including NEW notifications section
     for m in OPTIONAL:
         _maybe(m, md, ctx, m.__name__)
     return md
@@ -81,8 +76,4 @@ __all__ = [
     "build_all",
     "model_performance_trend",
     "model_lineage",
-    # Expose governance modules (alerts are invoked from mw_demo_summary)
-    "governance_apply",
-    "bluegreen_promotion",
-    "governance_alerts",
 ]
