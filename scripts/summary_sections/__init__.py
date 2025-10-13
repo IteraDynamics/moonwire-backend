@@ -10,35 +10,33 @@ def _try(name: str):
     except Exception:
         return None
 
-# Core sections (unchanged behavior)
-market_context = _try("market_context")
-social_context_reddit = _try("social_context_reddit")
-social_context_twitter = _try("social_context_twitter")
-cross_origin_correlation = _try("cross_origin_correlation")
-cross_origin_analysis = _try("cross_origin_analysis")
-drift_response = _try("drift_response")
-model_lineage = _try("model_lineage")
-model_performance_trend = _try("model_performance_trend")
-retrain_automation = _try("retrain_automation")
-trigger_explainability = _try("trigger_explainability")
+# Core sections
+market_context            = _try("market_context")
+social_context_reddit     = _try("social_context_reddit")
+social_context_twitter    = _try("social_context_twitter")
+cross_origin_correlation  = _try("cross_origin_correlation")
+cross_origin_analysis     = _try("cross_origin_analysis")
+drift_response            = _try("drift_response")
+model_lineage             = _try("model_lineage")
+model_performance_trend   = _try("model_performance_trend")
+retrain_automation        = _try("retrain_automation")
+trigger_explainability    = _try("trigger_explainability")
 
-# Optional sections (loaded if present)
-OPTIONAL: List[object] = []
+# Governance features
+governance_apply          = _try("governance_apply")              # v0.8.0
+bluegreen_promotion       = _try("bluegreen_promotion")           # v0.8.1
+governance_alerts_section = _try("governance_alerts_section")     # v0.8.2 (markdown-only)
+governance_notifications_section = _try("governance_notifications_section")  # v0.8.3 (markdown-only)
+
+OPTIONAL = []
 for name in (
     "signal_quality_per_version",
     "threshold_quality_per_origin",
     "threshold_recommendations",
     "threshold_backtest",
     "threshold_auto_apply",
-    # keep header optional / not required by user right now
     "header_overview",
     "source_yield_plan",
-    # prior tasks:
-    "governance_apply_section",          # if you had a separate section module
-    "bluegreen_promotion_section",       # if you had a separate section module
-    "governance_alerts_section",         # if you had a separate section module
-    # NEW in v0.8.3:
-    "governance_notifications_section",
 ):
     m = _try(name)
     if m:
@@ -55,7 +53,7 @@ def _maybe(mod, md, ctx, title):
         md.append(f"\n> ❌ **{title}** failed: {e}")
 
 def build_all(ctx: SummaryContext) -> List[str]:
-    md: List[str] = []
+    md = []
     _maybe(market_context, md, ctx, "Market Context")
     _maybe(social_context_reddit, md, ctx, "Social Context — Reddit")
     _maybe(social_context_twitter, md, ctx, "Social Context — Twitter")
@@ -64,9 +62,16 @@ def build_all(ctx: SummaryContext) -> List[str]:
     _maybe(drift_response, md, ctx, "Automated Drift Response")
     _maybe(model_lineage, md, ctx, "Model Lineage & Provenance")
     _maybe(model_performance_trend, md, ctx, "Model Performance Trends")
+
+    # Governance stack in this order:
+    _maybe(governance_apply, md, ctx, "Governance Apply")
+    _maybe(bluegreen_promotion, md, ctx, "Blue-Green Promotion Simulation")
+    _maybe(governance_alerts_section, md, ctx, "Governance Alerts")
+    _maybe(governance_notifications_section, md, ctx, "Notifications")
+
     _maybe(retrain_automation, md, ctx, "Retrain Automation")
     _maybe(trigger_explainability, md, ctx, "Trigger Explainability")
-    # Optional, including NEW notifications section
+
     for m in OPTIONAL:
         _maybe(m, md, ctx, m.__name__)
     return md
