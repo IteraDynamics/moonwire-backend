@@ -1,308 +1,328 @@
 # scripts/dashboard/governance_dashboard.py
 from __future__ import annotations
 
+import base64
 import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Tuple
 
-# Reuse helpers from summary package if available
+# Reuse common helpers
 try:
-    from scripts.summary_sections.common import ensure_dir, _iso
-except Exception:  # very defensive: tiny local fallbacks
+    from scripts.summary_sections.common import ensure_dir, _iso  # type: ignore
+except Exception:  # fallback if common isn't available
     def ensure_dir(p: Path) -> Path:
         p.mkdir(parents=True, exist_ok=True)
         return p
-    def _iso(dt: Optional[datetime] = None) -> str:
-        return (dt or datetime.now(timezone.utc)).replace(microsecond=0).isoformat()
 
-# Tiny 1x1 PNG for guaranteed output (no matplotlib required)
-_PNG_1x1_BYTES = (
-    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0bIDAT\x08\xd7c`\x00\x00"
-    b"\x00\x02\x00\x01\x0e\xc2\x02\xbd\x00\x00\x00\x00IEND\xaeB`\x82"
-)
+    def _iso(dt: datetime) -> str:
+        return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-def _read_json(path: Path) -> Optional[Dict[str, Any]]:
+
+@dataclass
+class Ctx:
+    """Minimal context adapter (compatible with SummaryContext subset)."""
+    models_dir: Path
+    artifacts_dir: Path
+    logs_dir: Path | None = None
+    is_demo: bool = False
+
+
+# --------------------------
+# Utilities
+# --------------------------
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _read_json(path: Path) -> Any | None:
     try:
         if path.exists():
-            return json.loads(path.read_text() or "{}")
+            return json.loads(path.read_text())
     except Exception:
         pass
     return None
 
-def _trend_tag(v: Optional[float]) -> str:
-    if v is None:
-        return "unknown"
-    if v > 0.0:
-        return "improving"
-    if v < 0.0:
-        return "declining"
-    return "stable"
 
-def _safe(val, default):
-    return default if val is None else val
+def _fmt_pct(x: float | None) -> str:
+    if x is None:
+        return "—"
+    return f"{x:.0%}" if x <= 1 else f"{x:.2f}"
 
-def _inline_svg_spark(values) -> str:
-    """Very small inline sparkline (values normalized 0-1)."""
-    if not values:
-        return "<svg width='120' height='20'></svg>"
-    xs = list(range(len(values)))
-    vmin = min(values); vmax = max(values)
-    rng = (vmax - vmin) or 1.0
-    pts = []
-    for i, v in enumerate(values):
-        x = int(i * (120 / max(1, len(values) - 1)))
-        y = 18 - int(((v - vmin) / rng) * 16)
-        pts.append(f"{x},{y}")
-    return f"<svg width='120' height='20' xmlns='http://www.w3.org/2000/svg'><polyline fill='none' stroke='currentColor' stroke-width='2' points='{ ' '.join(pts) }' /></svg>"
 
-def _html_header(run_url: Optional[str], generated_at: str, window_h: int, badges: str) -> str:
-    run_link = f"<a href='{run_url}'>View CI Run</a>" if run_url else ""
-    return f"""
-<header>
-  <h1>MoonWire Governance Dashboard ({window_h}h)</h1>
-  <div class="sub">Generated {generated_at} UTC {('&middot; ' + run_link) if run_link else ''}</div>
-  <div class="badges">{badges}</div>
-</header>
-"""
-
-def _html_css() -> str:
-    return """
-<style>
-:root{--bg:#0f1115;--card:#161a22;--text:#e7edf3;--muted:#9fb0c3;--ok:#31c48d;--warn:#f59e0b;--crit:#ef4444;--link:#67a2f8}
-*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial}
-header{padding:20px;border-bottom:1px solid #232a36}
-h1{margin:0;font-size:20px}
-.sub{color:var(--muted);margin-top:6px}
-.badges span{display:inline-block;margin-right:8px;padding:2px 8px;border-radius:999px;background:#232a36;color:var(--muted);font-size:12px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;padding:14px}
-.card{background:var(--card);border:1px solid #232a36;border-radius:10px;padding:12px}
-.card h3{margin:0 0 8px 0;font-size:15px}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px}
-.kv div:nth-child(odd){color:var(--muted)}
-.pill{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #2a3242;color:var(--muted);font-size:12px}
-.pill.ok{color:var(--ok);border-color:var(--ok)}
-.pill.warn{color:var(--warn);border-color:var(--warn)}
-.pill.crit{color:var(--crit);border-color:var(--crit)}
-a{color:var(--link);text-decoration:none}
-.footer{padding:10px 14px;color:var(--muted)}
-.code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-table{width:100%;border-collapse:collapse}
-td,th{border-bottom:1px solid #232a36;padding:6px;text-align:left}
-.small{font-size:12px;color:var(--muted)}
-.row{display:flex;gap:8px;align-items:center}
-</style>
-"""
-
-def _html_tile_apply(apply: Dict[str, Any]) -> str:
-    mode = apply.get("mode","dryrun")
-    applied = int(apply.get("applied",0))
-    skipped = int(apply.get("skipped",0))
-    reversal = apply.get("reversal_plan","monitor 12h for precision regression ≥ 0.02")
-    return f"""
-<section class="card">
-  <h3>Governance Apply</h3>
-  <div class="kv">
-    <div>Mode</div><div><span class="pill">{mode}</span></div>
-    <div>Applied</div><div>{applied}</div>
-    <div>Skipped</div><div>{skipped}</div>
-    <div>Reversal Plan</div><div class="small">{reversal}</div>
-  </div>
-</section>
-"""
-
-def _html_tile_bg(bg: Dict[str, Any]) -> str:
-    cur = _safe(bg.get("current"), "v?.?.?")
-    cand = _safe(bg.get("candidate"), "v?.?.?")
-    cls = _safe(bg.get("classification"), "observe")
-    conf = bg.get("confidence")
-    df1 = bg.get("delta",{}).get("F1")
-    dece = bg.get("delta",{}).get("ECE")
-    pill_cls = "ok" if cls in ("promote_ready","promote") else ("crit" if cls=="rollback_risk" else "")
-    delta_txt = []
-    if df1 is not None: delta_txt.append(f"ΔF1 {'+' if df1>=0 else ''}{df1:.02f}")
-    if dece is not None: delta_txt.append(f"ΔECE {'+' if dece>=0 else ''}{dece:.02f}")
-    conf_txt = f"{conf:.2f}" if isinstance(conf,(int,float)) else "—"
-    return f"""
-<section class="card">
-  <h3>Blue-Green Simulation</h3>
-  <div class="kv">
-    <div>Path</div><div>{cur} → {cand}</div>
-    <div>Classification</div><div><span class="pill {pill_cls}">{cls}</span></div>
-    <div>Deltas</div><div>{', '.join(delta_txt) if delta_txt else '—'}</div>
-    <div>Confidence</div><div>{conf_txt}</div>
-  </div>
-</section>
-"""
-
-def _html_tile_trend(trend: Dict[str, Any]) -> str:
-    f1_trend = trend.get("f1_trend","stable")
-    ece_trend = trend.get("ece_trend","stable")
-    f1_svg = _inline_svg_spark(trend.get("f1_series",[0.4,0.5,0.55,0.57]))
-    ece_svg = _inline_svg_spark(trend.get("ece_series",[0.08,0.07,0.065,0.06]))
-    return f"""
-<section class="card">
-  <h3>Performance & Calibration</h3>
-  <div class="row"><span class="pill">{f1_trend}</span>{f1_svg}</div>
-  <div class="row"><span class="pill">{ece_trend}</span>{ece_svg}</div>
-</section>
-"""
-
-def _html_tile_alerts(alerts: Dict[str, Any]) -> str:
-    crit = int(alerts.get("critical",0))
-    info = int(alerts.get("info",0))
-    last = alerts.get("last",[])
-    rows = "".join(
-        f"<tr><td>{it.get('version','—')}</td><td>{it.get('type','—')}</td><td>{(it.get('conf') if it.get('conf') is not None else '—')}</td></tr>"
-        for it in last[:3]
-    ) or "<tr><td colspan='3' class='small'>no recent events</td></tr>"
-    return f"""
-<section class="card">
-  <h3>Alerts & Notifications</h3>
-  <div class="kv">
-    <div>Critical</div><div><span class="pill crit">{crit}</span></div>
-    <div>Info</div><div><span class="pill ok">{info}</span></div>
-  </div>
-  <table class="small"><thead><tr><th>Version</th><th>Type</th><th>Conf</th></tr></thead><tbody>{rows}</tbody></table>
-</section>
-"""
-
-def _write_html(out_html: Path, manifest: Dict[str, Any]) -> None:
-    ensure_dir(out_html.parent)
-    h = []
-    h.append("<!doctype html><meta charset='utf-8'><title>MoonWire Governance Dashboard</title>")
-    h.append(_html_css())
-    h.append(_html_header(
-        run_url=manifest.get("run_url"),
-        generated_at=manifest["generated_at"],
-        window_h=int(manifest.get("window_hours",72)),
-        badges="<span>static</span><span>CI artifact</span>" + ("<span>demo</span>" if manifest.get("demo") else "")
-    ))
-    tiles = manifest.get("sections",{})
-    h.append("<main class='grid'>")
-    h.append(_html_tile_apply(tiles.get("apply",{})))
-    h.append(_html_tile_bg(tiles.get("bluegreen",{})))
-    h.append(_html_tile_trend(tiles.get("trend",{})))
-    h.append(_html_tile_alerts(tiles.get("alerts",{})))
-    h.append("</main>")
-    h.append("<div class='footer small'>Raw artifacts available in CI &middot; Generated by MoonWire.</div>")
-    out_html.write_text("\n".join(h))
-
-def _write_png(out_png: Path) -> None:
-    # Always ensure a PNG exists; if no renderer, use 1x1.
-    ensure_dir(out_png.parent)
-    if not out_png.exists():
-        out_png.write_bytes(_PNG_1x1_BYTES)
-
-def _collect_inputs(models_dir: Path, logs_dir: Path) -> Dict[str, Any]:
-    data: Dict[str, Any] = {}
-    data["apply"] = _read_json(models_dir / "governance_apply_result.json") or {}
-    data["bg"] = _read_json(models_dir / "bluegreen_promotion.json") or {}
-    data["trend"] = _read_json(models_dir / "model_performance_trend.json") or {}
-    data["notif"] = _read_json(models_dir / "governance_notifications_digest.json") or {}
-    # Optional: last few governance actions from log
-    last_events = []
+def _inline_png_base64(fig) -> str:
+    """Return a data URI for a matplotlib figure. If matplotlib unavailable, return empty string."""
     try:
-        logp = logs_dir / "governance_apply.jsonl"
-        if logp.exists():
-            for line in logp.read_text().splitlines()[-5:]:
-                last_events.append(json.loads(line))
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+        fig.clf()
+        data = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{data}"
+    except Exception:
+        return ""
+
+
+def _mk_snapshot_png(summary: Dict[str, Any], out_png: Path) -> None:
+    """
+    Try to draw a tiny snapshot image using matplotlib. If mpl missing or fails,
+    write a minimal 1x1 PNG so artifact isn't empty.
+    """
+    if out_png.exists():
+        return  # never overwrite
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt  # type: ignore
+
+        ensure_dir(out_png.parent)
+        fig = plt.figure(figsize=(7.0, 3.8), dpi=150)
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+
+        # Compose quick glance text
+        apply_s = summary["sections"]["apply"]
+        bg_s = summary["sections"]["bluegreen"]
+        tr_s = summary["sections"]["trend"]
+        al_s = summary["sections"]["alerts"]
+
+        lines = [
+            "MoonWire Governance Dashboard — Snapshot",
+            f"Window: {summary.get('window_hours', 72)}h | Generated: {summary.get('generated_at')}",
+            "",
+            f"Apply: mode={apply_s.get('mode','-')} | applied {apply_s.get('applied',0)}, skipped {apply_s.get('skipped',0)}",
+            f"Blue-Green: {bg_s.get('current','?')} → {bg_s.get('candidate','?')} "
+            f"({bg_s.get('classification','?')}, conf={bg_s.get('confidence', '—')})",
+            f"Trend: F1 {tr_s.get('f1_trend','?')} | ECE {tr_s.get('ece_trend','?')}",
+            f"Alerts: critical {al_s.get('critical',0)}, info {al_s.get('info',0)}",
+        ]
+
+        y = 0.95
+        for ln in lines:
+            ax.text(0.02, y, ln, transform=ax.transAxes, va="top")
+            y -= 0.12
+
+        fig.tight_layout()
+        fig.savefig(str(out_png))
+        return
     except Exception:
         pass
-    data["gov_log_tail"] = last_events
-    return data
 
-def _build_manifest(ctx) -> Dict[str, Any]:
-    window_h = int(os.getenv("MW_DASH_WINDOW_H", "72") or "72")
-    run_url = os.getenv("GITHUB_RUN_URL")
-    now = _iso()
-    inputs = _collect_inputs(Path(ctx.models_dir), Path(ctx.logs_dir))
+    # 1x1 PNG fallback
+    _PNG_1x1_BYTES = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0bIDAT\x08\xd7c`\x00\x00"
+        b"\x00\x02\x00\x01\x0e\xc2\x02\xbd\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    ensure_dir(out_png.parent)
+    out_png.write_bytes(_PNG_1x1_BYTES)
 
-    # Apply section (derive counts with fallbacks)
-    apply_src = inputs["apply"] or {}
-    apply_manifest = {
-        "mode": apply_src.get("action_mode", "dryrun"),
-        "applied": len(apply_src.get("applied", [])) if isinstance(apply_src.get("applied"), list) else apply_src.get("applied", 0) or 0,
-        "skipped": len(apply_src.get("skipped", [])) if isinstance(apply_src.get("skipped"), list) else apply_src.get("skipped", 0) or 0,
-        "reversal_plan": (apply_src.get("reversal_plan") or "monitor 12h for precision regression ≥ 0.02"),
-    }
+
+def _compose_manifest(ctx: Ctx, run_url: str | None) -> Dict[str, Any]:
+    """
+    Build a manifest by reading available upstream files and degrading to demo placeholders.
+    """
+    models = ctx.models_dir
+
+    apply_j = _read_json(models / "governance_apply_result.json") or {}
+    bg_j = _read_json(models / "bluegreen_promotion.json") or {}
+    trend_j = _read_json(models / "model_performance_trend.json") or {}
+    notif_j = _read_json(models / "governance_notifications_digest.json") or {}
+
+    # Apply section
+    apply_mode = apply_j.get("action_mode") or apply_j.get("mode") or "dryrun"
+    applied = int(apply_j.get("applied", 0))
+    skipped = int(apply_j.get("skipped", 0))
 
     # Blue-green section
-    bg_src = inputs["bg"] or {}
-    bluegreen_manifest = {
-        "current": bg_src.get("current","v?.?.?"),
-        "candidate": bg_src.get("candidate","v?.?.?"),
-        "classification": bg_src.get("classification","observe"),
-        "confidence": bg_src.get("confidence", 0.80),
-        "delta": {
-            "F1": bg_src.get("delta",{}).get("F1"),
-            "ECE": bg_src.get("delta",{}).get("ECE"),
-        },
-    }
+    bg_current = (bg_j.get("current") or
+                  bg_j.get("current_version") or "v?.?.?")
+    bg_candidate = (bg_j.get("candidate") or
+                    bg_j.get("candidate_version") or "v?.?.?")
+    bg_class = (bg_j.get("classification") or
+                bg_j.get("decision") or "observe")
+    bg_conf = float(bg_j.get("confidence", 0.80)) if isinstance(bg_j.get("confidence", 0.80), (int, float)) else 0.80
 
-    # Trend section
-    t_src = inputs["trend"] or {}
-    f1_delta = t_src.get("delta",{}).get("F1")
-    ece_delta = t_src.get("delta",{}).get("ECE")
-    trend_manifest = {
-        "f1_trend": _trend_tag(f1_delta),
-        "ece_trend": _trend_tag(-ece_delta if ece_delta is not None else None),  # lower ECE is better
-        "f1_series": t_src.get("series",{}).get("F1") or [0.5,0.52,0.54,0.55],
-        "ece_series": t_src.get("series",{}).get("ECE") or [0.07,0.066,0.063,0.060],
-    }
+    # Trend
+    f1_trend = trend_j.get("f1_trend") or trend_j.get("f1_status") or "stable"
+    ece_trend = trend_j.get("ece_trend") or trend_j.get("ece_status") or "stable"
 
-    # Alerts section
-    n_src = inputs["notif"] or {}
-    alerts_manifest = {
-        "critical": len(n_src.get("critical", [])) if isinstance(n_src.get("critical"), list) else n_src.get("critical", 0) or 0,
-        "info": len(n_src.get("info", [])) if isinstance(n_src.get("info"), list) else n_src.get("info", 0) or 0,
-        "last": (n_src.get("critical", []) + n_src.get("info", []))[:3] if isinstance(n_src.get("critical", []), list) else [],
-    }
+    # Alerts
+    crit = len((notif_j or {}).get("critical", []))
+    info = len((notif_j or {}).get("info", []))
 
     manifest = {
-        "generated_at": now,
-        "window_hours": window_h,
+        "generated_at": _iso(_now_utc()),
+        "window_hours": int(os.getenv("MW_DASH_WINDOW_H", "72")),
         "run_url": run_url,
         "sections": {
-            "apply": apply_manifest,
-            "bluegreen": bluegreen_manifest,
-            "trend": trend_manifest,
-            "alerts": alerts_manifest,
+            "apply": {"mode": apply_mode, "applied": applied, "skipped": skipped},
+            "bluegreen": {
+                "current": bg_current,
+                "candidate": bg_candidate,
+                "classification": bg_class,
+                "confidence": round(bg_conf, 2),
+            },
+            "trend": {"f1_trend": f1_trend, "ece_trend": ece_trend},
+            "alerts": {"critical": crit, "info": info},
         },
-        "demo": bool(getattr(ctx, "is_demo", False)),
+        "demo": bool(ctx.is_demo),
     }
     return manifest
 
+
+def _render_html(manifest: Dict[str, Any], png_data_uri: str | None) -> str:
+    run_url = manifest.get("run_url")
+    wh = manifest.get("window_hours", 72)
+    gen = manifest.get("generated_at", "—")
+    sections = manifest["sections"]
+    a, b, t, al = sections["apply"], sections["bluegreen"], sections["trend"], sections["alerts"]
+
+    # inline CSS; no external deps
+    css = """
+    <style>
+      :root { --bg:#0b0f17; --card:#111827; --fg:#e5e7eb; --muted:#9ca3af; --acc:#06b6d4; --ok:#10b981; --warn:#f59e0b; --bad:#ef4444; }
+      body { background: var(--bg); color: var(--fg); font: 14px/1.45 -apple-system, BlinkMacSystemFont, Segoe UI, Inter, Roboto, Helvetica, Arial, sans-serif; margin: 0; }
+      .wrap { max-width: 980px; margin: 28px auto 48px; padding: 0 16px; }
+      h1 { font-size: 22px; margin: 0 0 10px; }
+      .meta { color: var(--muted); margin-bottom: 18px; }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px; }
+      .card { background: var(--card); border: 1px solid #1f2937; border-radius: 10px; padding: 12px 14px; }
+      .title { font-weight: 600; margin-bottom: 8px; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; margin-left: 8px; background: #1f2937; color: var(--muted); }
+      .pill.ok { color: #d1fae5; background: rgba(16,185,129,.16); border: 1px solid rgba(16,185,129,.35);}
+      .pill.warn { color: #fef3c7; background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.28);}
+      .pill.bad { color: #fee2e2; background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.28);}
+      table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+      td { padding: 4px 6px; border-top: 1px solid #1f2937; color: var(--fg); }
+      td.k { color: var(--muted); width: 42%; }
+      .footer { margin-top: 14px; color: var(--muted); }
+      a { color: var(--acc); text-decoration: none; }
+      img.snapshot { margin-top: 8px; max-width: 100%; border-radius: 8px; border: 1px solid #1f2937; display: block; }
+    </style>
+    """
+
+    def pill(cls: str, txt: str) -> str:
+        return f'<span class="pill {cls}">{txt}</span>'
+
+    # choose pill for bluegreen classification
+    cls = {"promote_ready": "ok", "observe": "warn", "rollback_risk": "bad"}.get(b.get("classification","observe"), "warn")
+
+    header = f"""
+    <div class="wrap">
+      <h1>MoonWire Governance Dashboard ({wh}h)</h1>
+      <div class="meta">
+        Generated <b>{gen}</b>
+        {"• <a href='"+run_url+"' target='_blank' rel='noopener'>View CI Run</a>" if run_url else ""}
+      </div>
+      <div class="grid">
+        <div class="card">
+          <div class="title">A. Governance Apply {pill('ok' if a.get('mode')=='apply' else 'warn', a.get('mode','-'))}</div>
+          <table>
+            <tr><td class="k">Applied</td><td>{a.get('applied',0)}</td></tr>
+            <tr><td class="k">Skipped</td><td>{a.get('skipped',0)}</td></tr>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="title">B. Blue-Green Simulation {pill(cls, b.get('classification','observe'))}</div>
+          <table>
+            <tr><td class="k">Current → Candidate</td><td>{b.get('current','?')} → {b.get('candidate','?')}</td></tr>
+            <tr><td class="k">Confidence</td><td>{b.get('confidence','—')}</td></tr>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="title">C. Performance & Calibration</div>
+          <table>
+            <tr><td class="k">F1 Trend</td><td>{t.get('f1_trend','—')}</td></tr>
+            <tr><td class="k">ECE Trend</td><td>{t.get('ece_trend','—')}</td></tr>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="title">D. Alerts & Notifications</div>
+          <table>
+            <tr><td class="k">Critical</td><td>{al.get('critical',0)}</td></tr>
+            <tr><td class="k">Info</td><td>{al.get('info',0)}</td></tr>
+          </table>
+        </div>
+      </div>
+      {"<img class='snapshot' alt='snapshot' src='"+png_data_uri+"'/>" if png_data_uri else ""}
+      <div class="footer">Artifacts generated by MoonWire CI. Open the PNG/HTML in the run’s artifacts list.</div>
+    </div>
+    """
+
+    return f"<!doctype html><html><head><meta charset='utf-8'>{css}</head><body>{header}</body></html>"
+
+
+# --------------------------
+# Public API
+# --------------------------
+
 def build_dashboard(ctx) -> Dict[str, Any]:
     """
-    Build a static HTML dashboard + PNG placeholder + manifest JSON.
-    Returns a dict with output paths (relative to repo root).
+    Build governance dashboard artifacts:
+      - HTML: artifacts/governance_dashboard.html
+      - PNG : artifacts/governance_dashboard.png
+      - JSON: models/governance_dashboard_manifest.json
+    Returns a small dict summary of file paths and counts.
     """
-    artifacts_dir = Path(getattr(ctx, "artifacts_dir", "artifacts"))
-    models_dir = Path(getattr(ctx, "models_dir", "models"))
-    logs_dir = Path(getattr(ctx, "logs_dir", "logs"))
+    # Normalize ctx to our local dataclass if needed
+    if not isinstance(ctx, Ctx):
+        ctx = Ctx(models_dir=Path(ctx.models_dir), artifacts_dir=Path(ctx.artifacts_dir), logs_dir=getattr(ctx, "logs_dir", None), is_demo=getattr(ctx, "is_demo", False))
 
-    ensure_dir(artifacts_dir); ensure_dir(models_dir)
+    arts = ensure_dir(Path(ctx.artifacts_dir))
+    models = ensure_dir(Path(ctx.models_dir))
 
-    manifest = _build_manifest(ctx)
+    out_html = arts / "governance_dashboard.html"
+    out_png = arts / "governance_dashboard.png"
+    out_manifest = models / "governance_dashboard_manifest.json"
 
-    # Write manifest JSON
-    manifest_path = models_dir / "governance_dashboard_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    run_url = os.getenv("GITHUB_RUN_URL") or None
 
-    # Write HTML
-    html_path = artifacts_dir / "governance_dashboard.html"
-    _write_html(html_path, manifest)
+    # Compose manifest (from upstream inputs, with graceful fallbacks)
+    manifest = _compose_manifest(ctx, run_url)
 
-    # Write PNG snapshot (placeholder ensures artifact always exists)
-    png_path = artifacts_dir / "governance_dashboard.png"
-    _write_png(png_path)
+    # Save/refresh manifest (never fail CI)
+    try:
+        ensure_dir(out_manifest.parent)
+        out_manifest.write_text(json.dumps(manifest, indent=2))
+    except Exception:
+        pass
+
+    # Make PNG snapshot
+    _mk_snapshot_png(manifest, out_png)
+
+    # Base64-embed snapshot (if created) into HTML
+    png_data_uri = None
+    try:
+        if out_png.exists():
+            import matplotlib  # noqa: F401
+            # If matplotlib was used above, we already have a file; just embed it
+            data = base64.b64encode(out_png.read_bytes()).decode("ascii")
+            png_data_uri = f"data:image/png;base64,{data}"
+    except Exception:
+        png_data_uri = None
+
+    # Render HTML
+    html = _render_html(manifest, png_data_uri)
+    ensure_dir(out_html.parent)
+    out_html.write_text(html)
 
     return {
-        "manifest": str(manifest_path),
-        "html": str(html_path),
-        "png": str(png_path),
+        "generated_at": manifest["generated_at"],
+        "window_hours": manifest["window_hours"],
+        "artifacts": {
+            "html": str(out_html),
+            "png": str(out_png),
+            "manifest": str(out_manifest),
+            "run_url": run_url,
+        },
+        "sections": manifest["sections"],
+        "demo": manifest["demo"],
     }
