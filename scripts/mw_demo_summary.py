@@ -263,42 +263,52 @@ class _Ctx(SummaryContext):
 
 def _write_md(md_lines: List[str], out_path: Path) -> None:
     ensure_dir(out_path.parent)
+    print("DEBUG: md_lines length:", len(md_lines))  # Debug: Total lines
+    print("DEBUG: First 5 lines:", md_lines[:5])  # Debug: Check header
+    print("DEBUG: Lines with 'MoonWire CI Demo Summary':", [i for i, l in enumerate(md_lines) if "MoonWire CI Demo Summary" in l])
+    print("DEBUG: Lines with 'Job summary generated at run-time':", [i for i, l in enumerate(md_lines) if "Job summary generated at run-time" in l])
     enhanced_lines = ["🌙 MoonWire CI Demo Summary", "---"]
-    # Add basic overview
+    # Overview
     enhanced_lines.append("### 🚀 Overview")
     enhanced_lines.append(f"📊 Version: v0.8.2 | Run: 🟢 All checks passed")
     enhanced_lines.append(f"[View Artifacts](https://github.com/MoonWireCEO/moonwire-backend/actions/runs/${{ github.run_id }})")
     enhanced_lines.append("---")
-    # Enhance and preserve all lines
+    # Process sections in desired order
     seen = set()
-    for line in md_lines:
-        if line.startswith("### ") and line[4:] not in seen:
-            enhanced_lines.append(f"### 🚀 {line[4:]}")
-            seen.add(line[4:])
-        elif any(kw in line.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
-            enhanced_lines.append(f"📊 {line}")
-        elif "|" in line:
-            enhanced_lines.append(line.replace("|", "│"))
-        elif "raw logs" in line.lower() and "Raw Logs" not in seen:
-            log_start = md_lines.index(line) + 1
-            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
-            log_content = "\n".join(md_lines[log_start:log_end])
-            enhanced_lines.append(f"### 🚀 Raw Logs")
-            enhanced_lines.append("📋 Detailed logs from this run—click to expand.")
-            enhanced_lines.append("<details><summary>Expand Logs</summary>")
-            enhanced_lines.append(f"\n{log_content}\n")
-            enhanced_lines.append("</details>")
-            enhanced_lines.append("---")
-            seen.add("Raw Logs")
-        elif "png" in line.lower():
-            img_path = line.lower().split()[-1].replace("/home/runner/work/moonwire-backend/moonwire-backend/", "https://github.com/MoonWireCEO/moonwire-backend/raw/main/")
-            enhanced_lines.append(f"![Visual]({img_path})")
-        elif line.strip() and "MoonWire CI Demo Summary" not in line and "Job summary generated at run-time" not in seen:
-            enhanced_lines.append(line)
-            if "Job summary generated at run-time" in line:
+    for section in ["Model Performance Trends", "Drift Response", "Automated Drift Response", "Social Context", "Source Yield Plan", "Raw Logs"]:
+        for i, line in enumerate(md_lines):
+            if line.startswith(f"### {section}") and f"### {section}" not in seen:
+                seen.add(f"### {section}")
+                enhanced_lines.append(f"### 🚀 {section}")
+                content_start = i + 1
+                content_end = next((j for j in range(content_start, len(md_lines)) if md_lines[j].startswith("### ")), len(md_lines))
+                content = md_lines[content_start:content_end]
+                for c in content:
+                    if any(kw in c.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
+                        enhanced_lines.append(f"📊 {c}")
+                    elif "|" in c:
+                        enhanced_lines.append(c.replace("|", "│"))
+                    elif c.strip().startswith("visuals:") or "png" in c.lower():
+                        img_path = c.lower().split()[-1].replace("/home/runner/work/moonwire-backend/moonwire-backend/", "https://github.com/MoonWireCEO/moonwire-backend/raw/main/")
+                        enhanced_lines.append(f"![{section} Visual]({img_path})")
+                    else:
+                        enhanced_lines.append(c)
                 enhanced_lines.append("---")
-                enhanced_lines.append("**Status: 🟢 All checks passed** | [Full Repo](https://github.com/MoonWireCEO/moonwire-backend) | Powered by MoonWire v0.8.2")
-                seen.add("Job summary generated at run-time")
+            elif "raw logs" in line.lower() and "Raw Logs" not in seen:
+                seen.add("Raw Logs")
+                log_start = md_lines.index(line) + 1
+                log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
+                log_content = "\n".join(md_lines[log_start:log_end])
+                enhanced_lines.append(f"### 🚀 Raw Logs")
+                enhanced_lines.append("📋 Detailed logs from this run—click to expand.")
+                enhanced_lines.append("<details><summary>Expand Logs</summary>")
+                enhanced_lines.append(f"\n{log_content}\n")
+                enhanced_lines.append("</details>")
+                enhanced_lines.append("---")
+    # Append footer once
+    if "Job summary generated at run-time" not in seen:
+        enhanced_lines.extend(["Job summary generated at run-time",
+                             "**Status: 🟢 All checks passed** | [Full Repo](https://github.com/MoonWireCEO/moonwire-backend) | Powered by MoonWire v0.8.2"])
     out_path.write_text("\n".join(enhanced_lines))
 
 
@@ -337,12 +347,16 @@ def main() -> None:
     # assemble markdown via section registry
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
-
-    # prepend a simple header so the CI block has a title
+    # Dedupe headers and footers
+    deduped_lines = []
+    seen = set()
+    for line in md_lines:
+        if line not in seen:
+            deduped_lines.append(line)
+            seen.add(line)
+    # Combine
     header = ["MoonWire CI Demo Summary"]
-    all_lines = header + md_lines + ["Job summary generated at run-time"]
-
-    # write to artifacts
+    all_lines = header + deduped_lines + ["Job summary generated at run-time"]
     _write_md(all_lines, arts / "demo_summary.md")
 
 
