@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,7 +35,7 @@ def _read_json(p: Path) -> Optional[Dict[str, Any]]:
 def _append_log_line(log_path: Path, level: str, msg: str, links: Optional[List[str]] = None) -> None:
     ensure_dir(log_path.parent)
     line = {
-        "ts": _iso(),
+        "ts": _iso(_now()),
         "level": level,
         "message": msg,
         "links": links or [],
@@ -102,7 +102,6 @@ def _load_conf() -> _Conf:
 
 
 def _build_links(conf: _Conf) -> List[str]:
-    # Provide stable anchors; consumers may build richer URLs downstream.
     links = []
     if conf.run_url:
         links.extend([
@@ -110,7 +109,6 @@ def _build_links(conf: _Conf) -> List[str]:
             f"{conf.run_url}#blue-green",
             f"{conf.run_url}#notifications",
         ])
-    # Artifact hints (relative names)
     links.extend([
         "artifacts/governance_apply_timeline.png",
         "artifacts/bluegreen_timeline.png",
@@ -142,7 +140,6 @@ def _classify_events(
                 "action": a.get("action"),
                 "reason": a.get("reason", []),
             }
-            # Low confidence promotion/rollback -> critical
             if confv < conf.min_conf:
                 e["type"] = "applied_low_conf"
                 critical.append(e)
@@ -178,22 +175,13 @@ def _classify_events(
         else:
             info.append(e)  # observe -> info
 
-    # From performance trend (F1 / ECE thresholds)
+    # From performance trend (ECE threshold only; F1 deltas may be absent)
     if perf_trend:
-        # Expect shape: {"versions":[{"version":"vX","precision":..,"recall":..,"F1":..,"ece":..}, ...]}
         for v in perf_trend.get("versions", []) or []:
             ver = str(v.get("version", "?"))
-            f1 = v.get("F1") if "F1" in v else v.get("f1")
             ece = v.get("ECE") if "ECE" in v else v.get("ece")
-            # If a version shows regression or bad calibration, flag
-            if isinstance(f1, (int, float)) and f1 is not None and f1 <= 0:  # unlikely; ignore
-                continue
-            # We don't have direct deltas here; treat poor ECE as critical, else info.
             if isinstance(ece, (int, float)) and ece is not None and ece > conf.max_ece:
                 critical.append({"source": "trend", "version": ver, "type": "high_ece", "ece": ece})
-            else:
-                # harmless info snapshot when available
-                pass
 
     # Demo seed (if nothing found) to guarantee CI block presence
     if not critical and not info:
@@ -221,8 +209,6 @@ def _simulate_send(dest: str, payload: Dict[str, Any]) -> None:
     """
     Offline-safe sender: never raises; logs intent.
     """
-    # In real env, you could POST to Slack webhook or send SMTP.
-    # Here we no-op to remain network-safe in CI.
     _ = dest, payload
     return
 
@@ -242,9 +228,8 @@ def run_notifications(ctx: SummaryContext) -> None:
 
     conf = _load_conf()
     if not conf.enabled:
-        # Still emit an empty digest so the section can render gracefully.
         digest = {
-            "generated_at": _iso(),
+            "generated_at": _iso(_now()),
             "run_url": conf.run_url,
             "critical": [],
             "info": [],
@@ -260,10 +245,9 @@ def run_notifications(ctx: SummaryContext) -> None:
     bluegreen = _read_json(models / "bluegreen_promotion.json")
     perf_trend = _read_json(models / "model_performance_trend.json")
 
-    classes = _classify_events(_load_conf(), apply_result, bluegreen, perf_trend)
+    classes = _classify_events(conf, apply_result, bluegreen, perf_trend)
     links = _build_links(conf)
 
-    # Route messages
     critical = classes["critical"]
     info = classes["info"]
 
@@ -273,13 +257,18 @@ def run_notifications(ctx: SummaryContext) -> None:
             d = ev["delta"]
             df1 = d.get("F1")
             dece = d.get("ECE")
-            text += f" (ΔF1 {df1:+.02f}, ΔECE {dece:+.02f})"
+            if isinstance(df1, (int, float)) or isinstance(dece, (int, float)):
+                text += " ("
+                if isinstance(df1, (int, float)):
+                    text += f"ΔF1 {df1:+.02f}"
+                if isinstance(dece, (int, float)):
+                    text += (", " if isinstance(df1, (int, float)) else "") + f"ΔECE {dece:+.02f}"
+                text += ")"
         if "conf" in ev and isinstance(ev["conf"], (int, float)):
             text += f", conf={ev['conf']:.2f}"
         _append_log_line(logs / "governance_notifications.log", "CRITICAL", text, links)
         _simulate_send(conf.critical_dest, {"text": text, "links": links})
 
-    # Summary goes to summary destination as a single digest note
     if info:
         titles = [
             f"{e.get('version','?')} {e.get('type','info')}"
@@ -290,9 +279,8 @@ def run_notifications(ctx: SummaryContext) -> None:
         _append_log_line(logs / "governance_notifications.log", "INFO", text, links)
         _simulate_send(conf.summary_dest, {"text": text, "links": links})
 
-    # Write digest JSON
     digest = {
-        "generated_at": _iso(),
+        "generated_at": _iso(_now()),
         "run_url": conf.run_url,
         "critical": critical,
         "info": info,
@@ -301,5 +289,4 @@ def run_notifications(ctx: SummaryContext) -> None:
     }
     (models / "governance_notifications_digest.json").write_text(json.dumps(digest, indent=2))
 
-    # PNG timeline placeholder (markers abstracted)
     _write_png_placeholder(arts / "governance_notifications_digest.png", "notifications timeline")
