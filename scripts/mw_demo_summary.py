@@ -269,31 +269,15 @@ def _write_md(md_lines: List[str], out_path: Path) -> None:
     enhanced_lines.append(f"[View Artifacts](https://github.com/MoonWireCEO/moonwire-backend/actions/runs/${{ github.run_id }})")
     enhanced_lines.append("---")
     for line in md_lines:
-        if line.startswith("### Model Performance Trends"):
-            enhanced_lines.append(f"### 🚀 Model Performance Trends")
-            log_start = md_lines.index(line) + 1
-            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
-            for l in md_lines[log_start:log_end]:
-                if any(kw in l.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
-                    enhanced_lines.append(f"📊 {l}")
-                elif "|" in l:
-                    enhanced_lines.append(l.replace("|", "│"))  # Tweak pipes
-                else:
-                    enhanced_lines.append(l)
-            enhanced_lines.append("---")
-        elif line.startswith("### Drift Response"):
-            enhanced_lines.append(f"### 🚀 Drift Response")
-            log_start = md_lines.index(line) + 1
-            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
-            for l in md_lines[log_start:log_end]:
-                if any(kw in l.lower() for kw in ["precision", "recall", "f1"]):
-                    enhanced_lines.append(f"📊 {l}")
-                elif "|" in l:
-                    enhanced_lines.append(l.replace("|", "│"))
-                else:
-                    enhanced_lines.append(l)
-            enhanced_lines.append("---")
+        if line.startswith("### "):
+            # Preserve original headers, enhance with rocket
+            enhanced_lines.append(f"### 🚀 {line[4:]}")
+        elif any(kw in line.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
+            enhanced_lines.append(f"📊 {line}")  # Add chart for metrics
+        elif "|" in line:
+            enhanced_lines.append(line.replace("|", "│"))  # Tweak pipes for better render
         elif "raw logs" in line.lower():
+            # Find log content until next header or end
             log_start = md_lines.index(line) + 1
             log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
             log_content = "\n".join(md_lines[log_start:log_end])
@@ -303,7 +287,9 @@ def _write_md(md_lines: List[str], out_path: Path) -> None:
             enhanced_lines.append(f"\n{log_content}\n")
             enhanced_lines.append("</details>")
             enhanced_lines.append("---")
-    enhanced_lines.extend(["Job summary generated at run-time",
+        else:
+            enhanced_lines.append(line)
+    enhanced_lines.extend(["---", "Job summary generated at run-time",
                          "**Status: 🟢 All checks passed** | [Full Repo](https://github.com/MoonWireCEO/moonwire-backend) | Powered by MoonWire v0.8.2"])
     out_path.write_text("\n".join(enhanced_lines))
 
