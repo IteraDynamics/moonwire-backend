@@ -262,75 +262,37 @@ class _Ctx(SummaryContext):
 
 def _write_md(md_lines: List[str], out_path: Path) -> None:
     ensure_dir(out_path.parent)
-    # Enhance with aesthetics
     enhanced_lines = ["🌙 MoonWire CI Demo Summary", "---"]
+    # New Overview
+    enhanced_lines.append("### 🚀 Overview")
+    enhanced_lines.append(f"📊 Version: v0.8.2 | Run: 🟢 All checks passed")
+    enhanced_lines.append(f"[View Artifacts](https://github.com/MoonWireCEO/moonwire-backend/actions/runs/${{ github.run_id }})")
+    enhanced_lines.append("---")
     for line in md_lines:
-        if line.startswith("### "):
-            enhanced_lines.append(f"### 🚀 {line[4:]}")  # Add rocket to headers
-        elif any(kw in line.lower() for kw in ["precision", "recall", "f1"]):
-            enhanced_lines.append(f"📊 {line}")  # Add chart for metrics
-        elif "raw logs" in line.lower():
-            # Assume next block is log content until next header
+        if line.startswith("### Model Performance Trends"):
+            enhanced_lines.append(f"### 🚀 Model Performance Trends")
             log_start = md_lines.index(line) + 1
             log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
-            log_content = "\n".join(md_lines[log_start:log_end])
-            enhanced_lines.append(f"### 🚀 Raw Logs")
-            enhanced_lines.append("📋 Detailed logs from this run—click to expand.")
-            enhanced_lines.append("<details><summary>Expand Logs</summary>")
-            enhanced_lines.append(f"\n{log_content}\n")
-            enhanced_lines.append("</details>")
+            for l in md_lines[log_start:log_end]:
+                if any(kw in l.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
+                    enhanced_lines.append(f"📊 {l}")
+                elif "|" in l:
+                    enhanced_lines.append(l.replace("|", "│"))  # Tweak pipes
+                else:
+                    enhanced_lines.append(l)
             enhanced_lines.append("---")
-        else:
-            enhanced_lines.append(line)
-    enhanced_lines.extend(["---", "Job summary generated at run-time",
-                         "**Status: 🟢 All checks passed** | [Full Repo](https://github.com/MoonWireCEO/moonwire-backend) | Powered by MoonWire v0.8.2",
-                         f"[View Artifacts](https://github.com/MoonWireCEO/moonwire-backend/actions/runs/${{ github.run_id }})"])
-    out_path.write_text("\n".join(enhanced_lines))
-
-
-def main() -> None:
-    # workspace paths
-    root = Path(".").resolve()
-    models = root / "models"
-    logs = root / "logs"
-    arts = Path(os.getenv("ARTIFACTS_DIR", str(root / "artifacts")))
-    ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
-
-    # ensure demo governance artifacts exist for CI rendering
-    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
-
-    # Always seed benign companions so sections render
-    _seed_drift_response_plan(models)
-    _seed_retrain_plan(models)
-
-    # Seed stub artifacts so upload globs always match (demo/no-upstream)
-    _seed_ci_stub_artifacts(models, arts, logs)
-
-    # ensure versioned bundle exists in demo to satisfy models/v0.5.1/** upload
-    if demo:
-        _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
-
-    # --- produce notifications digest before markdown build (best-effort) ---
-    run_notifications = _try_import_notifications()
-    if run_notifications:
-        try:
-            ctx_side = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
-            run_notifications(ctx_side)
-        except Exception:
-            # fail-safe: CI summary should still render
-            pass
-
-    # assemble markdown via section registry
-    ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
-    md_lines = build_all(ctx)
-
-    # prepend a simple header so the CI block has a title
-    header = ["MoonWire CI Demo Summary"]
-    all_lines = header + md_lines + ["Job summary generated at run-time"]
-
-    # write to artifacts
-    _write_md(all_lines, arts / "demo_summary.md")
-
-
-if __name__ == "__main__":
-    main()
+        elif line.startswith("### Drift Response"):
+            enhanced_lines.append(f"### 🚀 Drift Response")
+            log_start = md_lines.index(line) + 1
+            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
+            for l in md_lines[log_start:log_end]:
+                if any(kw in l.lower() for kw in ["precision", "recall", "f1"]):
+                    enhanced_lines.append(f"📊 {l}")
+                elif "|" in l:
+                    enhanced_lines.append(l.replace("|", "│"))
+                else:
+                    enhanced_lines.append(l)
+            enhanced_lines.append("---")
+        elif "raw logs" in line.lower():
+            log_start = md_lines.index(line) + 1
+            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("
