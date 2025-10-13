@@ -266,7 +266,7 @@ class _Ctx(SummaryContext):
     origins_rows: List[Dict[str, Any]] = field(default_factory=list)
     yield_data: Any = None
     candidates: List[Dict[str, Any]] = field(default_factory=list)
-    caches: Dict[str, Any]] = field(default_factory=dict)
+    caches: Dict[str, Any] = field(default_factory=dict)
 
 
 def _write_md(md_lines: List[str], out_path: Path) -> None:
