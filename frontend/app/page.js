@@ -115,7 +115,7 @@ export default function Home() {
                 <li>✓ Signal history</li>
               </ul>
               <a 
-                href="/checkout?tier=standard"
+                href="https://buy.stripe.com/test_14AfZjfp3gbHge487IbEA00"
                 className="block w-full text-center px-6 py-3 bg-white hover:bg-slate-100 text-blue-600 rounded-lg font-semibold transition"
               >
                 Get Started
@@ -135,7 +135,7 @@ export default function Home() {
                 <li>✓ Priority support</li>
               </ul>
               <a 
-                href="/checkout?tier=premium"
+                href="https://buy.stripe.com/test_eVq3cx1yd1gNe5WfAabEA01"
                 className="block w-full text-center px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-semibold transition"
               >
                 Go Premium

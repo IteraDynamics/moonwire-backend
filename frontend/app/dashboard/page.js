@@ -39,7 +39,7 @@ export default function Dashboard() {
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-3xl font-bold text-white">Dashboard</h1>
           <div className="flex gap-4">
-            <a href="/" className="text-slate-300 hover:text-white">Home</a>
+            
           </div>
         </div>
 
