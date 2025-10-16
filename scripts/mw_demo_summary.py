@@ -21,11 +21,11 @@ def _try_import_notifications():
     except Exception:
         return None
 
-# NEW: lazy import for the governance dashboard builder (v0.8.4)
-def _try_import_dashboard():
+# v0.9.0: performance validation (best-effort import)
+def _try_import_paper_trader():
     try:
-        from scripts.dashboard.governance_dashboard import build_dashboard
-        return build_dashboard
+        from scripts.perf.paper_trader import run_paper_trader  # type: ignore
+        return run_paper_trader
     except Exception:
         return None
 
@@ -310,38 +310,6 @@ def _write_md(md_lines: List[str], out_path: Path) -> None:
     out_path.write_text("\n".join(enhanced_lines))
 
 
-# NEW: guaranteed dashboard placeholders so artifacts always exist
-def _ensure_dashboard_artifacts(arts: Path, models: Path) -> None:
-    html = arts / "governance_dashboard.html"
-    png = arts / "governance_dashboard.png"
-    manifest = models / "governance_dashboard_manifest.json"
-    ensure_dir(arts); ensure_dir(models)
-    if not html.exists():
-        html.write_text(
-            "<!doctype html><meta charset='utf-8'>"
-            "<title>MoonWire Governance Dashboard</title>"
-            "<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:16px}</style>"
-            "<h1>MoonWire Governance Dashboard</h1>"
-            "<p>Placeholder artifact (builder unavailable). CI verified.</p>"
-        )
-    if not png.exists():
-        png.write_bytes(_PNG_1x1_BYTES)
-    if not manifest.exists():
-        now = _now_utc()
-        manifest.write_text(json.dumps({
-            "generated_at": _iso(now),
-            "window_hours": int(os.getenv("MW_DASH_WINDOW_H", "72")),
-            "run_url": os.getenv("GITHUB_RUN_URL"),
-            "sections": {
-                "apply": {"mode": "dryrun", "applied": 0, "skipped": 0},
-                "bluegreen": {"current": "v?.?.?", "candidate": "v?.?.?", "classification": "observe", "confidence": 0.80},
-                "trend": {"f1_trend": "stable", "ece_trend": "stable"},
-                "alerts": {"critical": 1, "info": 1}
-            },
-            "demo": True
-        }, indent=2))
-
-
 def main() -> None:
     # workspace paths
     root = Path(".").resolve()
@@ -374,16 +342,15 @@ def main() -> None:
             # fail-safe: CI summary should still render
             pass
 
-    # --- NEW: build governance dashboard (or ensure placeholders) ---
-    run_dashboard = _try_import_dashboard()
-    if run_dashboard:
+    # --- v0.9.0: run performance validation (best-effort) ---
+    run_paper_trader = _try_import_paper_trader()
+    if run_paper_trader:
         try:
-            ctx_side_dash = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
-            run_dashboard(ctx_side_dash)  # real builder writes HTML/PNG/manifest
+            ctx_perf = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
+            run_paper_trader(ctx_perf, mode=os.getenv("MW_PERF_MODE", "backtest"))
         except Exception:
-            _ensure_dashboard_artifacts(arts, models)
-    else:
-        _ensure_dashboard_artifacts(arts, models)
+            # never fail CI summary render due to perf layer
+            pass
 
     # assemble markdown via section registry
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
