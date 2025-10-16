@@ -39,7 +39,9 @@ for name in (
     "source_yield_plan",
     # v0.8.3 notifications section lives here (shim UI block)
     "governance_notifications_section",
-    # v0.9.0 performance validation CI block
+    # v0.8.4 governance dashboard compact card lives here
+    "governance_dashboard_section",
+    # v0.9.0 performance validation compact block
     "performance_validation",
 ):
     m = _try(name)
@@ -124,7 +126,7 @@ def build_all(ctx: SummaryContext) -> List[str]:
     # Governance Alerts (v0.8.2) — runs side-effecting function, then UI section (if present)
     _maybe_run(_alerts_run, ctx, md, "Governance Alerts")
 
-    # Optional/derived sections (includes notifications UI + v0.9.0 perf block)
+    # Optional/derived sections (includes notifications, dashboard, perf validation)
     for m in OPTIONAL:
         _maybe(m, md, ctx, m.__name__.replace("_", " ").title())
 
