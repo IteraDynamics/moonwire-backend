@@ -150,6 +150,14 @@ def get_signal_stats():
 
 if __name__ == "__main__":
     import uvicorn
+    from threading import Thread
+    from src.auto_loop import auto_loop
+    
+    # Start auto_loop in background thread
+    loop_thread = Thread(target=auto_loop, args=(600,), daemon=True)
+    loop_thread.start()
+    print("🔄 Signal generation loop started (every 10 minutes)")
+    
     print("🚀 Starting MoonWire API...")
     print("📡 API will be available at: http://localhost:8000")
     print("📚 Docs available at: http://localhost:8000/docs")
