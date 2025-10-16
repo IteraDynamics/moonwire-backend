@@ -1,80 +1,107 @@
 # scripts/perf/performance_metrics.py
 from __future__ import annotations
-import math, numpy as np
+
+import math
 from datetime import datetime, timezone
-from typing import Dict, List, Sequence
+from typing import Any, Dict, List
 
-EPS = 1e-9
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+from scripts.summary_sections.common import _iso
 
 
-def _annualization_factor(timestamps: List[str]) -> float:
-    """Estimate sampling frequency for Sharpe/Sortino scaling."""
-    if len(timestamps) < 2:
-        return 1.0
-    ts = np.array([np.datetime64(t) for t in timestamps])
-    dt_sec = np.median((ts[1:] - ts[:-1]).astype("timedelta64[s]").astype(float))
-    if dt_sec <= 0:
-        return 1.0
-    samples_per_year = (365.25 * 24 * 3600) / dt_sec
-    return math.sqrt(samples_per_year)
+def _to_dt(ts: str) -> datetime:
+    if ts.endswith("Z"):
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    return datetime.fromisoformat(ts)
 
 
-def _max_drawdown(equity: Sequence[float]) -> float:
-    eq = np.asarray(equity, dtype=float)
-    if eq.size == 0:
+def _safe_mean(xs: List[float]) -> float:
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _std(xs: List[float]) -> float:
+    if len(xs) < 2:
         return 0.0
-    peaks = np.maximum.accumulate(eq)
-    dd = (eq - peaks) / np.maximum(peaks, EPS)
-    return float(dd.min())  # negative fraction
+    mu = _safe_mean(xs)
+    var = sum((x - mu) ** 2 for x in xs) / (len(xs) - 1)
+    return math.sqrt(max(var, 0.0))
 
 
-def compute_metrics(equity_series: List[Dict[str, float]], trades: List[Dict]) -> Dict:
+def _downside_std(xs: List[float]) -> float:
+    neg = [min(x, 0.0) for x in xs]
+    if not any(neg):
+        return 0.0
+    mu = _safe_mean(xs)
+    dd = [min(x - mu, 0.0) for x in xs]
+    if len(dd) < 2:
+        return 0.0
+    var = sum(d * d for d in dd) / (len(dd) - 1)
+    return math.sqrt(max(var, 0.0))
+
+
+def _max_drawdown(equity: List[float]) -> float:
+    peak = -1e18
+    mdd = 0.0
+    for v in equity:
+        if v > peak:
+            peak = v
+        if peak > 0:
+            dd = (v - peak) / peak
+            mdd = min(mdd, dd)
+    return mdd
+
+
+def _profit_factor(trades: List[Dict[str, Any]]) -> float:
+    gains = sum(max(t.get("pnl_frac", 0.0), 0.0) for t in trades)
+    losses = -sum(min(t.get("pnl_frac", 0.0), 0.0) for t in trades)
+    if losses <= 0:
+        return gains if gains > 0 else 0.0
+    return gains / losses
+
+
+def compute_metrics(equity_series: List[Dict[str, Any]], trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Compute Sharpe, Sortino, MaxDD, Win rate, Profit factor, Avg trade.
-    equity_series: [{ts, equity}]
-    trades: [{pnl, pnl_frac, ...}]
+    Compute finance-grade metrics from equity curve and trades.
+    Expects equity_series sorted by ts with at least one initial point.
     """
-    ts = [r["ts"] for r in equity_series]
-    eq = np.array([r["equity"] for r in equity_series], dtype=float)
-    if len(eq) >= 2:
-        rets = (eq[1:] / np.maximum(eq[:-1], EPS)) - 1.0
-    else:
-        rets = np.array([], dtype=float)
+    eq = [float(p["equity"]) for p in equity_series]
+    ts = [_to_dt(p["ts"]) for p in equity_series]
 
-    if rets.size == 0:
-        sharpe = sortino = 0.0
-    else:
-        mu = rets.mean()
-        sigma = max(rets.std(ddof=1), EPS)
-        downside = rets[rets < 0]
-        downside_std = max(downside.std(ddof=1) if downside.size else 0.0, EPS)
-        af = _annualization_factor(ts)
-        sharpe = (mu / sigma) * af
-        sortino = (mu / downside_std) * af
+    # Simple step returns from equity
+    rets: List[float] = []
+    for i in range(1, len(eq)):
+        if eq[i - 1] != 0:
+            rets.append(eq[i] / eq[i - 1] - 1.0)
 
+    # Annualization (assume steps are irregular; approximate by per-step mean/std then scale by sqrt(N))
+    n = len(rets)
+    mu = _safe_mean(rets)
+    sd = _std(rets)
+    dsd = _downside_std(rets)
+
+    sharpe = (mu / sd * math.sqrt(n)) if sd > 1e-12 and n > 1 else 0.0
+    sortino = (mu / dsd * math.sqrt(n)) if dsd > 1e-12 and n > 1 else 0.0
     mdd = _max_drawdown(eq)
-    n_trades = len(trades)
-    if n_trades:
-        wins = sum(1 for t in trades if t.get("pnl", 0.0) > 0)
-        win_rate = wins / n_trades
-        gross_profit = sum(max(t.get("pnl", 0.0), 0.0) for t in trades)
-        gross_loss = sum(-min(t.get("pnl", 0.0), 0.0) for t in trades)
-        profit_factor = gross_profit / max(gross_loss, EPS) if gross_profit > 0 else 0.0
-        avg_trade = (gross_profit - gross_loss) / n_trades
-    else:
-        win_rate = profit_factor = avg_trade = 0.0
 
-    return {
-        "generated_at": _utc_now(),
-        "trades": n_trades,
-        "sharpe": round(float(sharpe), 2),
-        "sortino": round(float(sortino), 2),
-        "max_drawdown": round(float(mdd), 4),
-        "win_rate": round(float(win_rate), 4),
-        "profit_factor": round(float(profit_factor), 2),
-        "avg_trade": round(float(avg_trade), 6),
+    # Wins / trades
+    wins = sum(1 for t in trades if t.get("pnl_frac", 0.0) > 0)
+    total = len(trades)
+    win_rate = (wins / total) if total > 0 else 0.0
+    pf = _profit_factor(trades)
+
+    # CAGR (only meaningful if span >= ~30 days)
+    cagr = None
+    if ts and (ts[-1] - ts[0]).days >= 30 and eq[0] > 0:
+        years = (ts[-1] - ts[0]).days / 365.25
+        cagr = (eq[-1] / eq[0]) ** (1.0 / years) - 1.0 if years > 0 else None
+
+    out = {
+        "generated_at": _iso(datetime.now(timezone.utc).replace(microsecond=0)),
+        "trades": total,
+        "sharpe": float(sharpe),
+        "sortino": float(sortino),
+        "max_drawdown": float(mdd),
+        "win_rate": float(win_rate),
+        "profit_factor": float(pf),
+        "cagr": cagr,
     }
+    return out
