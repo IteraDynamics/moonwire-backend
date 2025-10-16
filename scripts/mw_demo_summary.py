@@ -238,6 +238,42 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
     _write_png_placeholder(artifacts_dir / "perf_returns_hist.png", "returns hist (demo)")
     _write_png_placeholder(artifacts_dir / "perf_by_symbol_bar.png", "by symbol (demo)")
 
+    # NEW: Governance dashboard HTML + manifest placeholders so CI steps that verify these do not fail
+    dash_html = artifacts_dir / "governance_dashboard.html"
+    if not dash_html.exists():
+        ensure_dir(artifacts_dir)
+        dash_html.write_text(
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            "<title>MoonWire Governance Dashboard (demo)</title>"
+            "<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:16px;}"
+            "h1{margin:0 0 12px} .muted{color:#777} .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}"
+            ".card{border:1px solid #eee;border-radius:8px;padding:12px;box-shadow:0 1px 2px rgba(0,0,0,0.04)}"
+            "img{max-width:100%;height:auto;display:block;margin:8px 0}</style></head>"
+            "<body><h1>MoonWire Governance Dashboard <span class='muted'>(demo)</span></h1>"
+            "<div class='grid'>"
+            "<div class='card'><h3>Model lineage</h3><img src='model_lineage_graph.png' alt='model lineage'/></div>"
+            "<div class='card'><h3>Calibration (demo)</h3><img src='cal_reliability_demo.png' onerror=\"this.style.display='none'\"/></div>"
+            "<div class='card'><h3>Performance equity (demo)</h3><img src='perf_equity_curve.png' alt='equity curve'/></div>"
+            "<div class='card'><h3>Drawdown (demo)</h3><img src='perf_drawdown.png' alt='drawdown'/></div>"
+            "</div>"
+            "<p class='muted'>This is a CI placeholder; real dashboard is produced by governance modules when inputs are present.</p>"
+            "</body></html>"
+        )
+
+    dash_manifest = artifacts_dir / "governance_dashboard_manifest.json"
+    if not dash_manifest.exists():
+        dash_manifest.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "demo": True,
+            "assets": [
+                "model_lineage_graph.png",
+                "perf_equity_curve.png",
+                "perf_drawdown.png",
+                "perf_returns_hist.png"
+            ],
+            "notes": "CI placeholder manifest to satisfy artifact checks."
+        }, indent=2))
+
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
     """
