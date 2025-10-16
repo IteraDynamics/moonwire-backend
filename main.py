@@ -18,7 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SIGNALS_FILE = Path("logs/signals.jsonl")
+SIGNALS_FILE = Path("logs/signal_history.jsonl")
 
 def read_signals() -> List[dict]:
     """Read all signals from JSONL file"""
