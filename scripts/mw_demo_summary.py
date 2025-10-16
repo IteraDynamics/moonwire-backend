@@ -21,11 +21,17 @@ def _try_import_notifications():
     except Exception:
         return None
 
-# v0.9.0: performance validation (best-effort import)
 def _try_import_paper_trader():
     try:
-        from scripts.perf.paper_trader import run_paper_trader  # type: ignore
+        from scripts.perf.paper_trader import run_paper_trader
         return run_paper_trader
+    except Exception:
+        return None
+
+def _try_import_dashboard_builder():
+    try:
+        from scripts.dashboard.governance_dashboard import build_dashboard
+        return build_dashboard
     except Exception:
         return None
 
@@ -198,6 +204,48 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
             "meta": {"note": "seeded for CI uploads"}
         }) + "\n")
 
+    # --- Performance (v0.9.0) stub outputs ---
+    perf_json = models_dir / "performance_metrics.json"
+    if not perf_json.exists():
+        perf_json.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "mode": "backtest",
+            "window_hours": int(os.getenv("MW_PERF_LOOKBACK_H", "72")),
+            "capital": int(os.getenv("MW_PERF_CAPITAL", "100000")),
+            "by_symbol": {},
+            "aggregate": {"trades": 0, "sharpe": None, "sortino": None, "max_drawdown": None, "win_rate": None, "profit_factor": None},
+            "demo": True
+        }, indent=2))
+    _write_png_placeholder(artifacts_dir / "perf_equity_curve.png", "equity (demo)")
+    _write_png_placeholder(artifacts_dir / "perf_drawdown.png", "drawdown (demo)")
+    _write_png_placeholder(artifacts_dir / "perf_returns_hist.png", "returns (demo)")
+    _write_png_placeholder(artifacts_dir / "perf_by_symbol_bar.png", "by-symbol (demo)")
+
+    # --- Governance Dashboard (v0.8.4) stub outputs ---
+    dash_html = artifacts_dir / "governance_dashboard.html"
+    dash_png = artifacts_dir / "governance_dashboard.png"
+    dash_manifest = models_dir / "governance_dashboard_manifest.json"
+    if not dash_html.exists():
+        ensure_dir(dash_html.parent)
+        dash_html.write_text(
+            "<!doctype html><meta charset='utf-8'><title>MoonWire Governance Dashboard (demo)</title>"
+            "<style>body{font-family:sans-serif;margin:24px}</style>"
+            "<h1>MoonWire Governance Dashboard (demo)</h1><p>No data available.</p>"
+        )
+    if not dash_manifest.exists():
+        dash_manifest.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "window_hours": int(os.getenv("MW_DASH_WINDOW_H", "72")),
+            "sections": {
+                "apply": {"mode": "dryrun", "applied": 0, "skipped": 0},
+                "bluegreen": {"current": None, "candidate": None, "classification": "observe", "confidence": 0.80},
+                "trend": {"f1_trend": "stable", "ece_trend": "stable"},
+                "alerts": {"critical": 0, "info": 0}
+            },
+            "demo": True
+        }, indent=2))
+    _write_png_placeholder(dash_png, "governance dashboard (demo)")
+
     # PNG stubs matching upload globs (only if missing)
     # Reddit plots
     _write_png_placeholder(artifacts_dir / "reddit_activity_demo.png", "reddit activity (demo)")
@@ -342,14 +390,24 @@ def main() -> None:
             # fail-safe: CI summary should still render
             pass
 
-    # --- v0.9.0: run performance validation (best-effort) ---
+    # --- v0.9.0: run performance simulation before dashboard (best-effort) ---
     run_paper_trader = _try_import_paper_trader()
     if run_paper_trader:
         try:
             ctx_perf = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
-            run_paper_trader(ctx_perf, mode=os.getenv("MW_PERF_MODE", "backtest"))
+            mode = os.getenv("MW_PERF_MODE", "backtest")
+            run_paper_trader(ctx_perf, mode=mode)
         except Exception:
-            # never fail CI summary render due to perf layer
+            # keep CI green; artifacts are already seeded if this fails
+            pass
+
+    # --- v0.8.4: build governance dashboard (best-effort) ---
+    build_dashboard = _try_import_dashboard_builder()
+    if build_dashboard:
+        try:
+            ctx_dash = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
+            build_dashboard(ctx_dash)
+        except Exception:
             pass
 
     # assemble markdown via section registry
