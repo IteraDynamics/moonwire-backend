@@ -8,12 +8,12 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('http://localhost:8000/api/signal/history?limit=10')
+    fetch('https://moonwire-backend-production.up.railway.app/api/signal/history?limit=10')
       .then(res => res.json())
       .then(data => setSignals(data.signals || []))
       .catch(err => console.error('Error:', err));
 
-    fetch('http://localhost:8000/api/signal/stats')
+    fetch('https://moonwire-backend-production.up.railway.app/api/signal/stats')
       .then(res => res.json())
       .then(data => {
         setStats(data);
