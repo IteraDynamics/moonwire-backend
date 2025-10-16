@@ -14,7 +14,7 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 FREE_CHANNEL_ID = int(os.getenv('FREE_CHANNEL_ID'))
 PREMIUM_CHANNEL_ID = int(os.getenv('PREMIUM_CHANNEL_ID'))
-SIGNALS_FILE = Path(os.getenv('SIGNALS_FILE', 'logs/signals.jsonl'))
+SIGNALS_FILE = Path(os.getenv('SIGNALS_FILE', 'logs/signal_history.jsonl'))
 
 # Discord client setup
 intents = discord.Intents.default()
