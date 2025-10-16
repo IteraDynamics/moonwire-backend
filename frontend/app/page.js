@@ -1,6 +1,35 @@
+import { SignInButton, SignUpButton, SignedIn, SignedOut, UserButton } from '@clerk/nextjs'
+
 export default function Home() {
   return (
     <main className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800">
+      {/* Header with Auth */}
+      <div className="container mx-auto px-4 py-4">
+        <div className="flex justify-between items-center">
+          <div className="text-2xl font-bold text-white">MoonWire</div>
+          <div className="flex gap-4 items-center">
+            <SignedOut>
+              <SignInButton mode="modal">
+                <button className="px-6 py-2 text-white hover:text-blue-400 transition">
+                  Sign In
+                </button>
+              </SignInButton>
+              <SignUpButton mode="modal">
+                <button className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold transition">
+                  Sign Up
+                </button>
+              </SignUpButton>
+            </SignedOut>
+            <SignedIn>
+              <a href="/dashboard" className="px-6 py-2 text-white hover:text-blue-400 transition">
+                Dashboard
+              </a>
+              <UserButton afterSignOutUrl="/" />
+            </SignedIn>
+          </div>
+        </div>
+      </div>
+
       {/* Hero Section */}
       <div className="container mx-auto px-4 py-20">
         <div className="text-center max-w-4xl mx-auto">
