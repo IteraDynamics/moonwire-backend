@@ -238,7 +238,7 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
     _write_png_placeholder(artifacts_dir / "perf_returns_hist.png", "returns hist (demo)")
     _write_png_placeholder(artifacts_dir / "perf_by_symbol_bar.png", "by symbol (demo)")
 
-    # NEW: Governance dashboard HTML + manifest placeholders so CI steps that verify these do not fail
+    # Governance dashboard placeholders (HTML, manifest, and PNG snapshot)
     dash_html = artifacts_dir / "governance_dashboard.html"
     if not dash_html.exists():
         ensure_dir(artifacts_dir)
@@ -273,6 +273,9 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
             ],
             "notes": "CI placeholder manifest to satisfy artifact checks."
         }, indent=2))
+
+    # **NEW**: PNG snapshot expected by CI checks
+    _write_png_placeholder(artifacts_dir / "governance_dashboard.png", "governance dashboard (demo)")
 
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
@@ -320,7 +323,7 @@ class _Ctx(SummaryContext):
     origins_rows: List[Dict[str, Any]] = field(default_factory=list)
     yield_data: Any = None
     candidates: List[Dict[str, Any]] = field(default_factory=list)
-    caches: Dict[str, Any] = field(default_factory=dict)
+    caches: Dict[str, Any]] = field(default_factory=dict)
 
 
 def _write_md(md_lines: List[str], out_path: Path) -> None:
