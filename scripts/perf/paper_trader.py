@@ -1,436 +1,294 @@
-# scripts/perf/paper_trader.py
-from __future__ import annotations
-
 import json
-import math
 import os
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+import math
+import numpy as np
+import datetime as dt
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
-# Reuse shared helpers
-from scripts.summary_sections.common import ensure_dir, _iso
-from .performance_metrics import compute_metrics  # local metrics lib
+from scripts.perf.performance_metrics import compute_metrics
 
+ART_DIR = Path("artifacts")
+MODELS_DIR = Path("models")
+LOGS_DIR = Path("logs")
 
-# ---------------------------
-# Small context shim (compatible with SummaryContext)
-# ---------------------------
+def _now_utc() -> dt.datetime:
+    return dt.datetime.utcnow().replace(microsecond=0)
 
-@dataclass
-class _CtxShim:
-    logs_dir: Path
-    models_dir: Path
-    artifacts_dir: Path
-    is_demo: bool = False
+def _iso(ts: dt.datetime) -> str:
+    return ts.replace(microsecond=0).isoformat() + "Z"
 
+def _load_signals() -> List[Dict]:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    primary = LOGS_DIR / "signal_history.jsonl"
+    legacy = LOGS_DIR / "signals.jsonl"
+    for p in [primary, legacy]:
+      if p.exists() and p.stat().st_size > 0:
+        rows = []
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+        if rows:
+            return rows
+    return []
 
-# ---------------------------
-# Utilities
-# ---------------------------
+def _synth_signals() -> List[Dict]:
+    base = _now_utc() - dt.timedelta(hours=3)
+    syms = ["BTC","ETH","SOL"]
+    dirs = ["long","short"]
+    rows = []
+    for i in range(9):
+        ts = base + dt.timedelta(minutes=20*i)
+        sym = syms[i % len(syms)]
+        direction = dirs[i % 2]
+        price = 100.0 + i  # arbitrary
+        rows.append({
+            "id": f"sig_{_iso(ts)}_{sym}_{direction}",
+            "ts": _iso(ts),
+            "symbol": sym,
+            "direction": direction,
+            "confidence": 0.70 + (i%3)*0.05,
+            "price": price,
+            "source": "demo",
+            "model_version": "v0.9.0",
+            "outcome": None
+        })
+    return rows
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
+def _price_series_from_signals(signals: List[Dict], minutes: int = 240) -> List[Tuple[str,float]]:
+    # deterministic pseudo-random walk seeded by count
+    rng = np.random.default_rng(42)
+    if not signals:
+        t0 = _now_utc() - dt.timedelta(minutes=minutes)
+        p0 = 100.0
+    else:
+        t0 = dt.datetime.fromisoformat(signals[0]["ts"].replace("Z","+00:00")).replace(tzinfo=None)
+        p0 = float(signals[0].get("price", 100.0))
+    prices = []
+    p = p0
+    ts = t0
+    for _ in range(minutes):
+        step = rng.normal(0.0, 0.1)
+        p = max(1.0, p * (1.0 + step/100.0))
+        prices.append((_iso(ts), float(p)))
+        ts += dt.timedelta(minutes=1)
+    return prices
 
+def _price_at(prices: List[Tuple[str,float]], when: dt.datetime) -> Optional[float]:
+    # find first price at or after 'when'
+    for ts, px in prices:
+        t = dt.datetime.fromisoformat(ts.replace("Z","+00:00")).replace(tzinfo=None)
+        if t >= when:
+            return px
+    return prices[-1][1] if prices else None
 
-def _to_dt(ts: str) -> datetime:
-    # Accept "...Z" or ISO with offset
-    if ts.endswith("Z"):
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    return datetime.fromisoformat(ts)
+def _simulate(signals: List[Dict], prices: List[Tuple[str,float]], horizon_min: int, slippage_bps: float, fees_bps: float, capital: float):
+    # very simple 1x notional per trade (qty derived so notional = capital)
+    trades = []
+    equity = []
+    eq = capital
+    equity.append((prices[0][0], eq))
+    open_pos = None  # dict with entry info
 
-
-def _nearest_price_after(prices: List[Dict[str, Any]], at: datetime) -> Tuple[datetime, float]:
-    # prices sorted by ts; choose first with ts >= at
-    for p in prices:
-        t = _to_dt(p["ts"])
-        if t >= at:
-            return t, float(p["price"])
-    # fallback to last
-    t = _to_dt(prices[-1]["ts"])
-    return t, float(prices[-1]["price"])
-
-
-def _nearest_price_at_or_before(prices: List[Dict[str, Any]], at: datetime) -> Tuple[datetime, float]:
-    prev = None
-    for p in prices:
-        t = _to_dt(p["ts"])
-        if t > at:
-            break
-        prev = (t, float(p["price"]))
-    if prev is not None:
-        return prev
-    # earliest
-    t = _to_dt(prices[0]["ts"])
-    return t, float(prices[0]["price"])
-
-
-def _bps(x: float) -> float:
-    return x / 10_000.0
-
-
-# ---------------------------
-# IO: load signals / prices (with demo fallbacks)
-# ---------------------------
-
-def _load_signals(logs_dir: Path, lookback_h: int, symbols: List[str]) -> List[Dict[str, Any]]:
-    spath = logs_dir / "signals.jsonl"
-    out: List[Dict[str, Any]] = []
-    if spath.exists():
-        for line in spath.read_text().splitlines():
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if "symbol" in row and row.get("symbol") in symbols:
-                out.append(row)
-    if out:
-        out.sort(key=lambda r: r.get("ts", ""))
-        # restrict to lookback window
-        cutoff = _now_utc() - timedelta(hours=lookback_h)
-        out = [r for r in out if _to_dt(r["ts"]) >= cutoff]
-        return out
-
-    # Demo fallback: synthesize 3 signals per symbol over the window
-    demo: List[Dict[str, Any]] = []
-    t0 = _now_utc() - timedelta(hours=lookback_h)
-    step = timedelta(hours=lookback_h // 4 or 1)
-    for s in symbols:
-        for i in range(3):
-            ts = _iso(t0 + step * (i + 1))
-            demo.append({
-                "id": f"demo_{s}_{i}",
-                "ts": ts,
-                "symbol": s,
-                "direction": "long" if i % 2 == 0 else "short",
-                "confidence": 0.6 + 0.1 * (i % 2),
-                "price": None,
+    for sig in sorted(signals, key=lambda r: r["ts"]):
+        s_ts = dt.datetime.fromisoformat(sig["ts"].replace("Z","+00:00")).replace(tzinfo=None)
+        entry_px = _price_at(prices, s_ts)
+        if entry_px is None:  # no price
+            continue
+        side = 1 if sig["direction"].lower() == "long" else -1
+        # close existing if opposite
+        if open_pos and open_pos["side"] != side:
+            # close at signal time (reverse)
+            exit_px = entry_px
+            pnl_pct = (exit_px - open_pos["entry_px"]) / open_pos["entry_px"] * open_pos["side"]
+            slippage = (slippage_bps + fees_bps) / 1e4
+            pnl_pct -= slippage
+            pnl = eq * pnl_pct
+            eq += pnl
+            trades.append({
+                "symbol": open_pos["symbol"],
+                "side": "long" if open_pos["side"] == 1 else "short",
+                "entry_ts": _iso(open_pos["entry_ts"]),
+                "exit_ts": _iso(s_ts),
+                "entry_px": open_pos["entry_px"],
+                "exit_px": exit_px,
+                "pnl": float(pnl),
+                "pnl_pct": float(pnl_pct),
+                "closed": True
             })
-    demo.sort(key=lambda r: r["ts"])
-    return demo
+            open_pos = None
+            equity.append((_iso(s_ts), eq))
 
+        # open new
+        open_pos = {
+            "symbol": sig["symbol"],
+            "side": side,
+            "entry_ts": s_ts,
+            "entry_px": entry_px
+        }
 
-def _load_prices(models_dir: Path, lookback_h: int, symbols: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-    """Load from models/market_context.json if available; else synthesize hourly."""
-    mpath = models_dir / "market_context.json"
-    out: Dict[str, List[Dict[str, Any]]] = {}
+        # time based exit
+        exit_time = s_ts + dt.timedelta(minutes=horizon_min)
+        exit_px = _price_at(prices, exit_time)
+        if exit_px is None:
+            exit_px = prices[-1][1]
+        pnl_pct = (exit_px - open_pos["entry_px"]) / open_pos["entry_px"] * open_pos["side"]
+        slippage = (slippage_bps + fees_bps) / 1e4
+        pnl_pct -= slippage
+        pnl = eq * pnl_pct
+        eq += pnl
+        trades.append({
+            "symbol": open_pos["symbol"],
+            "side": "long" if open_pos["side"] == 1 else "short",
+            "entry_ts": _iso(open_pos["entry_ts"]),
+            "exit_ts": _iso(exit_time),
+            "entry_px": open_pos["entry_px"],
+            "exit_px": exit_px,
+            "pnl": float(pnl),
+            "pnl_pct": float(pnl_pct),
+            "closed": True
+        })
+        open_pos = None
+        equity.append((_iso(exit_time), eq))
 
-    if mpath.exists():
-        try:
-            data = json.loads(mpath.read_text())
-            # Expected shape (used elsewhere): {"series": {"BTC":[{"ts":..,"price":..},...] , ...}}
-            series = data.get("series") or data.get("prices") or {}
-            # Try common coin name mapping to tickers
-            map_keys = {
-                "bitcoin": "BTC", "BTC": "BTC",
-                "ethereum": "ETH", "ETH": "ETH",
-                "solana": "SOL", "SOL": "SOL",
-            }
-            for k, v in series.items():
-                sym = map_keys.get(k, k.upper())
-                if sym in symbols and isinstance(v, list) and v:
-                    # Filter by lookback and coerce fields
-                    items = []
-                    cutoff = _now_utc() - timedelta(hours=lookback_h)
-                    for row in v:
-                        ts = row.get("ts") or row.get("time") or row.get("date")
-                        px = row.get("price") or row.get("close") or row.get("value")
-                        if ts is None or px is None:
-                            continue
-                        dt = _to_dt(ts) if "T" in ts else datetime.fromisoformat(ts + "T00:00:00+00:00")
-                        if dt >= cutoff:
-                            items.append({"ts": _iso(dt), "price": float(px)})
-                    items.sort(key=lambda r: r["ts"])
-                    if items:
-                        out[sym] = items
-        except Exception:
-            out = {}
+    # ensure strictly increasing times in equity
+    equity = sorted(list({t: v for t, v in equity}.items()))
+    equity = [(t, v) for t, v in equity]
+    # compute returns from equity
+    rets = []
+    for i in range(1, len(equity)):
+        prev = equity[i-1][1]
+        curr = equity[i][1]
+        rets.append((curr - prev) / prev if prev > 0 else 0.0)
+    return trades, equity, np.array(rets, dtype=float)
 
-    if len(out) == len(symbols):
-        return out
+def _plot_equity_and_drawdown(equity: List[tuple]):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    if not equity:
+        return
+    ts = [e[0] for e in equity]
+    vals = [e[1] for e in equity]
 
-    # Synthesize hourly prices (gentle drift) for any missing symbols
-    missing = [s for s in symbols if s not in out]
-    if missing:
-        start = _now_utc() - timedelta(hours=lookback_h + 1)
-        hours = lookback_h + 1
-        for s in missing:
-            px = 100.0 if s == "SOL" else (2000.0 if s == "ETH" else 60_000.0)
-            series = []
-            for i in range(hours + 1):
-                dt = start + timedelta(hours=i)
-                # deterministic pseudo-random walk (no numpy)
-                drift = (math.sin(i * 0.7 + len(s)) * 0.001)  # ~0.1% wiggle
-                px = px * (1.0 + drift)
-                series.append({"ts": _iso(dt), "price": float(px)})
-            out[s] = series
+    # Equity curve
+    plt.figure()
+    plt.plot(ts, vals)
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    (ART_DIR / "perf_equity_curve.png").write_bytes(plt.gcf().canvas.print_png(bytesio := bytearray()) or bytes(bytesio))
+    plt.close()
 
-    return out
+    # Drawdown
+    arr = np.array(vals, dtype=float)
+    peaks = np.maximum.accumulate(arr)
+    dd = (arr - peaks) / np.where(peaks == 0, 1.0, peaks)
+    plt.figure()
+    plt.plot(ts, dd)
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    (ART_DIR / "perf_drawdown.png").write_bytes(plt.gcf().canvas.print_png(bytesio := bytearray()) or bytes(bytesio))
+    plt.close()
 
+def _plot_returns_hist(rets: np.ndarray):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    plt.figure()
+    plt.hist(rets, bins=20)
+    plt.tight_layout()
+    (ART_DIR / "perf_returns_hist.png").write_bytes(plt.gcf().canvas.print_png(bytesio := bytearray()) or bytes(bytesio))
+    plt.close()
 
-# ---------------------------
-# Core simulator
-# ---------------------------
+def _plot_by_symbol(trades: List[Dict]):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    by = {}
+    for t in trades:
+        s = t["symbol"]
+        by.setdefault(s, []).append(t["pnl"])
+    labels = sorted(by.keys())
+    totals = [sum(by[k]) for k in labels]
+    plt.figure()
+    plt.bar(labels, totals)
+    plt.tight_layout()
+    (ART_DIR / "perf_by_symbol_bar.png").write_bytes(plt.gcf().canvas.print_png(bytesio := bytearray()) or bytes(bytesio))
+    plt.close()
 
-def run_paper_trader(ctx, mode: str = "backtest") -> Dict[str, Any]:
-    """
-    Simulate trading using MoonWire signals.
-    Returns dict with keys: trades_path, equity_path, metrics_path, artifacts (list).
-    """
-    # Resolve dirs (support both SummaryContext and direct shims)
-    logs_dir: Path = getattr(ctx, "logs_dir", Path("logs"))
-    models_dir: Path = getattr(ctx, "models_dir", Path("models"))
-    artifacts_dir: Path = getattr(ctx, "artifacts_dir", Path("artifacts"))
-    ensure_dir(logs_dir); ensure_dir(models_dir); ensure_dir(artifacts_dir)
+def run_paper_trader(ctx, mode: str = "backtest") -> Dict:
+    ART_DIR.mkdir(parents=True, exist_ok=True)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Env knobs
-    symbols = [s.strip().upper() for s in os.getenv("MW_PERF_SYMBOLS", "BTC,ETH,SOL").split(",") if s.strip()]
-    lookback_h = int(os.getenv("MW_PERF_LOOKBACK_H", "72"))
-    horizon_min = int(os.getenv("MW_PERF_HORIZON_MIN", "60"))
-    slippage = _bps(float(os.getenv("MW_PERF_SLIPPAGE_BPS", "2")))
-    fees = _bps(float(os.getenv("MW_PERF_FEES_BPS", "1")))
-    capital = float(os.getenv("MW_PERF_CAPITAL", "100000"))
+    demo = os.getenv("DEMO_MODE", "true").lower() == "true"
+    symbols = [s.strip().upper() for s in os.getenv("MW_PERF_SYMBOLS","BTC,ETH,SOL").split(",") if s.strip()]
+    horizon_min = int(os.getenv("MW_PERF_HORIZON_MIN","60"))
+    slippage_bps = float(os.getenv("MW_PERF_SLIPPAGE_BPS","2"))
+    fees_bps = float(os.getenv("MW_PERF_FEES_BPS","1"))
+    capital = float(os.getenv("MW_PERF_CAPITAL","100000"))
+    risk_free = float(os.getenv("MW_PERF_RISK_FREE","0.0"))
+    lookback_h = int(os.getenv("MW_PERF_LOOKBACK_H","72"))
 
-    # Load inputs (with demo fallbacks)
-    signals = _load_signals(logs_dir, lookback_h, symbols)
-    prices = _load_prices(models_dir, lookback_h, symbols)
+    sigs = _load_signals()
+    if not sigs and demo:
+        sigs = _synth_signals()
 
-    # Prepare logs
-    trades_path = logs_dir / "trades.jsonl"
-    equity_path = logs_dir / "equity_curve.jsonl"
-    trades_path.write_text("")  # truncate
-    equity_path.write_text("")
+    # filter to symbols of interest
+    if symbols:
+        sigs = [s for s in sigs if s.get("symbol","").upper() in symbols]
 
-    # Build initial equity point at earliest price ts
-    earliest = None
-    for s in symbols:
-        if s in prices and prices[s]:
-            ts = _to_dt(prices[s][0]["ts"])
-            earliest = ts if earliest is None else min(earliest, ts)
-    if earliest is None:
-        earliest = _now_utc()
-    equity_curve: List[Dict[str, Any]] = [{"ts": _iso(earliest), "equity": capital}]
-    equity_path.write_text(json.dumps(equity_curve[0]) + "\n")
+    # build synthetic price series around signals (demo-safe)
+    prices = _price_series_from_signals(sigs, minutes=lookback_h*60 if lookback_h>0 else 240)
 
-    # Bucket signals by symbol
-    by_sym: Dict[str, List[Dict[str, Any]]] = {s: [] for s in symbols}
-    for r in signals:
-        if r["symbol"] in by_sym:
-            by_sym[r["symbol"]].append(r)
-    for s in symbols:
-        by_sym[s].sort(key=lambda r: r["ts"])
+    trades, equity, rets = _simulate(sigs, prices, horizon_min, slippage_bps, fees_bps, capital)
+    metrics = compute_metrics(equity, rets, trades, risk_free=risk_free)
 
-    trades: List[Dict[str, Any]] = []
+    # persist logs
+    (LOGS_DIR / "trades.jsonl").write_text(
+        "".join(json.dumps(t) + "\n" for t in trades),
+        encoding="utf-8"
+    )
+    (LOGS_DIR / "equity_curve.jsonl").write_text(
+        "".join(json.dumps({"ts": t, "equity": v}) + "\n" for t, v in equity),
+        encoding="utf-8"
+    )
 
-    # Simulate independent per-symbol PnL with compounding on aggregate equity
-    for sym in symbols:
-        if not prices.get(sym):
-            continue
-        sym_prices = prices[sym]
-        sym_signals = by_sym.get(sym, [])
-        if not sym_signals:
-            continue
+    # plots
+    _plot_equity_and_drawdown(equity)
+    if rets.size > 0:
+        _plot_returns_hist(rets)
+    _plot_by_symbol(trades)
 
-        pos = 0  # -1, 0, +1
-        entry_px = None
-        entry_ts = None
-
-        for idx, sig in enumerate(sym_signals):
-            sig_dt = _to_dt(sig["ts"])
-            dirn = 1 if str(sig.get("direction", "long")).lower().startswith("l") else -1
-
-            # Determine exit time for any open position if reverse signal or time horizon triggers before new entry
-            # First handle time-based exits for current position before processing new signal
-            if pos != 0 and entry_ts is not None:
-                time_exit_dt = entry_ts + timedelta(minutes=horizon_min)
-                # If the new signal arrives after our time exit, close at time_exit first
-                if time_exit_dt <= sig_dt:
-                    exit_dt, raw_exit_px = _nearest_price_after(sym_prices, time_exit_dt)
-                    # costs at entry and exit (fees applied both sides)
-                    gross = (raw_exit_px / entry_px) - 1.0
-                    gross = gross * pos
-                    cost = (slippage + fees) * 2.0
-                    pnl_frac = gross - cost
-                    trade = {
-                        "ts": _iso(exit_dt),
-                        "symbol": sym,
-                        "side": "long" if pos == 1 else "short",
-                        "entry_ts": _iso(entry_ts),
-                        "entry": entry_px,
-                        "exit": raw_exit_px,
-                        "pnl_frac": pnl_frac,
-                    }
-                    trades.append(trade)
-                    trades_path.write_text(trades_path.read_text() + json.dumps(trade) + "\n")
-                    # Update equity
-                    capital = capital * (1.0 + pnl_frac)
-                    ept = {"ts": _iso(exit_dt), "equity": capital}
-                    equity_curve.append(ept)
-                    equity_path.write_text(equity_path.read_text() + json.dumps(ept) + "\n")
-                    pos = 0
-                    entry_px = None
-                    entry_ts = None
-
-            # Process the incoming signal after any time exit
-            # If same direction as existing position, ignore; if opposite, close and flip
-            if pos == 0:
-                # enter new position at next available price after sig time
-                entry_dt, raw_entry_px = _nearest_price_after(sym_prices, sig_dt)
-                # apply slippage/fees on entry only to effective price
-                entry_px = raw_entry_px * (1.0 + slippage * dirn)  # worse price for entry
-                entry_ts = entry_dt
-                pos = dirn
-            else:
-                # If signal suggests reverse
-                new_dir = dirn
-                if new_dir != pos:
-                    # close existing at current signal time (first available price)
-                    exit_dt, raw_exit_px = _nearest_price_after(sym_prices, sig_dt)
-                    gross = (raw_exit_px / entry_px) - 1.0
-                    gross = gross * pos
-                    cost = (slippage + fees) * 2.0
-                    pnl_frac = gross - cost
-                    trade = {
-                        "ts": _iso(exit_dt),
-                        "symbol": sym,
-                        "side": "long" if pos == 1 else "short",
-                        "entry_ts": _iso(entry_ts),
-                        "entry": entry_px,
-                        "exit": raw_exit_px,
-                        "pnl_frac": pnl_frac,
-                    }
-                    trades.append(trade)
-                    trades_path.write_text(trades_path.read_text() + json.dumps(trade) + "\n")
-                    capital = capital * (1.0 + pnl_frac)
-                    ept = {"ts": _iso(exit_dt), "equity": capital}
-                    equity_curve.append(ept)
-                    equity_path.write_text(equity_path.read_text() + json.dumps(ept) + "\n")
-
-                    # flip into new position
-                    entry_dt, raw_entry_px = _nearest_price_after(sym_prices, sig_dt)
-                    entry_px = raw_entry_px * (1.0 + slippage * new_dir)
-                    entry_ts = entry_dt
-                    pos = new_dir
-                # else same direction: keep running; horizon will handle exit
-
-        # Close any residual position by horizon after last signal
-        if pos != 0 and entry_ts is not None:
-            exit_dt, raw_exit_px = _nearest_price_after(sym_prices, entry_ts + timedelta(minutes=horizon_min))
-            gross = (raw_exit_px / entry_px) - 1.0
-            gross = gross * pos
-            cost = (slippage + fees) * 2.0
-            pnl_frac = gross - cost
-            trade = {
-                "ts": _iso(exit_dt),
-                "symbol": sym,
-                "side": "long" if pos == 1 else "short",
-                "entry_ts": _iso(entry_ts),
-                "entry": entry_px,
-                "exit": raw_exit_px,
-                "pnl_frac": pnl_frac,
-            }
-            trades.append(trade)
-            trades_path.write_text(trades_path.read_text() + json.dumps(trade) + "\n")
-            capital = capital * (1.0 + pnl_frac)
-            ept = {"ts": _iso(exit_dt), "equity": capital}
-            equity_curve.append(ept)
-            equity_path.write_text(equity_path.read_text() + json.dumps(ept) + "\n")
-
-    # ---------------------------
-    # Metrics + artifacts
-    # ---------------------------
-    # Build per-symbol curves and compute metrics
-    by_symbol: Dict[str, Dict[str, Any]] = {}
-    for sym in symbols:
-        t_sym = [t for t in trades if t["symbol"] == sym]
-        if not t_sym:
-            continue
-        eq = float(equity_curve[0]["equity"])
-        curve = [{"ts": equity_curve[0]["ts"], "equity": eq}]
-        for t in t_sym:
-            eq *= (1.0 + float(t["pnl_frac"]))
-            curve.append({"ts": t["ts"], "equity": eq})
-        by_symbol[sym] = compute_metrics(curve, t_sym)
-
-    aggregate = compute_metrics(equity_curve, trades)
-    payload = {
-        "generated_at": aggregate["generated_at"],
-        "mode": os.getenv("MW_PERF_MODE", "backtest"),
+    out = {
+        "generated_at": _iso(_now_utc()),
+        "mode": mode,
         "window_hours": lookback_h,
-        "capital": float(equity_curve[0]["equity"]),
-        "by_symbol": by_symbol,
-        "aggregate": {k: v for k, v in aggregate.items() if k not in ("generated_at",)},
-        "demo": not (logs_dir / "signals.jsonl").exists(),
+        "capital": capital,
+        "by_symbol": {},
+        "aggregate": metrics
     }
-    metrics_path = models_dir / "performance_metrics.json"
-    metrics_path.write_text(json.dumps(payload, indent=2))
+    # per-symbol rollups (simple)
+    bysym = {}
+    for t in trades:
+        s = t["symbol"]
+        bysym.setdefault(s, []).append(t)
+    for s, ts in bysym.items():
+        rets_s = np.array([tt["pnl_pct"] for tt in ts], dtype=float)
+        eq_s = []
+        eq = capital
+        now = _now_utc()
+        for i, r in enumerate(rets_s):
+            eq *= (1.0 + r)
+            eq_s.append((_iso(now + dt.timedelta(minutes=i)), eq))
+        out["by_symbol"][s] = compute_metrics(eq_s, rets_s, ts)
 
-    # --- plots ---
-    try:
-        import matplotlib
-        matplotlib.use("Agg", force=True)
-        import matplotlib.pyplot as plt  # noqa
-
-        # Equity curve
-        xs = [ _to_dt(p["ts"]) for p in equity_curve ]
-        ys = [ float(p["equity"]) for p in equity_curve ]
-        fig = plt.figure()
-        plt.plot(xs, ys)
-        plt.title("Equity Curve")
-        plt.xlabel("Time"); plt.ylabel("Equity")
-        p1 = artifacts_dir / "perf_equity_curve.png"
-        fig.savefig(str(p1)); plt.close(fig)
-
-        # Drawdown curve
-        dd = []
-        peak = -1e18
-        for v in ys:
-            peak = max(peak, v)
-            dd.append((v - peak) / peak if peak > 0 else 0.0)
-        fig = plt.figure()
-        plt.plot(xs, dd)
-        plt.title("Drawdown")
-        plt.xlabel("Time"); plt.ylabel("Drawdown")
-        p2 = artifacts_dir / "perf_drawdown.png"
-        fig.savefig(str(p2)); plt.close(fig)
-
-        # Returns histogram
-        rets = []
-        for i in range(1, len(ys)):
-            if ys[i-1] != 0:
-                rets.append(ys[i] / ys[i-1] - 1.0)
-        fig = plt.figure()
-        plt.hist(rets, bins=10)
-        plt.title("Returns Histogram")
-        plt.xlabel("Return"); plt.ylabel("Count")
-        p3 = artifacts_dir / "perf_returns_hist.png"
-        fig.savefig(str(p3)); plt.close(fig)
-
-        # By-symbol bar (Sharpe if available)
-        labels, vals = [], []
-        for sym, m in by_symbol.items():
-            labels.append(sym); vals.append(float(m.get("sharpe") or 0.0))
-        if labels:
-            fig = plt.figure()
-            plt.bar(labels, vals)
-            plt.title("P&L by Symbol (Sharpe)")
-            plt.xlabel("Symbol"); plt.ylabel("Sharpe")
-            p4 = artifacts_dir / "perf_by_symbol_bar.png"
-            fig.savefig(str(p4)); plt.close(fig)
-        else:
-            p4 = artifacts_dir / "perf_by_symbol_bar.png"  # create empty stub
-            if not p4.exists():
-                p4.write_bytes(b"")
-
-        artifacts = [str(p1), str(p2), str(p3), str(p4)]
-    except Exception:
-        artifacts = []
-
-    return {
-        "trades_path": str(trades_path),
-        "equity_path": str(equity_path),
-        "metrics_path": str(metrics_path),
-        "artifacts": artifacts,
-        "n_trades": len(trades),
-    }
+    # write metrics JSON
+    (MODELS_DIR / "performance_metrics.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return out
