@@ -36,7 +36,7 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          DEMO_MODE: "true"          # seed-friendly for CI
+          DEMO_MODE: "true"  # seed-friendly for CI
         run: |
           python -m src.ml.train_trigger_model --days 14 --interval hour
           echo "Models in ./models:"
@@ -108,13 +108,14 @@ jobs:
       - name: Debug market env
         if: ${{ success() }}
         run: |
-          python - <<'PY'
+          cat > /tmp/debug_env.py <<'PY'
           import os
           print("MW_DEMO =", os.getenv("MW_DEMO"))
           print("DEMO_MODE =", os.getenv("DEMO_MODE"))
           print("Has API key? ->", bool(os.getenv("MW_CG_API_KEY")))
           print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
           PY
+          python /tmp/debug_env.py
 
       # --- Smoke: ensure signals writer works (dual-write) ---
       - name: Smoke: emit one signal (dual-write default)
@@ -133,7 +134,6 @@ jobs:
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          # Keep most sections demo-friendly unless real creds exist
           DEMO_MODE: "true"
           MW_DEMO: "false"               # Market Context should use REAL data when key present
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
@@ -349,11 +349,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cross-origin-correlation-plots
-          path: |
-            artifacts/corr_heatmap.png
-            artifacts/corr_leadlag.png
-          if-no-files-found: ignore
-          retention-days: 14
+        path: |
+          artifacts/corr_heatmap.png
+          artifacts/corr_leadlag.png
+        if-no-files-found: ignore
+        retention-days: 14
 
       # --- Lead–Lag Analysis artifacts ---
       - name: Upload lead–lag analysis JSON
