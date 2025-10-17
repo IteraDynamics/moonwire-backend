@@ -39,18 +39,19 @@ def append(md: List[str], ctx) -> None:
         return
 
     agg = metrics.get("aggregate", {})
-    trades = agg.get("trades", 0)
+    trades = int(agg.get("trades", 0) or 0)
     sharpe = _fmt_ratio(agg.get("sharpe"))
     sortino = _fmt_ratio(agg.get("sortino"))
     maxdd = agg.get("max_drawdown")
     wr = _fmt_pct(agg.get("win_rate"))
-    pf = _fmt_ratio(agg.get("profit_factor"))
+    pf = agg.get("profit_factor")
+    pf_str = "∞" if pf is not None and pf > 1e6 else _fmt_ratio(pf)
 
     maxdd_str = "n/a"
     if isinstance(maxdd, (int, float)):
         maxdd_str = f"{maxdd*100:.1f}%"
 
-    md.append(f"trades={trades} │ Sharpe={sharpe} │ Sortino={sortino} │ MaxDD={maxdd_str} │ Win={wr} │ PF={pf}")
+    md.append(f"trades={trades} │ Sharpe={sharpe} │ Sortino={sortino} │ MaxDD={maxdd_str} │ Win={wr} │ PF={pf_str}")
 
     bys = metrics.get("by_symbol", {})
     if bys:
@@ -61,9 +62,8 @@ def append(md: List[str], ctx) -> None:
             parts.append(f"{sym}(S={s_s}, WR={w_s})")
         md.append("by symbol: " + ", ".join(parts))
 
-    arts = []
+    # List plots (the summary renderer converts png lines to images)
     for name in ("perf_equity_curve.png", "perf_drawdown.png", "perf_returns_hist.png", "perf_by_symbol_bar.png"):
-        if (arts_dir / name).exists():
-            arts.append(name)
-    if arts:
-        md.append("artifacts: " + " • ".join(arts))
+        p = arts_dir / name
+        if p.exists():
+            md.append(str(p))
