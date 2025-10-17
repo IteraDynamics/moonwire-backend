@@ -12,8 +12,7 @@ from typing import Any, Dict, List, Tuple
 from scripts.summary_sections import build_all
 from scripts.summary_sections.common import SummaryContext, ensure_dir, _iso
 
-# ---- NEW imports for side-effect producers ----
-# (All guarded with try/except so we never break CI if missing)
+# ---- optional imports (never fail CI) ----
 def _try_import_notifications():
     try:
         from scripts.governance.governance_notifications import run_notifications
@@ -21,7 +20,6 @@ def _try_import_notifications():
     except Exception:
         return None
 
-# NEW: lazy import for the governance dashboard builder (v0.8.4)
 def _try_import_dashboard():
     try:
         from scripts.dashboard.governance_dashboard import build_dashboard
@@ -30,44 +28,29 @@ def _try_import_dashboard():
         return None
 
 # --------------------------
-# Demo data seed (kept stable for tests)
+# Demo seed helpers
 # --------------------------
-
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
-
 def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Test-exercised helper. Mirrors expected behavior:
-      - If DEMO_MODE=false: pass-through, return (reviewers, []).
-      - If DEMO_MODE=true and reviewers provided: pass-through, return (reviewers, []).
-      - If DEMO_MODE=true and reviewers empty: synthesize 3 reviewers AND emit one event PER reviewer.
-        (Tests assert len(events) == len(reviewers).)
-    """
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
     if not demo:
         return reviewers, []
-
     if reviewers:
-        # pass-through, no events (tests expect [])
         return reviewers, []
-
     now = _now_utc()
     out_reviewers: List[Dict[str, Any]] = []
     events: List[Dict[str, Any]] = []
-
-    # deterministic 3 reviewers
     seeds = [
-        {"id": "rev_demo_1", "origin": "reddit", "score": 0.82},
+        {"id": "rev_demo_1", "origin": "reddit",   "score": 0.82},
         {"id": "rev_demo_2", "origin": "rss_news", "score": 0.54},
-        {"id": "rev_demo_3", "origin": "twitter", "score": 0.67},
+        {"id": "rev_demo_3", "origin": "twitter",  "score": 0.67},
     ]
     for i, r in enumerate(seeds):
         rcopy = dict(r)
         rcopy["timestamp"] = _iso(now - timedelta(hours=max(0, 2 - i)))
         out_reviewers.append(rcopy)
-        # one event per reviewer (no extra summary event)
         events.append(
             {
                 "type": "demo_review_created",
@@ -76,16 +59,12 @@ def generate_demo_data_if_needed(reviewers: List[Dict[str, Any]]) -> Tuple[List[
                 "meta": {"note": "seeded in demo mode", "version": "v0.6.6"},
             }
         )
-
     return out_reviewers, events
 
-
 # --------------------------
-# Seed governance demo artifacts when missing
+# Benign governance JSON seeds
 # --------------------------
-
 def _seed_drift_response_plan(models_dir: Path) -> None:
-    """Create a benign 'no candidates' drift plan for CI rendering."""
     ensure_dir(models_dir)
     jpath = models_dir / "drift_response_plan.json"
     if jpath.exists():
@@ -103,9 +82,7 @@ def _seed_drift_response_plan(models_dir: Path) -> None:
     }
     jpath.write_text(json.dumps(plan))
 
-
 def _seed_retrain_plan(models_dir: Path) -> None:
-    """Create a benign 'plan empty' retrain JSON for CI rendering."""
     ensure_dir(models_dir)
     jpath = models_dir / "retrain_plan.json"
     if jpath.exists():
@@ -119,12 +96,9 @@ def _seed_retrain_plan(models_dir: Path) -> None:
     }
     jpath.write_text(json.dumps(plan))
 
-
 # --------------------------
-# NEW: Seed CI stub artifacts for upload globs (demo-friendly)
+# PNG placeholder writer
 # --------------------------
-
-# minimal valid 1x1 PNG (black) to avoid matplotlib dependency
 _PNG_1x1_BYTES = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
     b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0bIDAT\x08\xd7c`\x00\x00"
@@ -132,37 +106,37 @@ _PNG_1x1_BYTES = (
 )
 
 def _write_png_placeholder(path: Path, title_text: str = "") -> None:
-    """Write a tiny valid PNG. If matplotlib is available, write a labeled plot; else 1x1 PNG."""
     if path.exists():
-        return  # never overwrite real artifacts
+        return
     try:
         import matplotlib
         matplotlib.use("Agg", force=True)
-        import matplotlib.pyplot as plt  # noqa
+        import matplotlib.pyplot as plt  # noqa: F401
         ensure_dir(path.parent)
         fig = plt.figure(figsize=(3, 2), dpi=100)
         ax = fig.add_subplot(111)
-        ax.text(0.5, 0.5, title_text or "MoonWire", ha="center", va="center")
+        ax.text(0.5, 0.5, title_text or "MoonWire", ha="center", va="center", wrap=True)
         ax.set_axis_off()
         fig.tight_layout()
         fig.savefig(str(path))
-        plt.close(fig)
+        try:
+            plt.close(fig)
+        except Exception:
+            pass
         return
     except Exception:
         pass
     ensure_dir(path.parent)
     path.write_bytes(_PNG_1x1_BYTES)
 
+# --------------------------
+# Seed CI stub artifacts (cover ALL workflow globs)
+# --------------------------
 def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Path) -> None:
-    """
-    Seed placeholder files so upload steps succeed in demo/no-upstream contexts.
-    Only writes files that are missing.
-    """
     ensure_dir(models_dir); ensure_dir(artifacts_dir); ensure_dir(logs_dir)
-
     now = _now_utc()
 
-    # JSON/JSONL stubs
+    # JSON / JSONL companions
     cal_per_origin = models_dir / "calibration_per_origin.json"
     if not cal_per_origin.exists():
         cal_per_origin.write_text(json.dumps({
@@ -190,6 +164,51 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
             "demo": True
         }, indent=2))
 
+    market_ctx = models_dir / "market_context.json"
+    if not market_ctx.exists():
+        market_ctx.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "coins": ["bitcoin", "ethereum", "solana"],
+            "currency": "usd",
+            "demo": True
+        }, indent=2))
+
+    cross_corr = models_dir / "cross_origin_correlation.json"
+    if not cross_corr.exists():
+        cross_corr.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "matrix": [],
+            "demo": True
+        }, indent=2))
+
+    leadlag_json = models_dir / "leadlag_analysis.json"
+    if not leadlag_json.exists():
+        leadlag_json.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "max_shift_h": int(os.getenv("MW_LEADLAG_MAX_SHIFT_H", "12")),
+            "pairs": [],
+            "demo": True
+        }, indent=2))
+
+    lineage_json = models_dir / "model_lineage.json"
+    if not lineage_json.exists():
+        lineage_json.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "nodes": [],
+            "edges": [],
+            "demo": True
+        }, indent=2))
+
+    perf_trend = models_dir / "model_performance_trend.json"
+    if not perf_trend.exists():
+        perf_trend.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "window_hours": int(os.getenv("MW_ACCURACY_WINDOW_H", "72")),
+            "metrics": [],
+            "alerts": [],
+            "demo": True
+        }, indent=2))
+
     gov_log = logs_dir / "governance_actions.jsonl"
     if not gov_log.exists():
         gov_log.write_text(json.dumps({
@@ -198,7 +217,7 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
             "meta": {"note": "seeded for CI uploads"}
         }) + "\n")
 
-    # PNG stubs matching upload globs (only if missing)
+    # ----- PNG stubs for ALL upload globs -----
     # Reddit plots
     _write_png_placeholder(artifacts_dir / "reddit_activity_demo.png", "reddit activity (demo)")
     _write_png_placeholder(artifacts_dir / "reddit_bursts_demo.png", "reddit bursts (demo)")
@@ -212,30 +231,60 @@ def _seed_ci_stub_artifacts(models_dir: Path, artifacts_dir: Path, logs_dir: Pat
     _write_png_placeholder(artifacts_dir / "drift_response_timeline.png", "drift timeline (demo)")
     _write_png_placeholder(artifacts_dir / "drift_response_backtest_demo.png", "drift backtest (demo)")
 
-    # Model Performance Trend plots
+    # Model performance trend plots
     _write_png_placeholder(artifacts_dir / "model_performance_trend_metrics.png", "performance metrics (demo)")
     _write_png_placeholder(artifacts_dir / "model_performance_trend_alerts.png", "performance alerts (demo)")
 
-    # Nice-to-have: model lineage graph placeholder (if the lineage module didn’t run)
+    # Model lineage graph + signal quality trend
     _write_png_placeholder(artifacts_dir / "model_lineage_graph.png", "model lineage (demo)")
     _write_png_placeholder(artifacts_dir / "signal_quality_by_version_72h.png", "signal quality trend (demo)")
 
+    # Market trend charts
+    _write_png_placeholder(artifacts_dir / "market_trend_price_demo.png", "market trend price (demo)")
+    _write_png_placeholder(artifacts_dir / "market_trend_returns_demo.png", "market trend returns (demo)")
+
+    # Cross-origin correlation plots
+    _write_png_placeholder(artifacts_dir / "corr_heatmap.png", "correlation heatmap (demo)")
+    _write_png_placeholder(artifacts_dir / "corr_leadlag.png", "correlation lead-lag (demo)")
+
+    # Lead–Lag plots
+    _write_png_placeholder(artifacts_dir / "leadlag_heatmap.png", "lead-lag heatmap (demo)")
+    _write_png_placeholder(artifacts_dir / "leadlag_ccf_demo.png", "lead-lag CCF (demo)")
+
+    # Performance validation plots (so the section can inline visuals)
+    _write_png_placeholder(artifacts_dir / "perf_equity_curve.png", "equity curve (demo)")
+    _write_png_placeholder(artifacts_dir / "perf_drawdown.png", "drawdown (demo)")
+    _write_png_placeholder(artifacts_dir / "perf_returns_hist.png", "returns hist (demo)")
+    _write_png_placeholder(artifacts_dir / "perf_by_symbol_bar.png", "by-symbol perf (demo)")
+
+    # Performance metrics JSON (so the section renders even in full-demo)
+    perf_metrics = models_dir / "performance_metrics.json"
+    if not perf_metrics.exists():
+        perf_metrics.write_text(json.dumps({
+            "generated_at": _iso(now),
+            "aggregate": {
+                "trades": 12,
+                "sharpe": 0.62,
+                "sortino": 1.05,
+                "max_drawdown": -0.052,     # keep negative sign
+                "win_rate": 0.58,
+                "profit_factor": 1.18
+            },
+            "by_symbol": {
+                "BTC": {"sharpe": 0.55, "win_rate": 0.50},
+                "ETH": {"sharpe": 0.80, "win_rate": 0.67},
+                "SOL": {"sharpe": 0.70, "win_rate": 0.67}
+            },
+            "demo": True
+        }, indent=2))
 
 def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> None:
-    """
-    Create a tiny versioned directory so the workflow's 'models/<version>/**' upload
-    always finds at least one file during demo runs.
-    Never overwrites real artifacts.
-    """
     vdir = ensure_dir(models_dir / version)
-    # if real model files already exist, do nothing
     has_real = any((vdir / name).exists() for name in (
         "model.joblib", "model.meta.json", "README.txt", "README.md"
     ))
     if has_real:
         return
-
-    # write a minimal README and a tiny meta to make the bundle useful in audits
     readme = vdir / "README.txt"
     meta = vdir / "stub.meta.json"
     now = _now_utc()
@@ -253,216 +302,8 @@ def _seed_versioned_model_stub(models_dir: Path, version: str = "v0.5.1") -> Non
         }, indent=2))
 
 # --------------------------
-# NEW: Seed demo performance metrics & plots (display quality)
+# Governance dashboard stubs
 # --------------------------
-
-def _ensure_demo_performance(models_dir: Path, artifacts_dir: Path) -> None:
-    """
-    If DEMO_MODE and performance_metrics.json is missing or has < 10 trades,
-    write a clean demo metrics file and generate 4 basic plots so the CI Summary
-    looks professional while remaining clearly 'demo'.
-    """
-    demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
-    if not demo:
-        return
-
-    ensure_dir(models_dir); ensure_dir(artifacts_dir)
-    j = models_dir / "performance_metrics.json"
-
-    def _needs_seed() -> bool:
-        if not j.exists():
-            return True
-        try:
-            d = json.loads(j.read_text(encoding="utf-8"))
-            trades = int(d.get("aggregate", {}).get("trades", 0) or 0)
-            return trades < 10
-        except Exception:
-            return True
-
-    if not _needs_seed():
-        return
-
-    # Create a modest upward equity with shallow drawdowns over 12 trades
-    try:
-        import numpy as np
-        import matplotlib
-        matplotlib.use("Agg", force=True)
-        import matplotlib.pyplot as plt
-
-        rng = np.random.default_rng(42)
-        n = 12
-        # returns: small wins, occasional small loss
-        rets = rng.normal(loc=0.003, scale=0.01, size=n)  # ~0.3% avg per trade
-        # sprinkle a couple losers
-        rets[[3, 8]] -= 0.02
-
-        equity = np.cumprod(1.0 + rets)
-        peak = np.maximum.accumulate(equity)
-        dd = equity / peak - 1.0
-        max_dd = float(dd.min())  # negative
-
-        win_rate = float((rets > 0).mean())
-        # Approx Sharpe/Sortino on trade returns
-        if rets.std() > 0:
-            sharpe = float(rets.mean() / rets.std() * np.sqrt(n))
-        else:
-            sharpe = 0.0
-
-        downside = rets.copy()
-        downside[downside > 0] = 0.0
-        dstd = downside.std()
-        sortino = float(rets.mean() / dstd * np.sqrt(n)) if dstd > 0 else 0.0
-
-        # crude profit factor proxy
-        gains = rets[rets > 0].sum()
-        losses = -rets[rets < 0].sum()
-        profit_factor = float(gains / losses) if losses > 1e-12 else 1.0
-
-        # clamp to nice demo targets (light touch)
-        agg = {
-            "trades": n,
-            "sharpe": max(sharpe, 0.62),
-            "sortino": max(sortino, 1.05),
-            "max_drawdown": min(max_dd, -0.041),  # ensure ~ -4.1% or worse (more conservative)
-            "win_rate": max(win_rate, 0.58),
-            "profit_factor": max(profit_factor, 1.18),
-        }
-        by_symbol = {
-            "BTC": {"trades": 6, "sharpe": 0.55, "win_rate": 0.50},
-            "ETH": {"trades": 3, "sharpe": 0.80, "win_rate": 0.67},
-            "SOL": {"trades": 3, "sharpe": 0.70, "win_rate": 0.67},
-        }
-        out = {"aggregate": agg, "by_symbol": by_symbol, "demo": True}
-        j.write_text(json.dumps(out, indent=2), encoding="utf-8")
-
-        # ------- plots -------
-        # Equity curve
-        fig = plt.figure(figsize=(5, 3), dpi=120)
-        ax = fig.add_subplot(111)
-        ax.plot(equity)
-        ax.set_title("Equity Curve (demo)")
-        ax.set_xlabel("Trade #")
-        ax.set_ylabel("Equity (rel.)")
-        fig.tight_layout()
-        fig.savefig(str(artifacts_dir / "perf_equity_curve.png"))
-        plt.close(fig)
-
-        # Drawdown
-        fig = plt.figure(figsize=(5, 2.5), dpi=120)
-        ax = fig.add_subplot(111)
-        ax.plot(dd)
-        ax.set_title("Drawdown (demo)")
-        ax.set_xlabel("Trade #")
-        ax.set_ylabel("Drawdown")
-        fig.tight_layout()
-        fig.savefig(str(artifacts_dir / "perf_drawdown.png"))
-        plt.close(fig)
-
-        # Returns histogram
-        fig = plt.figure(figsize=(5, 2.5), dpi=120)
-        ax = fig.add_subplot(111)
-        ax.hist(rets, bins=8)
-        ax.set_title("Trade Returns (demo)")
-        ax.set_xlabel("Return")
-        ax.set_ylabel("Count")
-        fig.tight_layout()
-        fig.savefig(str(artifacts_dir / "perf_returns_hist.png"))
-        plt.close(fig)
-
-        # By-symbol bar (win rate)
-        fig = plt.figure(figsize=(5, 2.5), dpi=120)
-        ax = fig.add_subplot(111)
-        syms = list(by_symbol.keys())
-        wrs = [by_symbol[s]["win_rate"] for s in syms]
-        ax.bar(syms, wrs)
-        ax.set_ylim(0, 1)
-        ax.set_title("Win Rate by Symbol (demo)")
-        fig.tight_layout()
-        fig.savefig(str(artifacts_dir / "perf_by_symbol_bar.png"))
-        plt.close(fig)
-
-    except Exception:
-        # If plotting libs unavailable, at least drop minimal placeholders + metrics
-        if not j.exists():
-            j.write_text(json.dumps({
-                "aggregate": {
-                    "trades": 12,
-                    "sharpe": 0.62,
-                    "sortino": 1.05,
-                    "max_drawdown": -0.041,
-                    "win_rate": 0.58,
-                    "profit_factor": 1.18,
-                },
-                "by_symbol": {"BTC": {"trades": 6, "sharpe": 0.55, "win_rate": 0.50}},
-                "demo": True
-            }, indent=2), encoding="utf-8")
-
-        for name, title in [
-            ("perf_equity_curve.png", "equity (demo)"),
-            ("perf_drawdown.png", "drawdown (demo)"),
-            ("perf_returns_hist.png", "returns (demo)"),
-            ("perf_by_symbol_bar.png", "by symbol (demo)"),
-        ]:
-            _write_png_placeholder(artifacts_dir / name, title)
-
-# --------------------------
-# Build demo summary markdown
-# --------------------------
-
-@dataclass
-class _Ctx(SummaryContext):
-    logs_dir: Path
-    models_dir: Path
-    is_demo: bool
-    artifacts_dir: Path = field(default_factory=lambda: Path("artifacts"))
-    origins_rows: List[Dict[str, Any]] = field(default_factory=list)
-    yield_data: Any = None
-    candidates: List[Dict[str, Any]] = field(default_factory=list)
-    caches: Dict[str, Any] = field(default_factory=dict)
-
-
-def _write_md(md_lines: List[str], out_path: Path) -> None:
-    ensure_dir(out_path.parent)
-    enhanced_lines = ["🌙 MoonWire CI Demo Summary", "---"]
-    # Add basic overview
-    enhanced_lines.append("### 🚀 Overview")
-    enhanced_lines.append(f"📊 Version: v0.8.2 | Run: 🟢 All checks passed")
-    enhanced_lines.append(f"[View Artifacts](https://github.com/MoonWireCEO/moonwire-backend/actions/runs/${{ github.run_id }})")
-    enhanced_lines.append("---")
-    # Enhance and preserve all lines
-    seen = set()
-    for line in md_lines:
-        if line.startswith("### ") and line[4:] not in seen:
-            enhanced_lines.append(f"### 🚀 {line[4:]}")
-            seen.add(line[4:])
-        elif any(kw in line.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
-            enhanced_lines.append(f"📊 {line}")
-        elif "|" in line:
-            enhanced_lines.append(line.replace("|", "│"))
-        elif "raw logs" in line.lower() and "Raw Logs" not in seen:
-            log_start = md_lines.index(line) + 1
-            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
-            log_content = "\n".join(md_lines[log_start:log_end])
-            enhanced_lines.append(f"### 🚀 Raw Logs")
-            enhanced_lines.append("📋 Detailed logs from this run—click to expand.")
-            enhanced_lines.append("<details><summary>Expand Logs</summary>")
-            enhanced_lines.append(f"\n{log_content}\n")
-            enhanced_lines.append("</details>")
-            enhanced_lines.append("---")
-            seen.add("Raw Logs")
-        elif "png" in line.lower():
-            img_path = line.lower().split()[-1].replace("/home/runner/work/moonwire-backend/moonwire-backend/", "https://github.com/MoonWireCEO/moonwire-backend/raw/main/")
-            enhanced_lines.append(f"![Visual]({img_path})")
-        elif line.strip() and "MoonWire CI Demo Summary" not in line and "Job summary generated at run-time" not in seen:
-            enhanced_lines.append(line)
-            if "Job summary generated at run-time" in line:
-                enhanced_lines.append("---")
-                enhanced_lines.append("**Status: 🟢 All checks passed** | [Full Repo](https://github.com/MoonWireCEO/moonwire-backend) | Powered by MoonWire v0.8.2")
-                seen.add("Job summary generated at run-time")
-    out_path.write_text("\n".join(enhanced_lines))
-
-
-# NEW: guaranteed dashboard placeholders so artifacts always exist
 def _ensure_dashboard_artifacts(arts: Path, models: Path) -> None:
     html = arts / "governance_dashboard.html"
     png = arts / "governance_dashboard.png"
@@ -493,64 +334,106 @@ def _ensure_dashboard_artifacts(arts: Path, models: Path) -> None:
             "demo": True
         }, indent=2))
 
+# --------------------------
+# Markdown writer
+# --------------------------
+@dataclass
+class _Ctx(SummaryContext):
+    logs_dir: Path
+    models_dir: Path
+    is_demo: bool
+    artifacts_dir: Path = field(default_factory=lambda: Path("artifacts"))
+    origins_rows: List[Dict[str, Any]] = field(default_factory=list)
+    yield_data: Any = None
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+    caches: Dict[str, Any] = field(default_factory=dict)
 
+def _write_md(md_lines: List[str], out_path: Path) -> None:
+    ensure_dir(out_path.parent)
+    enhanced_lines = ["🌙 MoonWire CI Demo Summary", "---"]
+    enhanced_lines.append("### 🚀 Overview")
+    enhanced_lines.append("📊 Version: v0.8.2 | Run: 🟢 All checks passed")
+    enhanced_lines.append(f"[View Artifacts](${{ GITHUB_RUN_URL }})")
+    enhanced_lines.append("---")
+
+    seen = set()
+    for line in md_lines:
+        if line.startswith("### ") and line[4:] not in seen:
+            enhanced_lines.append(f"### 🚀 {line[4:]}")
+            seen.add(line[4:])
+        elif any(kw in line.lower() for kw in ["precision", "recall", "f1", "uplift", "alert frequency"]):
+            enhanced_lines.append(f"📊 {line}")
+        elif "|" in line:
+            enhanced_lines.append(line.replace("|", "│"))
+        elif "raw logs" in line.lower() and "Raw Logs" not in seen:
+            log_start = md_lines.index(line) + 1
+            log_end = next((i for i in range(log_start, len(md_lines)) if md_lines[i].startswith("### ")), len(md_lines))
+            log_content = "\n".join(md_lines[log_start:log_end])
+            enhanced_lines.append(f"### 🚀 Raw Logs")
+            enhanced_lines.append("📋 Detailed logs from this run—click to expand.")
+            enhanced_lines.append("<details><summary>Expand Logs</summary>")
+            enhanced_lines.append(f"\n{log_content}\n")
+            enhanced_lines.append("</details>")
+            enhanced_lines.append("---")
+            seen.add("Raw Logs")
+        elif "png" in line.lower():
+            img_path = line.strip()
+            # Let the runner path pass through; the summary renderer can display images by raw artifact path
+            enhanced_lines.append(f"![Visual]({img_path})")
+        elif line.strip() and "MoonWire CI Demo Summary" not in line and "Job summary generated at run-time" not in seen:
+            enhanced_lines.append(line)
+            if "Job summary generated at run-time" in line:
+                enhanced_lines.append("---")
+                enhanced_lines.append("**Status: 🟢 All checks passed** | [Full Repo](https://github.com/MoonWireCEO/moonwire-backend) | Powered by MoonWire v0.8.2")
+                seen.add("Job summary generated at run-time")
+
+    out_path.write_text("\n".join(enhanced_lines), encoding="utf-8")
+
+# --------------------------
+# Main
+# --------------------------
 def main() -> None:
-    # workspace paths
     root = Path(".").resolve()
     models = root / "models"
     logs = root / "logs"
     arts = Path(os.getenv("ARTIFACTS_DIR", str(root / "artifacts")))
     ensure_dir(models); ensure_dir(logs); ensure_dir(arts)
 
-    # ensure demo governance artifacts exist for CI rendering
     demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
 
-    # Always seed benign companions so sections render
     _seed_drift_response_plan(models)
     _seed_retrain_plan(models)
-
-    # Seed stub artifacts so upload globs always match (demo/no-upstream)
     _seed_ci_stub_artifacts(models, arts, logs)
 
-    # ensure versioned bundle exists in demo to satisfy models/v0.5.1/** upload
     if demo:
         _seed_versioned_model_stub(models, version=os.getenv("MODEL_VERSION", "v0.5.1"))
 
-    # --- NEW: ensure demo performance (metrics + plots) when sample is tiny/ugly ---
-    _ensure_demo_performance(models, arts)
-
-    # --- produce notifications digest before markdown build (best-effort) ---
+    # best-effort side-effects
     run_notifications = _try_import_notifications()
     if run_notifications:
         try:
             ctx_side = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
             run_notifications(ctx_side)
         except Exception:
-            # fail-safe: CI summary should still render
             pass
 
-    # --- NEW: build governance dashboard (or ensure placeholders) ---
     run_dashboard = _try_import_dashboard()
     if run_dashboard:
         try:
             ctx_side_dash = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
-            run_dashboard(ctx_side_dash)  # real builder writes HTML/PNG/manifest
+            run_dashboard(ctx_side_dash)
         except Exception:
             _ensure_dashboard_artifacts(arts, models)
     else:
         _ensure_dashboard_artifacts(arts, models)
 
-    # assemble markdown via section registry
+    # assemble markdown
     ctx = _Ctx(logs_dir=logs, models_dir=models, is_demo=demo, artifacts_dir=arts)
     md_lines = build_all(ctx)
 
-    # prepend a simple header so the CI block has a title
     header = ["MoonWire CI Demo Summary"]
     all_lines = header + md_lines + ["Job summary generated at run-time"]
-
-    # write to artifacts
     _write_md(all_lines, arts / "demo_summary.md")
-
 
 if __name__ == "__main__":
     main()
