@@ -158,15 +158,17 @@ jobs:
           echo "Logs:"
           find logs -maxdepth 1 -type f -print || true
 
-      - name: Smoke emit signal
-        if: ${{ success() }}
+      # Smoke: emit one signal (only if the CLI exists in this branch)
+      - name: Smoke: emit one signal (dual-write default)
+        if: ${{ success() && hashFiles('tools/emit_signal.py') != '' }}
         env:
-          PYTHONPATH: "${{ github.workspace }}"
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           python tools/emit_signal.py --symbol BTC --dir long --conf 0.72 --price 60000
-          tail -n 1 logs/signal_history.jsonl || true
-          tail -n 1 logs/signals.jsonl || true
-
+          echo "Tail (canonical):"; tail -n 1 logs/signal_history.jsonl || true
+          echo "Tail (legacy):";    tail -n 1 logs/signals.jsonl        || true
+      
+  
       # -------- Uploads (curated + bundle) --------
 
       - name: Upload governance dashboard
