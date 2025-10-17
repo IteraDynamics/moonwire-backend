@@ -350,15 +350,24 @@ class _Ctx(SummaryContext):
 
 def _write_md(md_lines: List[str], out_path: Path) -> None:
     ensure_dir(out_path.parent)
-    run_url = os.getenv("GITHUB_RUN_URL") or ""
+
+    # Build a reliable run URL from env (works on all runners)
+    run_url = (
+        os.getenv("GITHUB_RUN_URL") or
+        (
+            f"{os.getenv('GITHUB_SERVER_URL','https://github.com')}/"
+            f"{os.getenv('GITHUB_REPOSITORY','MoonWireCEO/moonwire-backend')}/"
+            f"actions/runs/{os.getenv('GITHUB_RUN_ID','')}"
+            if os.getenv("GITHUB_RUN_ID") else ""
+        )
+    )
+
     enhanced_lines = ["🌙 MoonWire CI Demo Summary", "---"]
     enhanced_lines.append("### 🚀 Overview")
     enhanced_lines.append("📊 Version: v0.9.0 | Run: 🟢 All checks passed")
-    if run_url:
-        enhanced_lines.append(f"[View Artifacts]({run_url})")
-    else:
-        enhanced_lines.append("[View Artifacts](#)")  # fallback, should rarely show
+    enhanced_lines.append(f"[View Artifacts]({run_url})" if run_url else "View Artifacts")
     enhanced_lines.append("---")
+
 
     seen = set()
     for line in md_lines:
