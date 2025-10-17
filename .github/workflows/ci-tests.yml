@@ -42,7 +42,7 @@ jobs:
           echo "Tail (legacy):"
           tail -n 1 logs/signals.jsonl || true
 
-            - name: Seed demo trades (CI only)
+      - name: Seed demo trades (CI only)
         if: ${{ success() }}
         run: |
           python - <<'PY'
