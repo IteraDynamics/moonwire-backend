@@ -2,148 +2,110 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Dict, Any, List
 
-# -------- formatting helpers --------
-def _fmt_pct(x: float | None) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x * 100:.1f}%"
+from .common import SummaryContext
 
-def _fmt_ratio(x: float | None) -> str:
-    if x is None:
-        return "n/a"
-    return f"{x:.2f}"
+NUMERIC_SENTINELS = {None, float("nan")}
 
-def _fmt_dd(x: float | None) -> str:
-    # MaxDD comes in as negative ratio; present as positive drop
-    if x is None:
+def _is_nan(x: Any) -> bool:
+    try:
+        return isinstance(x, float) and math.isnan(x)
+    except Exception:
+        return False
+
+def _fmt_num(x: Any, nd=2) -> str:
+    if x in NUMERIC_SENTINELS or _is_nan(x):
         return "n/a"
     try:
-        return f"{abs(x) * 100:.1f}%"
+        return f"{float(x):.{nd}f}"
     except Exception:
         return "n/a"
 
-def _safe_get(d: Dict[str, Any], k: str) -> float | None:
-    v = d.get(k)
-    if v is None:
-        return None
+def _fmt_pct_signed(x: Any, nd=1) -> str:
+    """Keep the sign for drawdown; expects a fraction (e.g., -0.052)."""
+    if x in NUMERIC_SENTINELS or _is_nan(x):
+        return "n/a"
     try:
-        f = float(v)
+        v = float(x) * 100.0
+        sign = "-" if v < 0 else "+"
+        # ensure we always show sign; if you prefer no + sign, drop the branch
+        # but per request we want negative to show clearly
+        return f"{v:.{nd}f}%".replace("+", "") if v < 0 else f"{v:.{nd}f}%"
     except Exception:
-        return None
-    if f != f:  # NaN
-        return None
-    if f == float("inf") or f == float("-inf"):
-        return None
-    return f
+        return "n/a"
 
-# -------- simple demo stabilizer (display-only) --------
-_DEMO_TARGETS = {
-    "sharpe": 0.60,
-    "sortino": 1.00,
-    "max_drawdown": -0.04,  # -4%
-    "win_rate": 0.55,
-    "profit_factor": 1.10,
-}
-
-def _needs_stabilize(trades: int, wr: float | None, pf: float | None) -> bool:
-    # When sample is tiny or ugly outlier, stabilize for demo readability
-    if trades < 6:
-        return True
-    if wr is not None and wr < 0.35:
-        return True
-    if pf is not None and pf < 0.50:
-        return True
-    return False
-
-def _blend(a: float | None, b: float, w: float) -> float | None:
-    if a is None:
-        return b
-    return (1 - w) * a + w * b
-
-def _stabilize_demo_metrics(agg: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
-    env_demo = str(os.getenv("DEMO_MODE", os.getenv("MW_DEMO", "false"))).lower() == "true"
-    if not env_demo:
-        return agg, False
-
-    trades = int(agg.get("trades", 0) or 0)
-    wr = _safe_get(agg, "win_rate")
-    pf = _safe_get(agg, "profit_factor")
-
-    if not _needs_stabilize(trades, wr, pf):
-        return agg, False
-
-    # light blend toward demo targets (30% weight)
-    w = 0.30
-    out = dict(agg)
-    out["sharpe"]        = _blend(_safe_get(agg, "sharpe"),        _DEMO_TARGETS["sharpe"], w)
-    out["sortino"]       = _blend(_safe_get(agg, "sortino"),       _DEMO_TARGETS["sortino"], w)
-    out["max_drawdown"]  = _blend(_safe_get(agg, "max_drawdown"),  _DEMO_TARGETS["max_drawdown"], w)
-    out["win_rate"]      = _blend(_safe_get(agg, "win_rate"),      _DEMO_TARGETS["win_rate"], w)
-    # PF can be None/unstable; blend then drop if still nonsense
-    out["profit_factor"] = _blend(_safe_get(agg, "profit_factor"), _DEMO_TARGETS["profit_factor"], w)
-
-    return out, True
-
-# -------- main entry used by summary builder --------
-def append(md: List[str], ctx) -> None:
-    # avoid duplicate section when builder re-enters
-    cache = getattr(ctx, "caches", None)
-    if isinstance(cache, dict) and cache.get("perf_added"):
-        return
-    if isinstance(cache, dict):
-        cache["perf_added"] = True
-
-    models_dir = getattr(ctx, "models_dir", Path("models"))
-    arts_dir = getattr(ctx, "artifacts_dir", Path("artifacts"))
-
-    md.append("🚀 Signal Performance Validation (v0.9.0)")
-
+def _load_metrics(models_dir: Path) -> Dict[str, Any]:
     j = models_dir / "performance_metrics.json"
     if not j.exists():
-        md.append("⚠️ No performance metrics available")
-        return
-
+        return {}
     try:
-        metrics = json.loads(j.read_text(encoding="utf-8"))
-    except Exception as e:
-        md.append(f"⚠️ Unable to read metrics: {e}")
-        return
+        return json.loads(j.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
-    agg = metrics.get("aggregate", {}) or {}
-    trades = int(agg.get("trades", 0) or 0)
+def build_section(ctx: SummaryContext) -> List[str]:
+    """
+    Renders the 'Signal Performance Validation' block.
+    Looks for models/performance_metrics.json written by the validator or the demo seeder.
+    """
+    lines: List[str] = []
+    models_dir = Path("models")
+    arts_dir = Path(os.getenv("ARTIFACTS_DIR", "artifacts"))
+    model_version = os.getenv("MODEL_VERSION", "v0.9.0")
 
-    # optional demo stabilization (display-only, clearly labeled)
-    agg_stable, stabilized = _stabilize_demo_metrics(agg)
+    data = _load_metrics(models_dir)
+    agg = data.get("aggregate", {}) if isinstance(data, dict) else {}
+    by_sym = data.get("by_symbol", {}) if isinstance(data, dict) else {}
 
-    sharpe  = _fmt_ratio(_safe_get(agg_stable, "sharpe"))
-    sortino = _fmt_ratio(_safe_get(agg_stable, "sortino"))
-    maxdd   = _fmt_dd(_safe_get(agg_stable, "max_drawdown"))
-    wr      = _fmt_pct(_safe_get(agg_stable, "win_rate"))
+    trades = agg.get("trades")
+    sharpe = agg.get("sharpe")
+    sortino = agg.get("sortino")
+    max_dd = agg.get("max_drawdown")  # fraction, negative preferred (e.g., -0.052)
+    win_rate = agg.get("win_rate")    # fraction (0..1)
+    pf = agg.get("profit_factor")
 
-    pf_val = _safe_get(agg_stable, "profit_factor")
-    # PF guard: hide if undefined or extreme/meaningless
-    pf_str = "n/a" if (pf_val is None or pf_val <= 0 or pf_val > 5.0) else _fmt_ratio(pf_val)
+    lines.append(f"### 🚀 Signal Performance Validation ({model_version})")
 
-    label = " (demo-stabilized)" if stabilized else ""
-    md.append(f"trades={trades} │ Sharpe={sharpe} │ Sortino={sortino} │ MaxDD={maxdd} │ Win={wr} │ PF={pf_str}{label}")
+    if not trades:
+        lines.append("⚠️ No performance metrics available")
+        return lines
 
-    # by-symbol block (formatted)
-    bys = metrics.get("by_symbol", {}) or {}
-    if bys:
-        parts: List[str] = []
-        for sym, row in bys.items():
-            s_s = _fmt_ratio(_safe_get(row, "sharpe"))
-            w_s = _fmt_pct(_safe_get(row, "win_rate"))
-            parts.append(f"{sym}(S={s_s}, WR={w_s})")
+    # formatters
+    sharpe_s = _fmt_num(sharpe, 2)
+    sortino_s = _fmt_num(sortino, 2)
+    maxdd_s = _fmt_pct_signed(max_dd, 1)
+    win_s = "n/a" if (win_rate in NUMERIC_SENTINELS or _is_nan(win_rate)) else f"{float(win_rate)*100:.1f}%"
+    pf_s = _fmt_num(pf, 2)
+
+    lines.append(
+        f"trades={trades} │ Sharpe={sharpe_s} │ Sortino={sortino_s} │ "
+        f"MaxDD={maxdd_s} │ Win={win_s} │ PF={pf_s}"
+    )
+
+    # by symbol quick line
+    if isinstance(by_sym, dict) and by_sym:
+        parts = []
+        for sym, d in by_sym.items():
+            s_sharpe = _fmt_num(d.get("sharpe"), 2)
+            s_wr = d.get("win_rate")
+            s_wr_s = "n/a" if (s_wr in NUMERIC_SENTINELS or _is_nan(s_wr)) else f"{float(s_wr)*100:.1f}%"
+            parts.append(f"{sym}(S={s_sharpe}, WR={s_wr_s})")
         if parts:
-            md.append("by symbol: " + ", ".join(parts))
+            lines.append("by symbol: " + ", ".join(parts))
 
-    # List plot paths; the md renderer in mw_demo_summary converts .png lines to images
-    for name in ("perf_equity_curve.png", "perf_drawdown.png", "perf_returns_hist.png", "perf_by_symbol_bar.png"):
-        p = arts_dir / name
-        if p.exists():
-            md.append(str(p))
+    # Mention plots so outer writer inlines images
+    # (Your _write_md detects 'png' tokens and turns into image markdown)
+    for png in [
+        arts_dir / "perf_equity_curve.png",
+        arts_dir / "perf_drawdown.png",
+        arts_dir / "perf_returns_hist.png",
+        arts_dir / "perf_by_symbol_bar.png",
+    ]:
+        if png.exists():
+            lines.append(str(png))
+
+    return lines
