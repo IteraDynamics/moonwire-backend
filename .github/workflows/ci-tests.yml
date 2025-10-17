@@ -135,6 +135,18 @@ jobs:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python scripts/mw_demo_summary.py
 
+      - name: Performance validation (v0.9.0)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DEMO_MODE: "true"
+          PERF_LOOKBACK_H: "72"
+        run: |
+          python -m scripts.perf.validate_signals
+          echo "Wrote models/performance_metrics.json"
+          test -f models/performance_metrics.json || (echo "missing performance_metrics.json" && exit 1)
+
+
       # --- Upload performance artifacts ---
       - name: Upload performance metrics JSON
         if: ${{ success() }}
