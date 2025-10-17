@@ -31,8 +31,8 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
 
-      - name: Smoke: emit one signal (dual-write default)
-        if: ${{ success() && hashFiles('tools/emit_signal.py') != '' }}
+      - name: Smoke emit one signal dual-write default
+        if: success() && hashFiles('tools/emit_signal.py') != ''
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
