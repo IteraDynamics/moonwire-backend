@@ -345,7 +345,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: leadlag-plots
-        path: |
+          path: |
             artifacts/leadlag_heatmap.png
             artifacts/leadlag_ccf_*.png
           if-no-files-found: ignore
