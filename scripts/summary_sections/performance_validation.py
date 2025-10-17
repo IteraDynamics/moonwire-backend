@@ -5,6 +5,63 @@ import json, math, os, statistics, time
 from pathlib import Path
 from typing import Any, Dict, List, Iterable, Tuple
 
+# --- formatting helpers (tiny + safe) ----------------------------------------
+def _fmt_pct(x):
+    """1 decimal percent, or 'n/a' if missing/NaN. We show absolute value for drawdowns."""
+    try:
+        if x is None:
+            return "n/a"
+        val = float(x)
+        if val != val:  # NaN
+            return "n/a"
+        return f"{abs(val):.1f}%"  # abs: drawdowns look better as positive
+    except Exception:
+        return "n/a"
+
+def _fmt_ratio(x):
+    """2 decimals for ratios; 'n/a' if missing/NaN; avoids '-0.00'."""
+    try:
+        if x is None:
+            return "n/a"
+        val = float(x)
+        if val != val:
+            return "n/a"
+        s = f"{val:.2f}"
+        return "0.00" if s in ("-0.00", "-0.00") else s
+    except Exception:
+        return "n/a"
+
+def _fmt_int(x):
+    try:
+        return str(int(x))
+    except Exception:
+        return "0"
+
+def _summ_line(metrics: dict) -> str:
+    """Builds the single summary line used in the CI block."""
+    trades = _fmt_int(metrics.get("trades"))
+    sharpe = _fmt_ratio(metrics.get("sharpe"))
+    sortino = _fmt_ratio(metrics.get("sortino"))
+    # support either key your code may have:
+    maxdd_raw = metrics.get("max_drawdown_pct", metrics.get("max_dd_pct"))
+    maxdd = _fmt_pct(maxdd_raw)
+    win = _fmt_pct(metrics.get("win_rate_pct"))
+    pf = _fmt_ratio(metrics.get("profit_factor"))
+    return (
+        f"trades={trades} │ Sharpe={sharpe} │ Sortino={sortino} │ "
+        f"MaxDD={maxdd} │ Win={win} │ PF={pf}"
+    )
+
+def _fmt_by_symbol(rows):
+    parts = []
+    for r in rows or []:
+        sym = r.get("symbol", "—")
+        s = _fmt_ratio(r.get("sharpe"))
+        wr = _fmt_pct(r.get("win_rate_pct"))
+        parts.append(f"{sym}(S={s}, WR={wr})")
+    return "by symbol: " + ", ".join(parts) if parts else ""
+# ----------------------------------------------------------------------------- 
+
 # Minimal 1x1 PNG (fallback if matplotlib not available)
 _PNG_1x1 = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
@@ -189,9 +246,6 @@ def append(md: List[str], ctx) -> None:
         bysym_str.append(f"{sym}(S={_fmt(d.get('sharpe'))}, WR={_fmt(d.get('win_rate'), '{:.1f}%')})")
     bysym_line = ", ".join(bysym_str)
 
-    md.append(
-        f"trades={perf['trades']} │ "
-        f"Sharpe={_fmt(sharpe)} │ Sortino={_fmt(sortino)} │ "
-        f"MaxDD={_fmt(mdd, '{:.1f}')} │ Win={_fmt(wr, '{:.1f}%')} │ PF={_fmt(pf)}\n"
-        f"by symbol: {bysym_line}"
-    )
+    md.append(_summ_line(overall_metrics_dict))
+    md.append(_fmt_by_symbol(per_symbol_rows))
+    
