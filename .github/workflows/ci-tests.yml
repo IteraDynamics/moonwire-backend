@@ -349,11 +349,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cross-origin-correlation-plots
-        path: |
-          artifacts/corr_heatmap.png
-          artifacts/corr_leadlag.png
-        if-no-files-found: ignore
-        retention-days: 14
+          path: |
+            artifacts/corr_heatmap.png
+            artifacts/corr_leadlag.png
+          if-no-files-found: ignore
+          retention-days: 14
 
       # --- Lead–Lag Analysis artifacts ---
       - name: Upload lead–lag analysis JSON
