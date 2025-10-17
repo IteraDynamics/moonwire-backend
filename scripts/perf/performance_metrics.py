@@ -6,7 +6,7 @@ from typing import Dict, List, Any
 import numpy as np
 
 _EPS = 1e-12
-_MAX_ABS_RATIO = 1e2  # hard clip to keep CI sane
+_MAX_ABS_RATIO = 5.0  # clip extreme ratios (keeps CI output sane)
 
 def _clean(x: float | None) -> float | None:
     if x is None:
@@ -62,12 +62,16 @@ def compute_metrics(equity_series: np.ndarray, returns_series: np.ndarray, trade
     if total > 0:
         win_rate = wins / total
         avg_trade = float(np.mean(t_rets))
-        if gl > _EPS:
-            profit_factor = gw / gl
-        elif gw > 0 and gl <= _EPS:
-            profit_factor = float("inf")
+        # Robust PF:
+        # - If there are zero losses, PF is undefined → return None
+        # - If losses extremely tiny relative to gains, treat as unstable → None
+        if losses == 0:
+            profit_factor = None
         else:
-            profit_factor = 0.0
+            if gl <= max(_EPS, 1e-9 * max(gw, 1.0)):
+                profit_factor = None
+            else:
+                profit_factor = gw / gl
 
     exposure_pct = 1.0 if returns_series.size > 0 else None
     cagr = None  # not meaningful in short demo windows
