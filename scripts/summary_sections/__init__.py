@@ -126,7 +126,8 @@ def build_all(ctx: SummaryContext) -> List[str]:
 
     # Optional/derived sections (includes v0.8.3 notifications and v0.9.0 performance)
     for m in OPTIONAL:
-        _maybe(m, md, ctx, m.__name__.replace("_", " ").title())
+        nice = m.__name__.split(".")[-1].replace("_", " ").title()  # <- basename for title
+        _maybe(m, md, ctx, nice)
 
     # Retrain & Trigger Explainability at the end (kept after governance surfaces)
     _maybe(retrain_automation, md, ctx, "Retrain Automation")
