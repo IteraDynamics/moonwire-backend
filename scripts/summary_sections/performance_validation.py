@@ -1,94 +1,56 @@
-# scripts/summary_sections/performance_validation.py
-from __future__ import annotations
-
 import json
-import os
 from pathlib import Path
-from typing import List, Any
+from typing import List
 
-from .common import SummaryContext, _fmt_pct
+MODELS_DIR = Path("models")
+ART_DIR = Path("artifacts")
 
-METRICS_PATH = Path("models/performance_metrics.json")
-ARTS = [
-    ("artifacts/perf_equity_curve.png", "equity_curve.png"),
-    ("artifacts/perf_drawdown.png", "perf_drawdown.png"),
-    ("artifacts/perf_returns_hist.png", "perf_returns_hist.png"),
-    ("artifacts/perf_by_symbol_bar.png", "perf_by_symbol_bar.png"),
-]
-
-def _load_metrics() -> Any:
-    if not METRICS_PATH.exists():
-        return None
+def _fmt_pct(x):
+    if x is None:
+        return "n/a"
     try:
-        return json.loads(METRICS_PATH.read_text())
-    except Exception:
-        return None
-
-def _fmt_float(x, nd=2):
-    try:
-        return f"{float(x):.{nd}f}"
+        return f"{x*100:.1f}%"
     except Exception:
         return "n/a"
 
-def _fmt_pct_neg(dd):
-    # Always show drawdown as a negative percentage if provided
-    if dd is None:
-        return "n/a"
-    try:
-        v = float(dd)
-        if v > 0:
-            v = -abs(v)
-        else:
-            v = -abs(v)  # ensure negative sign for display
-        return _fmt_pct(v, nd=1)
-    except Exception:
-        return "n/a"
+def append(md_lines: List[str], ctx) -> List[str]:
+    p = MODELS_DIR / "performance_metrics.json"
+    if not p.exists():
+        md_lines.append("🚀 Signal Performance Validation (v0.9.0)\n")
+        md_lines.append("⚠️ No performance metrics available\n\n")
+        return md_lines
 
-def _mode_label(m):
-    m = (m or "backtest").lower()
-    return "backtest" if m not in ("live", "paper", "paper_trading") else "live"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    agg = data.get("aggregate", {}) or {}
+    brk = data.get("by_symbol", {}) or {}
 
-def append(md: List[str], ctx: SummaryContext) -> None:
-    """
-    CI-friendly summary card for performance validation.
-    Assumes models/performance_metrics.json exists (best-effort).
-    """
-    data = _load_metrics()
-    mode = _mode_label((data or {}).get("mode") or os.getenv("MW_PERF_MODE", "backtest"))
-    window_h = (data or {}).get("window_hours") or os.getenv("MW_PERF_LOOKBACK_H", "72")
-
-    # Single header decoration (avoid duplicate emojis/headers)
-    md.append(f"### Signal Performance Validation (v0.9.0 • {window_h}h {mode})")
-
-    if not data:
-        md.append("⚠️ No performance metrics available")
-        return
-
-    agg = data.get("aggregate") or {}
     trades = agg.get("trades", 0)
-    sharpe = _fmt_float(agg.get("sharpe"))
-    sortino = _fmt_float(agg.get("sortino"))
-    maxdd = _fmt_pct_neg(agg.get("max_drawdown"))
-    win = _fmt_pct(agg.get("win_rate"), nd=1) if agg.get("win_rate") is not None else "n/a"
-    pf = _fmt_float(agg.get("profit_factor"))
+    sharpe = agg.get("sharpe", float("nan"))
+    sortino = agg.get("sortino", float("nan"))
+    maxdd = agg.get("max_drawdown", 0.0)  # negative
+    wr = agg.get("win_rate", float("nan"))
+    pf = agg.get("profit_factor", float("nan"))
 
-    md.append(
-        f"trades={trades} │ Sharpe={sharpe} │ Sortino={sortino} │ MaxDD={maxdd} │ Win={win} │ PF={pf}"
+    md_lines.append(f"🚀 Signal Performance Validation (v0.9.0 • {data.get('mode','backtest')})\n")
+    md_lines.append(
+        f"trades={trades} │ Sharpe={sharpe:.2f} │ Sortino={sortino:.2f} │ "
+        f"MaxDD={_fmt_pct(maxdd)} │ Win={_fmt_pct(wr)} │ PF={pf:.2f}\n"
     )
 
-    bysym = data.get("by_symbol") or {}
-    if bysym:
+    # compact per-symbol
+    if brk:
         parts = []
-        for sym, row in bysym.items():
-            s = _fmt_float(row.get("sharpe"))
-            wr = _fmt_pct(row.get("win_rate"), nd=1) if row.get("win_rate") is not None else "n/a"
-            parts.append(f"{sym}(S={s}, WR={wr})")
-        md.append("by symbol: " + ", ".join(parts))
+        for s, m in brk.items():
+            parts.append(f"{s}(S={m.get('sharpe', float('nan')):.2f}, WR={_fmt_pct(m.get('win_rate'))})")
+        md_lines.append("by symbol: " + ", ".join(parts) + "\n")
 
-    # Artifact links (names only; your summary decorator already prettifies images)
-    existing = []
-    for p, label in ARTS:
-        if Path(p).exists():
-            existing.append(label)
-    if existing:
-        md.append("artifacts: " + " • ".join(existing))
+    # artifacts list
+    arts = []
+    for fn in ["perf_equity_curve.png","perf_drawdown.png","perf_returns_hist.png","perf_by_symbol_bar.png"]:
+        if (ART_DIR / fn).exists():
+            arts.append(fn)
+    if arts:
+        md_lines.append("artifacts: " + " • ".join(arts) + "\n")
+
+    md_lines.append("\n")
+    return md_lines
