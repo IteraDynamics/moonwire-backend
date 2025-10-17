@@ -36,14 +36,17 @@ def ensure_dirs() -> None:
 # -----------------------
 # Demo seed for CI tests
 # -----------------------
-def generate_demo_data_if_needed(existing: Optional[List[Any]] = None) -> Tuple[List[Any], List[Any]]:
+def generate_demo_data_if_needed(existing_reviewers: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Any], List[Any]]:
     """
     CI-friendly seeder. IMPORTANT: tests expect this function to *return a tuple*.
-    When DEMO_MODE=false, it must return ([], []).
+    Behavior:
+      - DEMO_MODE=false  -> return ([], [])
+      - DEMO_MODE=true & existing_reviewers is non-empty -> return (existing_reviewers, [])
+      - DEMO_MODE=true & existing_reviewers is empty/None -> seed 3 reviewers + 3 events
 
     Returns:
-        reviewers: list (may be empty)
-        events: list (may be empty)
+        reviewers: list
+        events: list
     """
     ensure_dirs()
     demo_on = os.getenv("DEMO_MODE", "true").lower() == "true"
@@ -51,6 +54,10 @@ def generate_demo_data_if_needed(existing: Optional[List[Any]] = None) -> Tuple[
     if not demo_on:
         # Honor test expectation: when demo is OFF, return empty tuple.
         return [], []
+
+    # If caller already has real reviewers, do NOT seed—just pass them through (events empty).
+    if existing_reviewers and len(existing_reviewers) > 0:
+        return existing_reviewers, []
 
     # Minimal market context stub (only if absent so re-runs are idempotent)
     mc_path = MODELS_DIR / "market_context.json"
@@ -74,7 +81,7 @@ def generate_demo_data_if_needed(existing: Optional[List[Any]] = None) -> Tuple[
         lines.append("🌙 MoonWire CI Demo Summary\n")
         lines.append("🚀 Overview\n")
         lines.append("📊 Version: v0.8.2 | Run: 🟢 All checks passed\n")
-        # This placeholder string mirrors how GH Actions renders the link in CI
+        # This placeholder mirrors how GH Actions renders the link in CI
         lines.append("[View Artifacts](${ GITHUB_RUN_URL })\n")
         lines.append("🚀 MoonWire CI Demo Summary\n")
 
