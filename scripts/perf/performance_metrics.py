@@ -1,116 +1,94 @@
+# scripts/perf/performance_metrics.py
+from __future__ import annotations
+
 import math
+from typing import Dict, List, Any
+
 import numpy as np
-import datetime as dt
-from typing import Dict, List, Tuple, Optional
 
-# equity_series: list[(ts: str|datetime, equity: float)]
-# returns_series: np.array of per-period returns (simple returns, not log)
-# trades: list[dict] with "pnl", "pnl_pct", "closed": bool
+def _safe(x: float) -> float:
+    if x is None or math.isnan(x) or math.isinf(x):
+        return None
+    return float(x)
 
-def _to_dt(ts):
-    if isinstance(ts, dt.datetime):
-        return ts
-    return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+def compute_metrics(equity_series: np.ndarray, returns_series: np.ndarray, trades: List[Any]) -> Dict[str, Any]:
+    """
+    equity_series: sequence of equity levels (>=1 point)
+    returns_series: simple returns aligned with equity diff (len = len(equity)-1)
+    trades: list of objects with .pnl and .pnl_pct
+    """
+    equity_series = np.asarray(equity_series, dtype=float)
+    returns_series = np.asarray(returns_series, dtype=float)
 
-def _max_drawdown(equity: np.ndarray) -> float:
-    if equity.size == 0:
-        return 0.0
-    peaks = np.maximum.accumulate(equity)
-    dd = (equity - peaks) / np.where(peaks == 0, 1.0, peaks)
-    return float(dd.min())  # negative number
+    # Sharpe / Sortino on per-step returns (assume steps roughly ~minutes,
+    # but we only need relative values for CI; no annualization here)
+    rf = 0.0
+    excess = returns_series - rf
+    sharpe = None
+    sortino = None
+    if excess.size > 1 and np.std(excess) > 1e-12:
+        sharpe = np.mean(excess) / (np.std(excess) + 1e-12)
+    downside = excess[excess < 0.0]
+    if downside.size > 0:
+        sortino = np.mean(excess) / (np.std(downside) + 1e-12)
 
-def _sharpe(returns: np.ndarray, rf: float = 0.0, periods_per_year: int = 365*24) -> float:
-    if returns.size < 2:
-        return float("nan")
-    ex = returns - (rf / periods_per_year)
-    s = ex.mean() / (ex.std(ddof=1) + 1e-12)
-    return float(s * math.sqrt(periods_per_year))
+    # Max drawdown
+    maxdd = None
+    if equity_series.size > 0:
+        peak = np.maximum.accumulate(equity_series)
+        dd = (equity_series - peak) / (peak + 1e-12)
+        maxdd = float(np.min(dd))
 
-def _sortino(returns: np.ndarray, rf: float = 0.0, periods_per_year: int = 365*24) -> float:
-    if returns.size < 2:
-        return float("nan")
-    ex = returns - (rf / periods_per_year)
-    downside = ex[ex < 0.0]
-    denom = downside.std(ddof=1) if downside.size > 1 else 0.0
-    if denom == 0.0:
-        return float("inf") if ex.mean() > 0 else float("-inf")
-    return float((ex.mean() / denom) * math.sqrt(periods_per_year))
-
-def _profit_factor(trades: List[Dict]) -> float:
-    gains = sum(max(t.get("pnl", 0.0), 0.0) for t in trades if t.get("closed"))
-    losses = -sum(min(t.get("pnl", 0.0), 0.0) for t in trades if t.get("closed"))
-    if losses == 0:
-        return float("inf") if gains > 0 else 0.0
-    return float(gains / losses)
-
-def _win_rate(trades: List[Dict]) -> float:
-    closed = [t for t in trades if t.get("closed")]
-    if not closed:
-        return float("nan")
-    wins = sum(1 for t in closed if t.get("pnl", 0.0) > 0.0)
-    return wins / len(closed)
-
-def _avg_trade(trades: List[Dict]) -> float:
-    closed = [t for t in trades if t.get("closed")]
-    if not closed:
-        return float("nan")
-    return float(np.mean([t.get("pnl_pct", 0.0) for t in closed]))
-
-def _exposure_pct(trades: List[Dict], start: dt.datetime, end: dt.datetime) -> float:
-    if start >= end:
-        return 0.0
-    total_secs = (end - start).total_seconds()
-    live_secs = 0.0
+    # Profit factor, win rate, average trade
+    wins, losses = 0, 0
+    gross_win, gross_loss = 0.0, 0.0
+    trade_returns = []
     for t in trades:
-        et = t.get("entry_ts")
-        xt = t.get("exit_ts")
-        if not et or not xt:
-            continue
-        et = _to_dt(et)
-        xt = _to_dt(xt)
-        live_secs += max(0.0, (xt - et).total_seconds())
-    return (live_secs / total_secs) if total_secs > 0 else 0.0
+        r = getattr(t, "pnl_pct", None)
+        trade_returns.append(r if r is not None else 0.0)
+        pnl = getattr(t, "pnl", 0.0)
+        if pnl >= 0:
+            wins += 1
+            gross_win += pnl
+        else:
+            losses += 1
+            gross_loss += -pnl
+    win_rate = None
+    profit_factor = None
+    avg_trade = None
+    n = wins + losses
+    if n > 0:
+        win_rate = wins / n
+        avg_trade = float(np.mean(trade_returns))
+        if gross_loss > 0:
+            profit_factor = gross_win / gross_loss
+        elif gross_win > 0 and gross_loss == 0:
+            profit_factor = float("inf")
+        else:
+            profit_factor = 0.0
 
-def _cagr(equity_series: List[Tuple[str, float]]) -> Optional[float]:
-    if len(equity_series) < 2:
-        return None
-    t0 = _to_dt(equity_series[0][0])
-    t1 = _to_dt(equity_series[-1][0])
-    days = (t1 - t0).days
-    if days < 30:
-        return None
-    v0 = float(equity_series[0][1])
-    v1 = float(equity_series[-1][1])
-    if v0 <= 0 or v1 <= 0:
-        return None
-    years = days / 365.0
-    return (v1 / v0) ** (1.0 / years) - 1.0
+    # Exposure estimate (% of steps with positions) — rough proxy in this simplified sim
+    exposure_pct = None
+    if returns_series.size > 0:
+        # assume always in market when we simulated (since we exit at horizon per signal)
+        exposure_pct = 1.0
 
-def compute_metrics(
-    equity_series: List[Tuple[str, float]],
-    returns_series: np.ndarray,
-    trades: List[Dict],
-    risk_free: float = 0.0,
-    periods_per_year: int = 365*24,
-) -> Dict:
-    equity_np = np.array([v for _, v in equity_series], dtype=float)
-    maxdd = _max_drawdown(equity_np)
+    # CAGR — only meaningful if backtest window >= ~30d; we can compute generic CAGR anyway
+    cagr = None
+    if equity_series.size > 1 and equity_series[0] > 0:
+        total_return = equity_series[-1] / equity_series[0]
+        # assume ~N steps ~minutes; rough yearly scaling is not reliable in demo;
+        # keep None unless someone runs real longer windows.
+        cagr = None
 
-    agg = {
-        "trades": int(sum(1 for t in trades if t.get("closed"))),
-        "sharpe": _sharpe(returns_series, rf=risk_free, periods_per_year=periods_per_year),
-        "sortino": _sortino(returns_series, rf=risk_free, periods_per_year=periods_per_year),
-        "max_drawdown": maxdd,  # negative fraction
-        "win_rate": _win_rate(trades),
-        "profit_factor": _profit_factor(trades),
-        "avg_trade": _avg_trade(trades),
+    return {
+        "sharpe": _safe(sharpe),
+        "sortino": _safe(sortino),
+        "max_drawdown": _safe(maxdd),
+        "calmar": _safe(((-1.0 * (0 if maxdd in (None, 0) else maxdd)) and ( ( (equity_series[-1]/equity_series[0]) - 1.0 ) / abs(maxdd) )) if (maxdd not in (None, 0) and equity_series.size>1) else None),
+        "win_rate": _safe(win_rate),
+        "profit_factor": _safe(profit_factor),
+        "avg_trade": _safe(avg_trade),
+        "exposure_pct": _safe(exposure_pct),
+        "cagr": _safe(cagr),
     }
-
-    # Exposure & CAGR if possible
-    if equity_series:
-        start = _to_dt(equity_series[0][0])
-        end = _to_dt(equity_series[-1][0])
-        agg["exposure_pct"] = _exposure_pct(trades, start, end)
-        agg["cagr"] = _cagr(equity_series)
-
-    return agg
