@@ -1,56 +1,60 @@
+#!/usr/bin/env python3
 import json
 from pathlib import Path
 from typing import List
 
-MODELS_DIR = Path("models")
 ART_DIR = Path("artifacts")
+MODELS_DIR = Path("models")
 
-def _fmt_pct(x):
-    if x is None:
-        return "n/a"
-    try:
-        return f"{x*100:.1f}%"
-    except Exception:
-        return "n/a"
-
-def append(md_lines: List[str], ctx) -> List[str]:
+def _read_metrics():
     p = MODELS_DIR / "performance_metrics.json"
     if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+def append(md_lines: List[str], ctx) -> None:
+    metrics = _read_metrics()
+    if not metrics:
         md_lines.append("🚀 Signal Performance Validation (v0.9.0)\n")
-        md_lines.append("⚠️ No performance metrics available\n\n")
-        return md_lines
+        md_lines.append("⚠️ No performance metrics available\n")
+        return
 
-    data = json.loads(p.read_text(encoding="utf-8"))
-    agg = data.get("aggregate", {}) or {}
-    brk = data.get("by_symbol", {}) or {}
-
+    agg = metrics.get("aggregate", {})
     trades = agg.get("trades", 0)
     sharpe = agg.get("sharpe", float("nan"))
     sortino = agg.get("sortino", float("nan"))
-    maxdd = agg.get("max_drawdown", 0.0)  # negative
-    wr = agg.get("win_rate", float("nan"))
+    maxdd = agg.get("max_drawdown", float("nan"))
+    win = agg.get("win_rate", float("nan"))
     pf = agg.get("profit_factor", float("nan"))
 
-    md_lines.append(f"🚀 Signal Performance Validation (v0.9.0 • {data.get('mode','backtest')})\n")
+    md_lines.append(f"🚀 Signal Performance Validation (v0.9.0 • {metrics.get('mode','backtest')})\n")
     md_lines.append(
-        f"trades={trades} │ Sharpe={sharpe:.2f} │ Sortino={sortino:.2f} │ "
-        f"MaxDD={_fmt_pct(maxdd)} │ Win={_fmt_pct(wr)} │ PF={pf:.2f}\n"
+        f"trades={trades} │ Sharpe={_fmt(sharpe)} │ Sortino={_fmt(sortino)} │ "
+        f"MaxDD={_fmt_pct(maxdd)} │ Win={_fmt_pct(win)} │ PF={_fmt(pf)}\n"
     )
+    # Links to artifacts if present
+    art = []
+    if (ART_DIR / "perf_equity_curve.png").exists(): art.append("perf_equity_curve.png")
+    if (ART_DIR / "perf_drawdown.png").exists(): art.append("perf_drawdown.png")
+    if (ART_DIR / "perf_returns_hist.png").exists(): art.append("perf_returns_hist.png")
+    if art:
+        md_lines.append(f"artifacts: " + " • ".join(art) + "\n")
 
-    # compact per-symbol
-    if brk:
-        parts = []
-        for s, m in brk.items():
-            parts.append(f"{s}(S={m.get('sharpe', float('nan')):.2f}, WR={_fmt_pct(m.get('win_rate'))})")
-        md_lines.append("by symbol: " + ", ".join(parts) + "\n")
+def _fmt(x):
+    try:
+        if x is None or (isinstance(x, float) and (x != x)):  # NaN
+            return "n/a"
+        return f"{x:.2f}"
+    except Exception:
+        return "n/a"
 
-    # artifacts list
-    arts = []
-    for fn in ["perf_equity_curve.png","perf_drawdown.png","perf_returns_hist.png","perf_by_symbol_bar.png"]:
-        if (ART_DIR / fn).exists():
-            arts.append(fn)
-    if arts:
-        md_lines.append("artifacts: " + " • ".join(arts) + "\n")
-
-    md_lines.append("\n")
-    return md_lines
+def _fmt_pct(x):
+    try:
+        if x is None or (isinstance(x, float) and (x != x)):
+            return "n/a"
+        return f"{x*100:.1f}%"
+    except Exception:
+        return "n/a"
