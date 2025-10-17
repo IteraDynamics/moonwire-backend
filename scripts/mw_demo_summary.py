@@ -89,9 +89,17 @@ def generate_demo_data_if_needed(existing: Optional[List[Any]] = None) -> Tuple[
         lines.append("— Data via CoinGecko API; subject to plan rate limits.\n\n")
         md_path.write_text("".join(lines), encoding="utf-8")
 
-    # For tests that may inspect a return value, provide tiny stubs when demo_on.
-    reviewers = [{"id": "demo_reviewer", "score": 0.9}]
-    events = [{"id": "demo_event", "type": "seed"}]
+    # Tests expect 3–5 reviewers if demo is ON and seeds are empty.
+    reviewers = [
+        {"id": "demo_reviewer_1", "score": 0.90},
+        {"id": "demo_reviewer_2", "score": 0.85},
+        {"id": "demo_reviewer_3", "score": 0.80},
+    ]
+    events = [
+        {"id": "demo_event_1", "type": "seed"},
+        {"id": "demo_event_2", "type": "seed"},
+        {"id": "demo_event_3", "type": "seed"},
+    ]
     return reviewers, events
 
 
