@@ -117,7 +117,7 @@ jobs:
           PY
 
       # --- Smoke: emit a signal so downstream perf/backtest has input ---
-      - name: Smoke: emit one signal (dual-write default)
+      - name: "Smoke: emit one signal (dual-write default)"
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
