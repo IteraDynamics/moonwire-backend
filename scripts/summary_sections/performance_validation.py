@@ -2,11 +2,8 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List
-
-from scripts.summary_sections.common import _iso
 
 def _fmt_pct(x):
     if x is None:
@@ -19,15 +16,18 @@ def _fmt_ratio(x):
     return f"{x:.2f}"
 
 def append(md: List[str], ctx) -> None:
-    """
-    Appends a compact CI block if models/performance_metrics.json exists.
-    If not present, adds a one-line warning.
-    """
+    # prevent duplicate section if build_all calls twice
+    cache = getattr(ctx, "caches", None)
+    if isinstance(cache, dict) and cache.get("perf_added"):
+        return
+    if isinstance(cache, dict):
+        cache["perf_added"] = True
+
     models_dir = getattr(ctx, "models_dir", Path("models"))
     arts_dir = getattr(ctx, "artifacts_dir", Path("artifacts"))
 
-    j = models_dir / "performance_metrics.json"
     md.append("🚀 Signal Performance Validation (v0.9.0)")
+    j = models_dir / "performance_metrics.json"
     if not j.exists():
         md.append("⚠️ No performance metrics available")
         return
@@ -50,15 +50,8 @@ def append(md: List[str], ctx) -> None:
     if isinstance(maxdd, (int, float)):
         maxdd_str = f"{maxdd*100:.1f}%"
 
-    # header line
-    mode = metrics.get("mode", "backtest")
-    win_hours = metrics.get("window_hours", None)
-    hdr = f"({mode}" + (f" • {win_hours}h backtest" if (mode == "backtest" and win_hours) else ")")
-    if hdr.endswith("backtest"):
-        hdr += ")"
-    md.append(f"trades={trades} | Sharpe={sharpe} | Sortino={sortino} | MaxDD={maxdd_str} | Win={wr} | PF={pf}")
+    md.append(f"trades={trades} │ Sharpe={sharpe} │ Sortino={sortino} │ MaxDD={maxdd_str} │ Win={wr} │ PF={pf}")
 
-    # by-symbol short line
     bys = metrics.get("by_symbol", {})
     if bys:
         parts = []
@@ -68,7 +61,6 @@ def append(md: List[str], ctx) -> None:
             parts.append(f"{sym}(S={s_s}, WR={w_s})")
         md.append("by symbol: " + ", ".join(parts))
 
-    # artifacts list (best-effort)
     arts = []
     for name in ("perf_equity_curve.png", "perf_drawdown.png", "perf_returns_hist.png", "perf_by_symbol_bar.png"):
         if (arts_dir / name).exists():
