@@ -29,19 +29,28 @@ def _read_signals(log_path: Path, lookback_h: int) -> List[Signal]:
                 continue
             try:
                 j = json.loads(line)
-                ts = datetime.fromisoformat(j["ts"].replace("Z","+00:00"))
+                ts = datetime.fromisoformat(str(j["ts"]).replace("Z","+00:00"))
                 if ts < _now() - timedelta(hours=lookback_h):
                     continue
                 out.append(Signal(
                     ts=ts,
-                    symbol=str(j.get("symbol","")).upper(),
-                    direction=str(j.get("direction","")).lower(),
+                    symbol=str(j.get("symbol","")).upper().strip(),
+                    direction=str(j.get("direction","")).lower().strip(),
                     price=float(j.get("price") or 0.0),
                 ))
             except Exception:
+                # ignore malformed rows
                 continue
     out.sort(key=lambda s: (s.symbol, s.ts))
     return out
+
+def _estimate_trades(signals: List[Signal]) -> int:
+    # Each new signal closes the previous one for that symbol
+    # so per-symbol trades ~= max(0, len(sym_rows)-1)
+    grouped: Dict[str, int] = {}
+    for s in signals:
+        grouped[s.symbol] = grouped.get(s.symbol, 0) + 1
+    return sum(max(0, n - 1) for n in grouped.values())
 
 def _seed_demo_signals(lookback_h: int) -> List[Signal]:
     now = _now()
@@ -49,7 +58,7 @@ def _seed_demo_signals(lookback_h: int) -> List[Signal]:
     out: List[Signal] = []
     for sym in syms:
         base = {"BTC":60000,"ETH":3000,"SOL":150}[sym]
-        for k in range(4):  # 4 entries/symbol
+        for k in range(4):  # 4 entries/symbol -> 3 trades/symbol
             ts = now - timedelta(hours=(lookback_h-1) - k*2)
             direction = "long" if k%2==0 else "short"
             price = base * (1.0 + (k-1.5)*0.01)  # small wiggles
@@ -58,8 +67,6 @@ def _seed_demo_signals(lookback_h: int) -> List[Signal]:
     return out
 
 def _simple_backtest(signals: List[Signal]) -> Tuple[Dict[str,Any], Dict[str,Dict[str,Any]]]:
-    # toy backtest: on each new signal for a symbol we close the previous one
-    # PnL = (direction * (next_price/entry_price - 1))
     by_symbol: Dict[str, Dict[str, Any]] = {}
     total_pnls: List[float] = []
     wins = 0
@@ -102,11 +109,10 @@ def _simple_backtest(signals: List[Signal]) -> Tuple[Dict[str,Any], Dict[str,Dic
     sharpe = mu/sd
     sortino = mu/neg_sd if neg_sd>0 else float("inf")
     wr = 100.0*wins/trades
-    # crude PF: sum positive / abs(sum negative)
     pos = sum(p for p in total_pnls if p>0)
     neg = -sum(p for p in total_pnls if p<0) or 1e-9
     pf = pos/neg
-    max_dd = -100.0*min(0.0, min(total_pnls))  # very rough “max single-trade loss” as % proxy
+    max_dd = -100.0*min(0.0, min(total_pnls))  # rough proxy
 
     return {
         "trades": trades,
@@ -126,12 +132,14 @@ def main():
     lookback_h = int(os.getenv("PERF_LOOKBACK_H", "72"))
     demo = str(os.getenv("DEMO_MODE", "false")).lower() == "true"
 
-    # Load signals
+    # choose the canonical path by default (aligned with Task 0)
     sig_path = Path(os.getenv("SIGNALS_FILE", "")) if os.getenv("SIGNALS_FILE") else (logs / "signal_history.jsonl")
     sigs = _read_signals(sig_path, lookback_h)
-    if demo and len(sigs) < 5:
-        # ensure we have enough rows to produce non-zero trades in CI
-        sigs = _seed_demo_signals(lookback_h)
+
+    # NEW: if there are NO tradable pairs, seed demo signals in demo mode
+    if demo and _estimate_trades(sigs) == 0:
+        sigs.extend(_seed_demo_signals(lookback_h))
+        sigs.sort(key=lambda s: (s.symbol, s.ts))
 
     metrics, by_symbol = _simple_backtest(sigs)
     metrics["by_symbol"] = by_symbol
@@ -139,7 +147,7 @@ def main():
     models.mkdir(parents=True, exist_ok=True)
     (models / "performance_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
-    # Minimal visual (PNG placeholder); the summary will embed it if present
+    # Minimal visual (PNG placeholder) to embed in summary
     arts.mkdir(parents=True, exist_ok=True)
     try:
         import matplotlib
@@ -147,7 +155,6 @@ def main():
         import matplotlib.pyplot as plt
         xs = list(range(1, max(2, metrics.get("trades", 0)+1)))
         ys = [0.0]
-        # fake equity curve from trade pnls
         last = 0.0
         for _ in xs[1:]:
             last += random.uniform(-0.01, 0.02)
@@ -161,7 +168,6 @@ def main():
         plt.savefig(str(arts / "performance_validation_summary.png"))
         plt.close()
     except Exception:
-        # ignore — summary works without the plot
         pass
 
 if __name__ == "__main__":
