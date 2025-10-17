@@ -116,6 +116,18 @@ jobs:
           print("MW_CG_BASE_URL =", os.getenv("MW_CG_BASE_URL"))
           PY
 
+      # --- Smoke: emit a signal so downstream perf/backtest has input ---
+      - name: "Smoke: emit one signal (dual-write default)"
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python tools/emit_signal.py --symbol BTC --dir long --conf 0.72 --price 60000
+          echo "Tail (canonical):"
+          tail -n 1 logs/signal_history.jsonl || true
+          echo "Tail (legacy):"
+          tail -n 1 logs/signals.jsonl || true
+
       # --- Build demo summary (read-only orchestrator) ---
       - name: Build demo summary (read-only)
         if: ${{ success() }}
