@@ -1,147 +1,123 @@
+# src/signal_log.py
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Dict, Any
 
+# --- Constants ---
+_CANONICAL = Path("logs/signal_history.jsonl")
+_LEGACY = Path("logs/signals.jsonl")
+_ENV_PATH = "SIGNALS_FILE"
 
-CANONICAL_PATH = Path("logs/signal_history.jsonl")
-LEGACY_PATH = Path("logs/signals.jsonl")
-
-
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def make_signal_id(ts_iso: str, symbol: str, direction: str) -> str:
-    """
-    Build a deterministic ID using the ISO timestamp, uppercased symbol, and lowercased direction.
-    """
-    ts_iso = (ts_iso or "").strip()
-    symbol = (symbol or "").strip().upper()
-    direction = (direction or "").strip().lower()
-    return f"sig_{ts_iso}_{symbol}_{direction}"
-
+_REQUIRED_KEYS = [
+    "ts",            # ISO8601 UTC string
+    "symbol",        # e.g., "BTC"
+    "direction",     # "long" | "short"
+    "confidence",    # float
+    "price",         # float
+    "source",        # str
+    "model_version", # str
+]
 
 def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
+def make_signal_id(ts_iso: str, symbol: str, direction: str) -> str:
+    """Deterministic ID format required by downstream readers."""
+    sym = (symbol or "").strip().upper()
+    d = (direction or "").strip().lower()
+    ts = (ts_iso or "").strip()
+    return f"sig_{ts}_{sym}_{d}"
 
-def _append_jsonl(path: Path, row: Dict[str, Any]) -> None:
-    """
-    Append a single JSON object as a line to the given path.
-    Ensures UTF-8 encoding, newline-terminated, and fsync for durability.
-    """
-    _ensure_parent(path)
-    line = json.dumps(row, ensure_ascii=False) + "\n"
-    # newline translation is fine in text mode; force utf-8
-    with path.open("a", encoding="utf-8") as f:
-        f.write(line)
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            # Some environments (e.g., certain CI file systems) may not support fsync.
-            pass
-
-
-@dataclass
-class _SchemaSpec:
-    required: tuple = (
-        "ts",
-        "symbol",
-        "direction",
-        "confidence",
-        "price",
-        "source",
-        "model_version",
-        "outcome",
-    )
-    optional: tuple = ("id",)
-
-
-def _validate_and_normalize(row: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Validate required keys/types and normalize fields:
-      - symbol -> UPPER
-      - direction -> lower
-      - id -> generated if missing
-      - keys must be lowercase (by contract)
-    """
+def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and normalize a signal row in-place, returning the same dict."""
     if not isinstance(row, dict):
         raise TypeError("row must be a dict")
 
-    # Trim string-like inputs
-    def _s(v: Any) -> Any:
-        return v.strip() if isinstance(v, str) else v
+    # Strip trivial whitespace where appropriate
+    for k in ("ts", "symbol", "direction", "source", "model_version", "id"):
+        if k in row and isinstance(row[k], str):
+            row[k] = row[k].strip()
 
-    row = {str(k): row[k] for k in row}  # ensure string keys
-    # Ensure lower-case keys only (do not rename; require contract)
-    for k in list(row.keys()):
-        if k != k.lower():
-            # Preserve value but enforce lower-case key copy, then delete old key
-            row[k.lower()] = row.pop(k)
+    # Required keys/type checks
+    missing = [k for k in _REQUIRED_KEYS if k not in row]
+    if missing:
+        raise ValueError(f"missing required keys: {', '.join(missing)}")
 
-    spec = _SchemaSpec()
-    for key in spec.required:
-        if key not in row:
-            raise KeyError(f"missing required key: {key}")
+    # Normalize symbol/direction
+    row["symbol"] = str(row["symbol"]).upper()
+    row["direction"] = str(row["direction"]).lower()
 
-    # Normalize fields
-    row["symbol"] = _s(row["symbol"]).upper()
-    row["direction"] = _s(row["direction"]).lower()
-    row["ts"] = _s(row["ts"]) if row["ts"] is not None else _now_utc_iso()
-    row["source"] = _s(row["source"])
-    row["model_version"] = _s(row["model_version"])
-
-    # Basic type checks (lightweight / permissive casting where sensible)
-    if not isinstance(row["ts"], str):
-        raise TypeError("ts must be ISO8601 string")
-    if not isinstance(row["symbol"], str):
-        raise TypeError("symbol must be string")
-    if row["direction"] not in ("long", "short"):
-        raise ValueError("direction must be 'long' or 'short'")
-
+    # Basic type coercion/validation
     try:
         row["confidence"] = float(row["confidence"])
     except Exception as e:
-        raise TypeError("confidence must be float-like") from e
+        raise ValueError(f"confidence must be float-like: {e}")
 
     try:
         row["price"] = float(row["price"])
     except Exception as e:
-        raise TypeError("price must be float-like") from e
+        raise ValueError(f"price must be float-like: {e}")
 
-    # outcome can be null or any JSON value; do not coerce
+    if not isinstance(row["ts"], str) or not row["ts"]:
+        raise ValueError("ts must be a non-empty ISO8601 string")
 
-    # ID generation if missing/empty
-    if "id" not in row or not row["id"]:
+    if not isinstance(row["source"], str) or not row["source"]:
+        raise ValueError("source must be a non-empty string")
+
+    if not isinstance(row["model_version"], str) or not row["model_version"]:
+        raise ValueError("model_version must be a non-empty string")
+
+    # Optional keys: id, outcome
+    if not row.get("id"):
         row["id"] = make_signal_id(row["ts"], row["symbol"], row["direction"])
-    else:
-        row["id"] = _s(row["id"])
 
+    # Ensure keys exactly match schema + allow 'id' and 'outcome'
+    # (Do not drop extra keys silently; keep them to preserve forward-compat.)
     return row
 
+def _append_jsonl(path: Path, row: Dict[str, Any]) -> None:
+    """Append a single JSON object to a JSONL file with durability (fsync)."""
+    _ensure_parent(path)
+    line = json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+    # Use text mode with explicit encoding; fsync for durability
+    with path.open("a", encoding="utf-8", newline="") as f:
+        f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
 
 def write_signal(row: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Write the signal to the appropriate JSONL file(s) and return the normalized row.
-      - If SIGNALS_FILE is set -> write only to that file.
-      - Else -> dual-write to:
-            logs/signal_history.jsonl (canonical)
-            logs/signals.jsonl       (legacy)
+    Public API (v0.9.0): validate/normalize and write the signal.
+    Dual-write policy:
+      - If SIGNALS_FILE is set -> write ONLY to that path.
+      - Else -> write to both logs/signal_history.jsonl (canonical)
+               and logs/signals.jsonl (legacy).
+    Returns the normalized row.
     """
-    normalized = _validate_and_normalize(dict(row))  # copy defensively
+    row = _normalize_row(dict(row))  # copy defensively
 
-    custom = os.getenv("SIGNALS_FILE")
-    if custom:
-        _append_jsonl(Path(custom), normalized)
-        return normalized
+    override = os.getenv(_ENV_PATH)
+    if override:
+        _append_jsonl(Path(override), row)
+    else:
+        _append_jsonl(_CANONICAL, row)
+        _append_jsonl(_LEGACY, row)
 
-    # Dual-write (canonical + legacy)
-    _append_jsonl(CANONICAL_PATH, normalized)
-    _append_jsonl(LEGACY_PATH, normalized)
-    return normalized
+    return row
+
+# --- Backwards compatibility shim ---
+def log_signal(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Back-compat alias used by older routers/generators.
+    Delegates to write_signal().
+    """
+    return write_signal(row)
+
+__all__ = [
+    "write_signal",
+    "make_signal_id",
+    "log_signal",  # back-compat export
+]
