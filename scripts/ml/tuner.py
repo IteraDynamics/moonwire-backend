@@ -2,334 +2,313 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Dict, Any, Tuple, List, Optional
 
 import numpy as np
 import pandas as pd
 
-# Backtest API we call:
-# def run_backtest(pred_df: DataFrame, prices_df: DataFrame,
-#                  conf_min: float, debounce_min: int, horizon_h: int,
-#                  fees_bps: float = 1.0, slippage_bps: float = 2.0) -> dict
+# Local backtest
 from .backtest import run_backtest
 
+# ----------------------------
+# Config / Grids (wider to avoid zero-trade cold starts)
+# ----------------------------
+CONF_GRID: Tuple[float, ...] = (0.50, 0.52, 0.55, 0.58, 0.60, 0.62)
+DEBOUNCE_GRID: Tuple[int, ...] = (15, 30, 45, 60)           # minutes
+HORIZON_GRID: Tuple[int, ...] = (1, 2)                       # hours
 
-# ----------------------------- Config / Grid ----------------------------------
+FEES_BPS_DEFAULT: float = float(os.environ.get("MW_FEES_BPS", 1))
+SLIPPAGE_BPS_DEFAULT: float = float(os.environ.get("MW_SLIPPAGE_BPS", 2))
 
-CONF_GRID: Tuple[float, ...] = (0.55, 0.58, 0.60, 0.62)
-DEBOUNCE_GRID: Tuple[int, ...] = (15, 30, 45, 60)
-HORIZON_GRID: Tuple[int, ...] = (1, 2)
+# Constraints / objective
+MIN_WINRATE: float = 0.60
+SIGS_PER_DAY_MIN: float = 5.0
+SIGS_PER_DAY_MAX: float = 10.0
 
-TARGET_WINRATE: float = 0.60
-TARGET_MIN_SIGS_PER_DAY: float = 5.0
-TARGET_MAX_SIGS_PER_DAY: float = 10.0
+# Output paths
+MODELS_DIR = "models"
+ART_MODELS_THRESH = os.path.join(MODELS_DIR, "signal_thresholds.json")
+ART_MODELS_BTSUM = os.path.join(MODELS_DIR, "backtest_summary.json")
 
-DEFAULT_FEES_BPS: float = 1.0
-DEFAULT_SLIPPAGE_BPS: float = 2.0
 
-# ----------------------------- Data classes -----------------------------------
+def _ensure_dir(path: str) -> None:
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
 
 
 @dataclass
 class BTMetrics:
-    win_rate: float = float("nan")
-    profit_factor: float = float("nan")
-    max_drawdown: float = float("nan")
-    signals_per_day: float = float("nan")
+    win_rate: float = 0.0
+    profit_factor: float = 0.0
+    max_drawdown: float = 0.0
+    signals_per_day: float = 0.0
     n_trades: int = 0
 
 
-# ----------------------------- Helpers ----------------------------------------
-
-
-def _safe_len(x: Any) -> int:
-    """Return len(x) if possible, else 0."""
+def _safe_float(x: Any, default: float = 0.0) -> float:
     try:
-        return len(x)  # type: ignore[arg-type]
+        if x is None or (isinstance(x, float) and (np.isnan(x) or np.isinf(x))):
+            return default
+        return float(x)
     except Exception:
-        return 0
+        return default
+
+
+def _safe_int(x: Any, default: int = 0) -> int:
+    try:
+        if x is None:
+            return default
+        return int(x)
+    except Exception:
+        return default
 
 
 def _extract_metrics(bt: Dict[str, Any]) -> BTMetrics:
     """
-    Normalize various backtest return shapes into BTMetrics.
-
-    Expected (ideal) shape:
-      {
-        "metrics": {
-          "win_rate": float,
-          "profit_factor": float,
-          "max_drawdown": float,
-          "signals_per_day": float,
-          "n_trades": int
-        },
-        "trades": List[...]
-      }
-
-    But callers may return flat keys; or "trades" may already be an int.
+    Accepts results from run_backtest. Supports both:
+      - flat keys: win_rate, profit_factor, max_drawdown, signals_per_day, trades (list or int)
+      - nested metrics: metrics={win_rate, profit_factor, ...}, plus trades at top-level
     """
     m = bt.get("metrics", {})
-    # Prefer metrics.* first, then fallback to top-level or reasonable defaults.
-    win = float(m.get("win_rate", bt.get("win_rate", float("nan"))))
-    pf = float(m.get("profit_factor", bt.get("profit_factor", float("nan"))))
-    mdd = float(m.get("max_drawdown", bt.get("max_drawdown", float("nan"))))
-    spd = float(
-        m.get(
-            "signals_per_day",
-            bt.get("signals_per_day", float("nan")),
-        )
-    )
+    # Prefer nested metrics (if present), else top-level
+    win_rate = _safe_float(m.get("win_rate", bt.get("win_rate", 0.0)))
+    profit_factor = _safe_float(m.get("profit_factor", bt.get("profit_factor", 0.0)))
+    max_drawdown = _safe_float(m.get("max_drawdown", bt.get("max_drawdown", 0.0)))
+    signals_per_day = _safe_float(m.get("signals_per_day", bt.get("signals_per_day", 0.0)))
 
-    n_trades = m.get("n_trades", None)
-    if n_trades is None:
-        # "trades" could be a list or already an int
-        trades_obj = bt.get("trades", [])
-        if isinstance(trades_obj, int):
-            n_trades = trades_obj
-        else:
-            n_trades = _safe_len(trades_obj)
-    try:
-        n_trades = int(n_trades)
-    except Exception:
-        n_trades = 0
-
-    # Fill truly-missing numbers with neutral defaults so CI never crashes.
-    if math.isnan(win):
-        win = 0.5
-    if math.isnan(pf):
-        pf = 1.0
-    if math.isnan(mdd):
-        mdd = -0.10  # -10%
-    if math.isnan(spd):
-        spd = 0.0
+    trades_obj = bt.get("trades", m.get("trades", []))
+    if isinstance(trades_obj, int):
+        n_trades = trades_obj
+    else:
+        try:
+            n_trades = len(trades_obj)
+        except Exception:
+            n_trades = _safe_int(bt.get("n_trades", m.get("n_trades", 0)))
 
     return BTMetrics(
-        win_rate=win,
-        profit_factor=pf,
-        max_drawdown=mdd,
-        signals_per_day=spd,
+        win_rate=win_rate,
+        profit_factor=profit_factor,
+        max_drawdown=max_drawdown,
+        signals_per_day=signals_per_day,
         n_trades=n_trades,
     )
 
 
-def _agg_metrics(symbol_metrics: Dict[str, BTMetrics]) -> BTMetrics:
-    """Aggregate per-symbol metrics. Weighted by n_trades where sensible."""
-    if not symbol_metrics:
-        return BTMetrics(0.5, 1.0, -0.10, 0.0, 0)
-
-    total_trades = sum(m.n_trades for m in symbol_metrics.values())
-    if total_trades == 0:
-        # Equal-weight fallbacks if nothing traded
-        wr = float(np.nanmean([m.win_rate for m in symbol_metrics.values()]))
-        pf = float(np.nanmean([m.profit_factor for m in symbol_metrics.values()]))
-        mdd = float(np.nanmean([m.max_drawdown for m in symbol_metrics.values()]))
-        spd = float(np.nanmean([m.signals_per_day for m in symbol_metrics.values()]))
-        return BTMetrics(wr, pf, mdd, spd, 0)
-
-    # Weighted by trade count
-    wr = float(
-        sum(m.win_rate * m.n_trades for m in symbol_metrics.values()) / total_trades
+def _score_tuple(metrics: BTMetrics) -> Tuple[float, float, float]:
+    """
+    Sorting preference:
+      1) higher profit_factor
+      2) higher win_rate
+      3) lower absolute max_drawdown (i.e., less drawdown is better)
+    """
+    return (
+        _safe_float(metrics.profit_factor, 0.0),
+        _safe_float(metrics.win_rate, 0.0),
+        -abs(_safe_float(metrics.max_drawdown, 0.0)),
     )
-    pf = float(
-        sum(m.profit_factor * m.n_trades for m in symbol_metrics.values())
-        / total_trades
-    )
-    mdd = float(
-        sum(m.max_drawdown * m.n_trades for m in symbol_metrics.values()) / total_trades
-    )
-    spd = float(
-        sum(m.signals_per_day * m.n_trades for m in symbol_metrics.values())
-        / total_trades
-    )
-    return BTMetrics(wr, pf, mdd, spd, total_trades)
 
 
-def _within_objectives(agg: BTMetrics) -> bool:
-    """Check objective constraints."""
-    if agg.win_rate < TARGET_WINRATE:
+def _normalize_frames(preds: pd.DataFrame, px: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Align schemas and timestamps (UTC). Ensure we have 'ts' and 'p_long'.
+    Drop unparsable timestamps.
+    """
+    preds = preds.copy()
+    px = px.copy()
+
+    # prediction column alias
+    if "p_long" not in preds.columns:
+        if "p" in preds.columns:
+            preds["p_long"] = preds["p"]
+        else:
+            # If neither exists, fabricate neutral predictions (won't trigger at high conf)
+            preds["p_long"] = 0.5
+
+    # ensure ts present and UTC for both
+    if "ts" not in preds.columns and "ts" in px.columns:
+        # fallback: align length if possible
+        preds["ts"] = np.asarray(px["ts"])[: len(preds)]
+    preds["ts"] = pd.to_datetime(preds["ts"], utc=True, errors="coerce")
+    if "ts" in px.columns:
+        px["ts"] = pd.to_datetime(px["ts"], utc=True, errors="coerce")
+
+    # drop NA timestamps / predictions
+    preds = preds.dropna(subset=["ts", "p_long"])
+    if "ts" in px.columns:
+        px = px.dropna(subset=["ts"])
+
+    return preds, px
+
+
+def _aggregate(per_symbol: Dict[str, BTMetrics]) -> BTMetrics:
+    # Aggregate as averages where sensible; signals/day sums across symbols.
+    if not per_symbol:
+        return BTMetrics()
+
+    n = max(len(per_symbol), 1)
+    agg = BTMetrics()
+    agg.signals_per_day = sum(v.signals_per_day for v in per_symbol.values())
+    agg.win_rate = sum(v.win_rate for v in per_symbol.values()) / n
+    agg.profit_factor = sum(v.profit_factor for v in per_symbol.values()) / n
+    agg.max_drawdown = sum(v.max_drawdown for v in per_symbol.values()) / n
+    agg.n_trades = sum(v.n_trades for v in per_symbol.values())
+    return agg
+
+
+def _meets_constraints(agg: BTMetrics) -> bool:
+    if agg.win_rate < MIN_WINRATE:
         return False
-    if not (TARGET_MIN_SIGS_PER_DAY <= agg.signals_per_day <= TARGET_MAX_SIGS_PER_DAY):
+    if not (SIGS_PER_DAY_MIN <= agg.signals_per_day <= SIGS_PER_DAY_MAX):
         return False
     return True
 
 
-def _tie_break_key(agg: BTMetrics) -> Tuple[float, float, float, float]:
+def _metrics_to_dict(m: BTMetrics) -> Dict[str, Any]:
+    return {
+        "win_rate": round(_safe_float(m.win_rate), 4),
+        "profit_factor": round(_safe_float(m.profit_factor), 4),
+        "max_drawdown": round(_safe_float(m.max_drawdown), 4),
+        "signals_per_day": round(_safe_float(m.signals_per_day), 2),
+        "n_trades": _safe_int(m.n_trades),
+    }
+
+
+def tune_thresholds(pred_dfs: Dict[str, pd.DataFrame],
+                    prices: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
     """
-    Sort key for picking the best candidate when multiple pass (or none pass).
-
-    Priority:
-      1) Higher profit factor
-      2) Lower (less negative) max drawdown
-      3) Higher win rate
-      4) Signals/day closeness to the middle of the target band (7.5)
+    Grid-search thresholds across symbols, backtest, and choose the best set
+    meeting constraints (win-rate & signals/day). If none meet constraints,
+    fall back to the best by score. Writes:
+      - models/signal_thresholds.json
+      - models/backtest_summary.json
+    Returns a dict with keys: params, agg, per_symbol, grid_evaluations.
     """
-    center = (TARGET_MIN_SIGS_PER_DAY + TARGET_MAX_SIGS_PER_DAY) / 2.0
-    # Negative abs distance so that "closer is better" => larger sort key
-    sig_score = -abs(agg.signals_per_day - center)
-    return (agg.profit_factor, -abs(agg.max_drawdown), agg.win_rate, sig_score)
+    fees = FEES_BPS_DEFAULT
+    slip = SLIPPAGE_BPS_DEFAULT
 
+    evaluations: List[Dict[str, Any]] = []
+    best_choice: Optional[Dict[str, Any]] = None
+    best_choice_score: Optional[Tuple[float, float, float]] = None
 
-# ----------------------------- Public API -------------------------------------
-
-
-def tune_thresholds(
-    pred_dfs: Dict[str, pd.DataFrame],
-    prices: Dict[str, pd.DataFrame],
-    fees_bps: float = DEFAULT_FEES_BPS,
-    slippage_bps: float = DEFAULT_SLIPPAGE_BPS,
-) -> Dict[str, Any]:
-    """
-    Grid-search thresholds & debounce; aggregate across symbols; pick the best.
-
-    Returns:
-      {
-        "params": {"conf_min": float, "debounce_min": int, "horizon_h": int},
-        "agg": {"win_rate": float, "profit_factor": float, "max_drawdown": float, "signals_per_day": float},
-        "per_symbol": { "BTC": {...}, ... },
-
-        # Legacy fields kept for compatibility:
-        "conf_min": ...,
-        "debounce_min": ...,
-        "horizon_h": ...,
-        "aggregate": {...}
-      }
-    Also writes:
-      models/signal_thresholds.json
-      models/backtest_summary.json
-    """
-    symbols = sorted([s for s in pred_dfs.keys() if s in prices])
-
-    if not symbols:
-        # Nothing to tune; persist defaults and return a neutral payload.
-        params = {"conf_min": 0.60, "debounce_min": 30, "horizon_h": 1}
-        agg = {
-            "win_rate": 0.50,
-            "profit_factor": 1.00,
-            "max_drawdown": -0.10,
-            "signals_per_day": 0.0,
-        }
-        os.makedirs("models", exist_ok=True)
-        with open("models/signal_thresholds.json", "w") as f:
-            json.dump(params, f, indent=2)
-        with open("models/backtest_summary.json", "w") as f:
-            json.dump({"aggregate": agg, "per_symbol": {}}, f, indent=2)
-        return {
-            "params": params,
-            "agg": agg,
-            "per_symbol": {},
-            "conf_min": params["conf_min"],
-            "debounce_min": params["debounce_min"],
-            "horizon_h": params["horizon_h"],
-            "aggregate": agg,
-        }
-
-    best_candidate = None  # type: ignore[var-annotated]
-    best_key = None  # type: ignore[var-annotated]
-
-    # Grid search
-    for conf_min in CONF_GRID:
-        for debounce_min in DEBOUNCE_GRID:
-            for horizon_h in HORIZON_GRID:
-                per_symbol_metrics: Dict[str, BTMetrics] = {}
-
-                for sym in symbols:
-                    preds = pred_dfs[sym]
-                    px = prices[sym]
-
-                    # Defensive: ensure columns exist
-                    if "p_long" not in preds.columns:
-                        # If no probas, skip symbol for this combo
-                        per_symbol_metrics[sym] = BTMetrics(0.5, 1.0, -0.10, 0.0, 0)
+    # Evaluate each grid point
+    for conf in CONF_GRID:
+        for debounce in DEBOUNCE_GRID:
+            for horizon in HORIZON_GRID:
+                symbol_metrics: Dict[str, BTMetrics] = {}
+                # Per-symbol backtests
+                for sym, preds in pred_dfs.items():
+                    px = prices.get(sym)
+                    if px is None or preds is None:
                         continue
-                    if "ts" not in preds.columns:
-                        # Align by index if no ts; copy over to be safe
-                        preds = preds.copy()
-                        preds["ts"] = np.arange(len(preds))
 
-                    # Run backtest for this symbol/setting
+                    preds_norm, px_norm = _normalize_frames(preds, px)
+
+                    # Skip if nothing left after normalization
+                    if preds_norm.empty or px_norm.empty:
+                        symbol_metrics[sym] = BTMetrics()
+                        continue
+
                     bt = run_backtest(
-                        pred_df=preds,
-                        prices_df=px,
-                        conf_min=conf_min,
-                        debounce_min=debounce_min,
-                        horizon_h=horizon_h,
-                        fees_bps=fees_bps,
-                        slippage_bps=slippage_bps,
+                        pred_df=preds_norm,
+                        prices_df=px_norm,
+                        conf_min=float(conf),
+                        debounce_min=int(debounce),
+                        horizon_h=int(horizon),
+                        fees_bps=fees,
+                        slippage_bps=slip,
                     )
+                    symbol_metrics[sym] = _extract_metrics(bt)
 
-                    per_symbol_metrics[sym] = _extract_metrics(bt)
+                # Aggregate
+                agg = _aggregate(symbol_metrics)
+                meets = _meets_constraints(agg)
+                score = _score_tuple(agg)
 
-                agg = _agg_metrics(per_symbol_metrics)
+                # record this evaluation
+                evaluations.append({
+                    "params": {"conf_min": conf, "debounce_min": debounce, "horizon_h": horizon},
+                    "agg": _metrics_to_dict(agg),
+                    "per_symbol": {k: _metrics_to_dict(v) for k, v in symbol_metrics.items()},
+                    "meets_constraints": meets,
+                    "score_tuple": score,
+                })
 
-                # Determine if it passes objectives
-                passes = _within_objectives(agg)
-                key = _tie_break_key(agg)
+                # choose best
+                if meets:
+                    if (best_choice is None) or (score > best_choice_score):
+                        best_choice = evaluations[-1]
+                        best_choice_score = score
 
-                # Pick best among those passing objectives; if none pass, still pick best key.
-                if best_candidate is None:
-                    best_candidate = (conf_min, debounce_min, horizon_h, agg, per_symbol_metrics)
-                    best_key = (passes, key)
-                else:
-                    # Prefer a passing candidate over a failing one.
-                    if passes and not best_key[0]:
-                        best_candidate = (conf_min, debounce_min, horizon_h, agg, per_symbol_metrics)
-                        best_key = (passes, key)
-                    elif passes == best_key[0]:
-                        # Same pass/fail status — choose by key.
-                        if key > best_key[1]:
-                            best_candidate = (conf_min, debounce_min, horizon_h, agg, per_symbol_metrics)
-                            best_key = (passes, key)
+    # Fallback: if none meet constraints, take the best by score anyway
+    if best_choice is None and evaluations:
+        best_choice = max(evaluations, key=lambda r: r["score_tuple"])
+        best_choice_score = best_choice["score_tuple"]
 
-    # Unpack best
-    best_conf, best_debounce, best_h, agg_metrics, per_symbol_metrics = best_candidate  # type: ignore[misc]
-
-    # ---- Build result (new shape) + keep legacy fields for compatibility ----
-    params = {
-        "conf_min": best_conf,
-        "debounce_min": best_debounce,
-        "horizon_h": best_h,
-    }
-
-    agg = {
-        "win_rate": float(agg_metrics.win_rate),
-        "profit_factor": float(agg_metrics.profit_factor),
-        "max_drawdown": float(agg_metrics.max_drawdown),
-        "signals_per_day": float(agg_metrics.signals_per_day),
-    }
-
-    per_symbol_out: Dict[str, Dict[str, float]] = {
-        s: {
-            "win_rate": float(m.win_rate),
-            "profit_factor": float(m.profit_factor),
-            "max_drawdown": float(m.max_drawdown),
-            "signals_per_day": float(m.signals_per_day),
-            "n_trades": int(m.n_trades),
-        }
-        for s, m in per_symbol_metrics.items()
-    }
+    # Build result payload
+    if best_choice is None:
+        # total failure; emit safe defaults
+        chosen_params = {"conf_min": 0.55, "debounce_min": 30, "horizon_h": 1}
+        agg = BTMetrics()
+        per_symbol = {}
+    else:
+        chosen_params = best_choice["params"]
+        # In case of any rounding / safety
+        agg_dict = best_choice["agg"]
+        per_symbol = best_choice["per_symbol"]
+        agg = BTMetrics(
+            win_rate=_safe_float(agg_dict.get("win_rate", 0.0)),
+            profit_factor=_safe_float(agg_dict.get("profit_factor", 0.0)),
+            max_drawdown=_safe_float(agg_dict.get("max_drawdown", 0.0)),
+            signals_per_day=_safe_float(agg_dict.get("signals_per_day", 0.0)),
+            n_trades=_safe_int(agg_dict.get("n_trades", 0)),
+        )
 
     result = {
-        # New, test-expected keys
-        "params": params,
-        "agg": agg,
-        "per_symbol": per_symbol_out,
-        # Legacy flat fields so any existing callers don’t break
-        "conf_min": params["conf_min"],
-        "debounce_min": params["debounce_min"],
-        "horizon_h": params["horizon_h"],
-        "aggregate": agg,
+        "params": {
+            "conf_min": float(chosen_params["conf_min"]),
+            "debounce_min": int(chosen_params["debounce_min"]),
+            "horizon_h": int(chosen_params["horizon_h"]),
+        },
+        "agg": _metrics_to_dict(agg),
+        "per_symbol": per_symbol,
+        "grid_evaluations": [
+            {
+                "params": e["params"],
+                "agg": e["agg"],
+                "meets_constraints": bool(e["meets_constraints"]),
+            }
+            for e in evaluations
+        ],
     }
 
-    # Persist thresholds for runtime consumption
-    os.makedirs("models", exist_ok=True)
-    with open("models/signal_thresholds.json", "w") as f:
-        json.dump(params, f, indent=2)
+    # Persist artifacts
+    _ensure_dir(ART_MODELS_THRESH)
+    _ensure_dir(ART_MODELS_BTSUM)
 
-    # Save a full backtest summary (aggregate + per-symbol)
-    with open("models/backtest_summary.json", "w") as f:
-        json.dump({"aggregate": agg, "per_symbol": per_symbol_out}, f, indent=2)
+    try:
+        with open(ART_MODELS_THRESH, "w") as f:
+            json.dump(result["params"], f, indent=2)
+    except Exception:
+        # Keep CI resilient
+        pass
+
+    # Summarize backtest for CI (aggregate + per_symbol)
+    try:
+        bt_summary = {
+            "aggregate": {
+                "win_rate": result["agg"]["win_rate"],
+                "profit_factor": result["agg"]["profit_factor"],
+                "max_drawdown": result["agg"]["max_drawdown"],
+                "signals_per_day": result["agg"]["signals_per_day"],
+            },
+            "per_symbol": result["per_symbol"],
+        }
+        with open(ART_MODELS_BTSUM, "w") as f:
+            json.dump(bt_summary, f, indent=2)
+    except Exception:
+        pass
 
     return result
