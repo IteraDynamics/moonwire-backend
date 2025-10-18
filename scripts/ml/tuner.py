@@ -53,20 +53,60 @@ class BTMetrics:
     # Optional richer payload for future use
     gross_profit: float | None = None
     gross_loss: float | None = None
-
-
+    
 def _extract_metrics(bt: Dict[str, Any]) -> BTMetrics:
-    m = bt.get("metrics", {})
-    n_trades = int(m.get("n_trades", len(bt.get("trades", []))))
+    """
+    Accepts either:
+      A) {"metrics": {...}, "trades": int|list, ...}
+      B) Flat: {"win_rate": .., "profit_factor": .., "max_drawdown": ..,
+                "signals_per_day": .., "trades": int|list, ...}
+    """
+    m = bt.get("metrics")
+    if isinstance(m, dict):
+        # Nested metrics dict
+        wr = float(m.get("win_rate", 0.0))
+        pf = float(m.get("profit_factor", 0.0))
+        dd = float(m.get("max_drawdown", 0.0))
+        sig = float(m.get("signals_per_day", 0.0))
+        # n_trades can be in metrics, or infer from top-level trades
+        n_trades = m.get("n_trades", None)
+        if n_trades is None:
+            trades_obj = bt.get("trades", [])
+            if isinstance(trades_obj, int):
+                n_trades = trades_obj
+            elif isinstance(trades_obj, (list, tuple)):
+                n_trades = len(trades_obj)
+            else:
+                n_trades = 0
+        n_trades = int(n_trades)
+        gp = m.get("gross_profit")
+        gl = m.get("gross_loss")
+    else:
+        # Flat dict
+        wr = float(bt.get("win_rate", 0.0))
+        pf = float(bt.get("profit_factor", 0.0))
+        dd = float(bt.get("max_drawdown", 0.0))
+        sig = float(bt.get("signals_per_day", 0.0))
+        trades_obj = bt.get("trades", [])
+        if isinstance(trades_obj, int):
+            n_trades = trades_obj
+        elif isinstance(trades_obj, (list, tuple)):
+            n_trades = len(trades_obj)
+        else:
+            n_trades = int(bt.get("n_trades", 0))
+        gp = bt.get("gross_profit")
+        gl = bt.get("gross_loss")
+
     return BTMetrics(
-        win_rate=float(m.get("win_rate", 0.0)),
-        profit_factor=float(m.get("profit_factor", 0.0)),
-        max_drawdown=float(m.get("max_drawdown", 0.0)),
-        signals_per_day=float(m.get("signals_per_day", 0.0)),
-        n_trades=n_trades,
-        gross_profit=float(m.get("gross_profit", np.nan)) if "gross_profit" in m else None,
-        gross_loss=float(m.get("gross_loss", np.nan)) if "gross_loss" in m else None,
+        win_rate=wr,
+        profit_factor=pf,
+        max_drawdown=dd,
+        signals_per_day=sig,
+        n_trades=int(n_trades),
+        gross_profit=float(gp) if gp is not None and gp == gp else None,  # keep None if NaN
+        gross_loss=float(gl) if gl is not None and gl == gl else None,
     )
+
 
 
 # ----------------------------- aggregation ------------------------------------
