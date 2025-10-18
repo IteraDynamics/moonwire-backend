@@ -17,9 +17,9 @@ jobs:
       MW_FEES_BPS: '1'
       MW_SLIPPAGE_BPS: '3'
       # Optional: steer the tuner grid (order matters for tie-breaks)
-      MW_CONF_GRID: "0.45,0.50,0.55"
-      MW_DEBOUNCE_GRID_MIN: '10,15,30'
-      MW_HORIZON_GRID_H: '1,2'
+      MW_CONF_GRID: "0.62,0.65,0.68,0.70,0.72"
+      MW_DEBOUNCE_GRID_MIN: '30,45,60'
+      MW_HORIZON_GRID_H: '2'
 
     steps:
       - name: Checkout code
