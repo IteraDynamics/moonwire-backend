@@ -189,6 +189,22 @@ def main() -> None:
         if "y_long" in b.df_labeled.columns:
             y_true_concat.append(b.df_labeled["y_long"].astype(int).values)
             y_prob_concat.append(b.proba.astype(float))
+            
+    def _grid_from_env(name: str, cast=float):
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            return None
+        out = []
+        for tok in raw.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            out.append(cast(tok))
+        return out or None
+
+    conf_grid = _grid_from_env("TUNER_CONF_GRID", float)      # e.g. "0.62,0.65,0.68,0.70,0.72"
+    debounce_grid = _grid_from_env("TUNER_DEBOUNCE_GRID", int) # e.g. "45,60,90"
+    horizon_grid = _grid_from_env("TUNER_HORIZON_GRID", int)
 
     # 5) Tune thresholds (writes models/signal_thresholds.json inside)
     tune_res = tune_thresholds(pred_dfs, prices)
