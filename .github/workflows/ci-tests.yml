@@ -17,9 +17,9 @@ jobs:
       MW_FEES_BPS: '1'
       MW_SLIPPAGE_BPS: '3'
       # Optional: steer the tuner grid (order matters for tie-breaks)
-      MW_CONF_GRID: "0.65,0.68,0.70,0.72,0.75"
-      MW_DEBOUNCE_GRID_MIN: '30,45,60,90'
-      MW_HORIZON_GRID_H: '2'
+      MW_CONF_GRID: "0.68,0.70,0.72,0.75,0.78"
+      MW_DEBOUNCE_GRID_MIN: '45,60,90'
+      MW_HORIZON_GRID_H: '2,3'
       TUNER_STRICT: "1"
       MW_CALIBRATE_PROBS: "platt"
 
