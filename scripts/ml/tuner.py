@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +10,6 @@ from typing import Any, Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 
-# MoonWire paths (repo root assumed two levels up from this file)
 ROOT = Path(__file__).resolve().parents[3]
 MODELS_DIR = ROOT / "models"
 ARTIFACTS_DIR = ROOT / "artifacts"
@@ -25,9 +23,6 @@ BACKTEST_SUMMARY_PATH = MODELS_DIR / "backtest_summary.json"
 THRESHOLDS_PATH = MODELS_DIR / "signal_thresholds.json"
 TRADES_LOG_PATH = LOGS_DIR / "trades.jsonl"
 
-# Import the repo's backtest function
-# Expected signature:
-# run_backtest(pred_df, prices_df, conf_min, debounce_min, horizon_h, fees_bps=..., slippage_bps=...)
 from scripts.ml.backtest import run_backtest  # type: ignore
 
 
@@ -43,7 +38,7 @@ class BTMetrics:
 
 
 # -----------------------
-# Helpers (robust parsing)
+# Helpers
 # -----------------------
 
 def _as_int(x: Any, default: int = 0) -> int:
@@ -62,20 +57,56 @@ def _as_float(x: Any, default: float = 0.0) -> float:
         return default
 
 
+def _trade_to_dict(t: Any) -> Dict[str, Any]:
+    """Normalize a trade (dict or object) to a JSON-serializable dict."""
+    if isinstance(t, dict):
+        return t
+    # object-like: try common attrs; fall back to __dict__ (if safe)
+    keys = [
+        "ts", "entry_ts", "exit_ts", "symbol", "side",
+        "entry_px", "exit_px", "pnl", "pnl_pct", "size",
+        "conf", "horizon_h", "fees", "slippage",
+    ]
+    d: Dict[str, Any] = {}
+    for k in keys:
+        if hasattr(t, k):
+            d[k] = getattr(t, k)
+    # if still empty, last resort
+    if not d and hasattr(t, "__dict__"):
+        try:
+            d = dict(t.__dict__)
+        except Exception:
+            d = {}
+    return d
+
+
+def _extract_pnl(trade: Any) -> float:
+    """Get pnl from a dict or object trade."""
+    if isinstance(trade, dict):
+        return _as_float(trade.get("pnl", 0.0), 0.0)
+    if hasattr(trade, "pnl"):
+        return _as_float(getattr(trade, "pnl"), 0.0)
+    # try pnl_pct as a proxy
+    if isinstance(trade, dict):
+        return _as_float(trade.get("pnl_pct", 0.0), 0.0)
+    if hasattr(trade, "pnl_pct"):
+        return _as_float(getattr(trade, "pnl_pct"), 0.0)
+    return 0.0
+
+
 def _extract_metrics(bt: Dict[str, Any]) -> BTMetrics:
     """
-    Accepts flexible shapes from run_backtest and extracts consistent metrics.
-    Supports:
-      - at root or under 'metrics'
-      - 'trades' can be count or list
+    Extract consistent metrics from run_backtest() outputs.
+    Supports nested 'metrics' dict, and trades as list[int/dict/object] or count.
     """
     m = bt.get("metrics", {})
 
+    # n_trades
     n_trades = _as_int(m.get("n_trades", bt.get("trades", 0)))
     if n_trades == 0:
-        # If trades are a list at root, try it
         n_trades = _as_int(bt.get("trades", 0), 0)
 
+    # simple scalars
     win_rate = _as_float(bt.get("win_rate", m.get("win_rate", 0.0)), 0.0)
     profit_factor = _as_float(bt.get("profit_factor", m.get("profit_factor", 0.0)), 0.0)
     max_drawdown = _as_float(bt.get("max_drawdown", m.get("max_drawdown", 0.0)), 0.0)
@@ -84,14 +115,14 @@ def _extract_metrics(bt: Dict[str, Any]) -> BTMetrics:
     wins = _as_int(m.get("wins", bt.get("wins", 0)), 0)
     losses = _as_int(m.get("losses", bt.get("losses", 0)), 0)
 
-    # If we have trades as a list with pnl, recompute wins/losses if needed
+    # If trades list present, recompute wins/losses if missing
     trades_obj = bt.get("trades", None)
     if isinstance(trades_obj, (list, tuple)) and len(trades_obj) > 0:
         if wins == 0 and losses == 0:
             w = 0
             l = 0
             for t in trades_obj:
-                pnl = t.get("pnl", 0.0)
+                pnl = _extract_pnl(t)
                 if pnl > 0:
                     w += 1
                 elif pnl < 0:
@@ -140,24 +171,21 @@ def _aggregate_metrics(per_symbol: Dict[str, BTMetrics]) -> Dict[str, float]:
     mdds = [m.max_drawdown for m in per_symbol.values()]
     spd = [m.signals_per_day for m in per_symbol.values()]
 
-    agg = {
+    return {
         "n_trades": int(sum(n_trades)),
-        "win_rate": _weighted_average(wrs, n_trades),  # weight by # trades
+        "win_rate": _weighted_average(wrs, n_trades),
         "profit_factor": _weighted_average(pfs, n_trades) if sum(n_trades) > 0 else float(np.mean(pfs)),
         "max_drawdown": float(np.mean(mdds)) if mdds else 0.0,
-        "signals_per_day": float(np.sum(spd)),  # aggregate across symbols (sum)
+        "signals_per_day": float(np.sum(spd)),
     }
-    return agg
 
 
 def _penalty(agg: Dict[str, float], target_wr: float = 0.60, min_spd: float = 5.0, max_spd: float = 10.0) -> float:
-    """Lower is better. Penalize distance from constraints, prefer higher PF and lower MDD."""
     wr = agg.get("win_rate", 0.0)
     spd = agg.get("signals_per_day", 0.0)
     pf = agg.get("profit_factor", 0.0)
     mdd = abs(agg.get("max_drawdown", 0.0))
 
-    # Distance from constraints
     wr_gap = max(0.0, target_wr - wr)
     spd_gap = 0.0
     if spd < min_spd:
@@ -165,23 +193,14 @@ def _penalty(agg: Dict[str, float], target_wr: float = 0.60, min_spd: float = 5.
     elif spd > max_spd:
         spd_gap = (spd - max_spd)
 
-    # Prefer higher PF, lower MDD
-    score = 0.0
-    score += 10.0 * wr_gap
-    score += 2.0 * spd_gap
-    score += 1.0 * mdd
-    score += 1.0 * max(0.0, 1.0 - pf)  # if PF<1, penalize towards 1
-
+    score = 10.0 * wr_gap + 2.0 * spd_gap + 1.0 * mdd + 1.0 * max(0.0, 1.0 - pf)
     return score
 
 
 def _mk_params_grid() -> Iterable[Tuple[float, int, int]]:
-    conf_vals = [0.55, 0.58, 0.60, 0.62]
-    debounce_vals = [15, 30, 45, 60]
-    horizon_vals = [1, 2]
-    for c in conf_vals:
-        for d in debounce_vals:
-            for h in horizon_vals:
+    for c in [0.55, 0.58, 0.60, 0.62]:
+        for d in [15, 30, 45, 60]:
+            for h in [1, 2]:
                 yield (c, d, h)
 
 
@@ -189,7 +208,6 @@ def _env_or_default(key: str, default: Any) -> Any:
     v = os.getenv(key)
     if v is None:
         return default
-    # Try to cast numerics if default is numeric
     try:
         if isinstance(default, int):
             return int(v)
@@ -216,15 +234,14 @@ def tune_thresholds(
     write_summary: bool = True,
 ) -> Dict[str, Any]:
     """
-    Grid-search over thresholds with constraints:
+    Grid-search thresholds with constraints:
       - win_rate >= 0.60
-      - 5 <= signals/day <= 10 (aggregate across symbols)
-    Tie-break by profit factor (higher), then max drawdown (lower).
+      - 5 <= signals/day <= 10 (aggregate)
+    Tie-break by PF (higher), then |MDD| (lower), then WR (higher).
     Writes:
       - models/backtest_summary.json
       - models/signal_thresholds.json
-      - logs/trades.jsonl (best-run trades if available and MW_WRITE_BT_LOGS=1)
-    Returns dict with keys: 'params', 'agg', 'per_symbol', 'grid'
+      - logs/trades.jsonl (best config, if any trades)
     """
     fees_bps = _env_or_default("MW_FEES_BPS", 1.0)
     slippage_bps = _env_or_default("MW_SLIPPAGE_BPS", 2.0)
@@ -260,19 +277,18 @@ def tune_thresholds(
                 slippage_bps=slippage_bps,
             )
 
-            # Collect trades if present for the best-run log
-            trades_obj = bt.get("trades", [])
-            if isinstance(trades_obj, list):
-                trades_by_symbol[sym] = trades_obj
-            else:
-                trades_by_symbol[sym] = []
+            # Normalize trades for later logging
+            trades = bt.get("trades", [])
+            norm_trades: List[Dict[str, Any]] = []
+            if isinstance(trades, (list, tuple)):
+                for t in trades:
+                    norm_trades.append(_trade_to_dict(t))
+            trades_by_symbol[sym] = norm_trades
 
             per_symbol_metrics[sym] = _extract_metrics(bt)
 
-        # Aggregate
+        # Aggregate & score
         agg = _aggregate_metrics(per_symbol_metrics)
-
-        # Penalty (lower is better)
         pen = _penalty(agg, target_wr=0.60, min_spd=5.0, max_spd=10.0)
 
         tried.append(
@@ -286,15 +302,12 @@ def tune_thresholds(
             }
         )
 
-        # Selection rule:
-        # 1) prefer feasible (win_rate >= .60 and 5<=spd<=10)
         feasible = (
             agg.get("win_rate", 0.0) >= 0.60
             and 5.0 <= agg.get("signals_per_day", 0.0) <= 10.0
         )
 
-        def _tie_break_key(a: Dict[str, float]) -> Tuple[float, float, float]:
-            # Higher PF, lower |MDD|, higher WR
+        def _tie_key(a: Dict[str, float]) -> Tuple[float, float, float]:
             return (a.get("profit_factor", 0.0), -abs(a.get("max_drawdown", 0.0)), a.get("win_rate", 0.0))
 
         choose = False
@@ -309,42 +322,32 @@ def tune_thresholds(
                 if feasible and not best_feasible:
                     choose = True
                 elif feasible and best_feasible:
-                    # tie-break within feasible set
-                    choose = _tie_break_key(agg) > _tie_break_key(best_agg)  # type: ignore
+                    choose = _tie_key(agg) > _tie_key(best_agg)  # type: ignore
             else:
-                # choose by lower penalty if still infeasible
                 choose = pen < best_pen
 
         if choose:
-            best_params = {
-                "conf_min": conf_min,
-                "debounce_min": debounce_min,
-                "horizon_h": horizon_h,
-            }
+            best_params = {"conf_min": conf_min, "debounce_min": debounce_min, "horizon_h": horizon_h}
             best_agg = agg
             best_per_symbol = {k: vars(v) for k, v in per_symbol_metrics.items()}
             best_pen = pen
             best_trades_by_symbol = trades_by_symbol
 
-    # Safety fallback if nothing was set (empty inputs)
     if best_params is None:
         best_params = {"conf_min": 0.55, "debounce_min": 15, "horizon_h": 1}
         best_agg = {"n_trades": 0, "win_rate": 0.0, "profit_factor": 0.0, "max_drawdown": 0.0, "signals_per_day": 0.0}
         best_per_symbol = {sym: vars(BTMetrics()) for sym in symbols}
 
-    # Compose final result
     result = {
         "params": best_params,
         "agg": best_agg,
         "per_symbol": best_per_symbol,
-        "grid": tried,  # optional introspection
+        "grid": tried,
     }
 
-    # Write summaries
     if write_summary:
         _write_json(BACKTEST_SUMMARY_PATH, result)
 
-    # Always write thresholds.json to satisfy tests & CI expectations
     _write_json(
         THRESHOLDS_PATH,
         {
@@ -356,23 +359,20 @@ def tune_thresholds(
         },
     )
 
-    # Optionally write trades.jsonl for the best run
     if os.getenv("MW_WRITE_BT_LOGS", "1") == "1":
         try:
             with open(TRADES_LOG_PATH, "w", encoding="utf-8") as f:
-                # Flatten trades per symbol; if none, write a helpful note
-                total_written = 0
+                total = 0
                 for sym, trades in best_trades_by_symbol.items():
-                    if isinstance(trades, list) and trades:
-                        for t in trades:
-                            rec = dict(t)
+                    if trades:
+                        for rec in trades:
+                            rec = dict(rec)
                             rec["symbol"] = sym
                             f.write(json.dumps(rec) + "\n")
-                            total_written += 1
-                if total_written == 0:
+                            total += 1
+                if total == 0:
                     f.write(json.dumps({"note": "No trades met thresholds in best configuration."}) + "\n")
         except Exception:
-            # Never break CI on logging
             pass
 
     return result
