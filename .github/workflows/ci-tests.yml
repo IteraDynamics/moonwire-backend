@@ -12,12 +12,12 @@ jobs:
     env:
       MW_ML_SYMBOLS: BTC,ETH,SOL
       MW_ML_LOOKBACK_DAYS: '180'
-      MW_ML_MODEL: hgb         # or 'gb' if you enabled GradientBoosting
+      MW_ML_MODEL: hybrid         # or 'gb' if you enabled GradientBoosting
       MW_HORIZON_H: '1'
       MW_FEES_BPS: '1'
       MW_SLIPPAGE_BPS: '3'
       # Optional: steer the tuner grid (order matters for tie-breaks)
-      MW_CONF_GRID: "0.62,0.65,0.68,0.70,0.72"
+      MW_CONF_GRID: "0.65,0.68,0.70,0.72"
       MW_DEBOUNCE_GRID_MIN: '30,45,60'
       MW_HORIZON_GRID_H: '2'
 
