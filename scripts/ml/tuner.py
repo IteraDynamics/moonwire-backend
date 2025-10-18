@@ -1,360 +1,354 @@
 # scripts/ml/tuner.py
-
+# ---------------------------------------------------------------------
+# Threshold grid search over model probabilities -> trading signals.
+# Writes:
+#   - models/signal_thresholds.json
+#   - models/backtest_summary.json
+# and returns a dict containing {'params', 'agg', 'per_symbol'}.
+# ---------------------------------------------------------------------
 from __future__ import annotations
 
 import json
+import math
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Tuple, Union
+from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
+
+# --- universal import shim + paths (works in pytest, CI, and python __main__) ---
 import sys
 
-try:
-    # when imported as package (pytest, normal runs)
-    from scripts.ml.backtest import run_backtest  # type: ignore
-except ModuleNotFoundError:
-    # when executed directly (no package on sys.path)
-    ROOT = Path(__file__).resolve().parents[2]
-    if str(ROOT) not in sys.path:
-        sys.path.append(str(ROOT))
-    from scripts.ml.backtest import run_backtest  # type: ignore
-# --------------------------------------------------------------------------
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+# -------------------------------------------------------------------------------
 
+# Local import after path shim
+from scripts.ml.backtest import run_backtest  # type: ignore
 
+# IO locations
 MODELS_DIR = ROOT / "models"
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = ROOT / "logs"
+ART_DIR = ROOT / "artifacts"
+for d in (MODELS_DIR, LOGS_DIR, ART_DIR):
+    d.mkdir(parents=True, exist_ok=True)
 
-# ------------------------------- helpers ------------------------------------ #
-
-Number = Union[int, float, np.number]
-
-
-def _as_int(x: Any, default: int = 0) -> int:
-    if isinstance(x, (int, np.integer)):
-        return int(x)
-    if isinstance(x, (list, tuple, set)):
-        return len(x)
-    try:
-        return int(x)
-    except Exception:
-        return default
+# --------------------------- helpers & typing ---------------------------------
 
 
 def _as_float(x: Any, default: float = 0.0) -> float:
     try:
-        return float(x)
+        if x is None:
+            return default
+        if isinstance(x, (int, float, np.floating, np.integer)):
+            return float(x)
+        if isinstance(x, str):
+            return float(x.strip())
+        return default
     except Exception:
         return default
 
 
-@dataclass
-class BTMetrics:
-    win_rate: float = 0.0
-    profit_factor: float = 0.0
-    max_drawdown: float = 0.0
-    signals_per_day: float = 0.0
-    n_trades: int = 0
+def _as_int(x: Any, default: int = 0) -> int:
+    try:
+        if x is None:
+            return default
+        if isinstance(x, (int, np.integer)):
+            return int(x)
+        if isinstance(x, float):
+            return int(round(x))
+        if isinstance(x, str):
+            return int(x.strip())
+        if isinstance(x, (list, tuple)):
+            return len(x)  # interpret as count
+        return default
+    except Exception:
+        return default
 
 
-def _extract_metrics(bt: Dict[str, Any]) -> BTMetrics:
+def _trade_to_dict(t: Any) -> Dict[str, Any]:
+    """Accept dataclass / object / dict and return a plain dict with at least pnl."""
+    if t is None:
+        return {"pnl": 0.0}
+    if isinstance(t, dict):
+        return t
+    if is_dataclass(t):
+        try:
+            return asdict(t)  # type: ignore
+        except Exception:
+            pass
+    # generic object: try attrs
+    out = {}
+    for key in ("pnl", "pnl_pct", "entry_ts", "exit_ts", "symbol", "side"):
+        if hasattr(t, key):
+            out[key] = getattr(t, key)
+    if "pnl" not in out:
+        out["pnl"] = 0.0
+    return out
+
+
+def _extract_metrics(bt: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Accept flexible shapes from run_backtest and extract consistent metrics.
-    Supports:
-      - metrics nested under 'metrics' or top-level
-      - 'trades' either an int count or an iterable of Trade/Dict
+    Normalize varying shapes from run_backtest into a single metrics dict.
+    Supports metrics at root or under 'metrics', and trades as list or count.
     """
     m = bt.get("metrics", {})
+    trades_obj = bt.get("trades", m.get("trades", []))
 
-    # trade count
-    n_trades = _as_int(m.get("n_trades", bt.get("trades", 0)), 0)
+    # n_trades
+    n_trades = _as_int(m.get("n_trades", trades_obj), 0)
 
-    # simple metrics
-    win_rate = _as_float(bt.get("win_rate", m.get("win_rate", 0.0)), 0.0)
-    profit_factor = _as_float(bt.get("profit_factor", m.get("profit_factor", 0.0)), 0.0)
-    max_drawdown = _as_float(bt.get("max_drawdown", m.get("max_drawdown", 0.0)), 0.0)
-    spd = _as_float(bt.get("signals_per_day", m.get("signals_per_day", 0.0)), 0.0)
+    # wins / losses
+    wins = _as_int(m.get("wins", bt.get("wins", 0)), 0)
+    losses = _as_int(m.get("losses", bt.get("losses", 0)), 0)
 
-    # If we got a list of trades but 0 wins/losses, recompute basic win-rate
-    trades_obj = bt.get("trades", None)
-    if isinstance(trades_obj, Iterable) and not isinstance(trades_obj, (int, float, np.number)):
-        try:
-            trades_list = list(trades_obj)
-        except Exception:
-            trades_list = []
-        if trades_list:
-            n_trades = len(trades_list)
-            wins = 0
-            losses = 0
-            for t in trades_list:
-                # support dict-like or attr objects
-                pnl = None
-                if isinstance(t, Mapping):
-                    pnl = t.get("pnl", None)
-                    if pnl is None:
-                        pnl = t.get("pnl_pct", None)
-                else:
-                    pnl = getattr(t, "pnl", getattr(t, "pnl_pct", None))
-                pnl = _as_float(pnl, 0.0)
-                if pnl > 0:
-                    wins += 1
-                elif pnl < 0:
-                    losses += 1
-            if wins + losses > 0 and win_rate == 0.0:
-                win_rate = wins / (wins + losses)
+    # If wins/losses not provided but we have trades, derive by pnl
+    if (wins + losses == 0) and isinstance(trades_obj, (list, tuple)) and len(trades_obj) > 0:
+        w = 0
+        l = 0
+        for t in trades_obj:
+            td = _trade_to_dict(t)
+            pnl = _as_float(td.get("pnl", td.get("pnl_pct", 0.0)), 0.0)
+            if pnl > 0:
+                w += 1
+            elif pnl < 0:
+                l += 1
+        wins, losses = w, l
+        n_trades = max(n_trades, w + l)
 
-    return BTMetrics(
-        win_rate=win_rate,
-        profit_factor=profit_factor,
-        max_drawdown=max_drawdown,
-        signals_per_day=spd,
-        n_trades=n_trades,
-    )
+    # win_rate
+    win_rate = _as_float(m.get("win_rate", bt.get("win_rate", 0.0)), 0.0)
+    if win_rate == 0.0 and n_trades > 0 and (wins + losses) > 0:
+        win_rate = wins / max(1, wins + losses)
+
+    # profit_factor / max_drawdown / signals_per_day
+    profit_factor = _as_float(m.get("profit_factor", bt.get("profit_factor", 0.0)), 0.0)
+    max_drawdown = _as_float(m.get("max_drawdown", bt.get("max_drawdown", 0.0)), 0.0)
+    spd = _as_float(m.get("signals_per_day", bt.get("signals_per_day", 0.0)), 0.0)
+
+    return {
+        "n_trades": int(n_trades),
+        "win_rate": float(win_rate),
+        "profit_factor": float(profit_factor),
+        "max_drawdown": float(max_drawdown),
+        "signals_per_day": float(spd),
+    }
 
 
-def _score_candidate(agg: BTMetrics) -> Tuple[float, float]:
+def _agg_metrics(metrics_per_symbol: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Primary tie-break: profit_factor (higher better)
-    Secondary: -max_drawdown (lower drawdown is better -> higher score)
+    Aggregate over symbols with sensible weighting:
+      - win_rate weighted by n_trades
+      - signals_per_day is sum across symbols
+      - profit_factor: fallback to weighted mean by n_trades
+      - max_drawdown: worst (min)
     """
-    return (agg.profit_factor, -agg.max_drawdown)
+    if not metrics_per_symbol:
+        return {
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "max_drawdown": 0.0,
+            "signals_per_day": 0.0,
+            "n_trades": 0,
+        }
+
+    total_trades = sum(_as_int(v.get("n_trades", 0), 0) for v in metrics_per_symbol.values())
+    win_rate = 0.0
+    if total_trades > 0:
+        win_rate = sum(
+            _as_float(v.get("win_rate", 0.0), 0.0) * _as_int(v.get("n_trades", 0), 0)
+            for v in metrics_per_symbol.values()
+        ) / max(1, total_trades)
+
+    signals_per_day = sum(_as_float(v.get("signals_per_day", 0.0), 0.0) for v in metrics_per_symbol.values())
+    # profit_factor weighted mean
+    if total_trades > 0:
+        profit_factor = sum(
+            _as_float(v.get("profit_factor", 0.0), 0.0) * _as_int(v.get("n_trades", 0), 0)
+            for v in metrics_per_symbol.values()
+        ) / max(1, total_trades)
+    else:
+        profit_factor = 0.0
+
+    # worst drawdown
+    max_drawdown = min(_as_float(v.get("max_drawdown", 0.0), 0.0) for v in metrics_per_symbol.values())
+
+    return {
+        "win_rate": float(win_rate),
+        "profit_factor": float(profit_factor),
+        "max_drawdown": float(max_drawdown),
+        "signals_per_day": float(signals_per_day),
+        "n_trades": int(total_trades),
+    }
 
 
-def _parse_grid_env(name: str, default: str) -> List[str]:
-    raw = os.getenv(name, default)
-    return [s.strip() for s in str(raw).split(",") if str(s).strip()]
+def _objective_rank(agg: Dict[str, Any]) -> Tuple[int, float, float]:
+    """
+    Primary feasibility flags then tie-breakers:
+      1) feasibility flag (0=good meets constraints, 1=fails)
+      2) -profit_factor (higher better)
+      3) max_drawdown (less negative is better -> higher)
+    Sort ascending on this tuple.
+    """
+    wr = _as_float(agg.get("win_rate", 0.0))
+    spd = _as_float(agg.get("signals_per_day", 0.0))
+    pf = _as_float(agg.get("profit_factor", 0.0))
+    mdd = _as_float(agg.get("max_drawdown", 0.0))
+
+    feasible = 0 if (wr >= 0.60 and 5.0 <= spd <= 10.0) else 1
+    return (feasible, -pf, mdd)
 
 
-def _to_float_list(vals: List[str]) -> List[float]:
-    out: List[float] = []
-    for v in vals:
-        try:
-            out.append(float(v))
-        except Exception:
-            pass
-    return out
+# ----------------------------- main API ---------------------------------------
 
-
-def _to_int_list(vals: List[str]) -> List[int]:
-    out: List[int] = []
-    for v in vals:
-        try:
-            out.append(int(float(v)))
-        except Exception:
-            pass
-    return out
-
-
-# ------------------------------- main API ----------------------------------- #
 
 def tune_thresholds(
     pred_dfs: Dict[str, pd.DataFrame],
     prices: Dict[str, pd.DataFrame],
+    conf_grid: Iterable[float] | None = None,
+    debounce_grid: Iterable[int] | None = None,
+    horizon_grid: Iterable[int] | None = None,
+    fees_bps: float | None = None,
+    slippage_bps: float | None = None,
 ) -> Dict[str, Any]:
     """
-    Grid-search thresholds and debounce to satisfy:
-      - win_rate >= 0.60 (aggregate)
-      - 5 <= signals/day <= 10 (aggregate)
-    Returns a dict with the shape expected by tests:
-      {"params": {conf_min, debounce_min, horizon_h}, "agg": {...}, "per_symbol": {...}}
-    And writes models/signal_thresholds.json with the same params + metrics.
+    Grid-search thresholds over per-symbol predictions.
+    Returns dict with:
+      {
+        "params": {"conf_min": ..., "debounce_min": ..., "horizon_h": ...},
+        "agg": {...},
+        "per_symbol": {SYM: {...}, ...}
+      }
+    and writes models/signal_thresholds.json and models/backtest_summary.json
     """
+    # grids & params
+    conf_grid = list(conf_grid or [0.55, 0.58, 0.60, 0.62])
+    debounce_grid = list(debounce_grid or [15, 30, 45, 60])
+    horizon_grid = list(horizon_grid or [1, 2])
+    fees_bps = 1.0 if fees_bps is None else fees_bps
+    slippage_bps = 2.0 if slippage_bps is None else slippage_bps
 
-    # Grids (overridable via env)
-    conf_grid = _to_float_list(_parse_grid_env("MW_CONF_GRID", "0.55,0.58,0.60,0.62"))
-    deb_grid = _to_int_list(_parse_grid_env("MW_DEBOUNCE_GRID_MIN", "15,30,45,60"))
-    horiz_grid = _to_int_list(_parse_grid_env("MW_HORIZON_GRID_H", "1,2"))
+    # Normalize/clean prediction frames
+    symbols = sorted(pred_dfs.keys())
+    pred_norm: Dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        df = pred_dfs[sym].copy()
+        # expected columns: ts, p_long
+        if "ts" not in df.columns:
+            # try index
+            if isinstance(df.index, pd.DatetimeIndex):
+                df = df.reset_index().rename(columns={"index": "ts"})
+            else:
+                df["ts"] = np.arange(len(df))
+        if "p_long" not in df.columns:
+            # best-effort: any prob-like column?
+            for c in df.columns:
+                if c.lower() in ("prob", "proba", "p", "plong", "p_long"):
+                    df = df.rename(columns={c: "p_long"})
+                    break
+        # enforce ordering
+        df = df.sort_values("ts").reset_index(drop=True)
+        pred_norm[sym] = df[["ts", "p_long"]].copy()
 
-    # Constraints
-    TARGET_WIN = 0.60
-    MIN_SPD, MAX_SPD = 5.0, 10.0
-
-    best_combo = None
-    best_agg: BTMetrics | None = None
-    best_per_symbol: Dict[str, BTMetrics] = {}
-
+    # Run grid search
+    candidates: List[Tuple[Tuple[float, int, int], Dict[str, Any], Dict[str, Any]]] = []
     for conf_min in conf_grid:
-        for debounce_min in deb_grid:
-            for horizon_h in horiz_grid:
-                # Collect per-symbol results
-                per_symbol_metrics: Dict[str, BTMetrics] = {}
-                agg_trades = 0
-                agg_wins = 0
-                agg_losses = 0
-                agg_spd = 0.0
-                agg_pf_num = 0.0  # sum of wins
-                agg_pf_den = 0.0  # sum of abs(losses)
-                agg_dd = 0.0
+        for debounce_min in debounce_grid:
+            for horizon_h in horizon_grid:
+                per_symbol_metrics: Dict[str, Dict[str, Any]] = {}
 
-                for sym, df_pred in pred_dfs.items():
-                    px = prices.get(sym)
-                    if px is None or df_pred is None or df_pred.empty:
-                        per_symbol_metrics[sym] = BTMetrics()
+                for sym in symbols:
+                    p_df = pred_norm.get(sym)
+                    px_df = prices.get(sym)
+                    if p_df is None or px_df is None or p_df.empty or px_df.empty:
+                        per_symbol_metrics[sym] = {
+                            "n_trades": 0,
+                            "win_rate": 0.0,
+                            "profit_factor": 0.0,
+                            "max_drawdown": 0.0,
+                            "signals_per_day": 0.0,
+                        }
                         continue
 
                     bt = run_backtest(
-                        pred_df=df_pred,
-                        prices_df=px,
+                        pred_df=p_df,
+                        prices_df=px_df,
                         conf_min=float(conf_min),
                         debounce_min=int(debounce_min),
                         horizon_h=int(horizon_h),
-                        fees_bps=float(os.getenv("MW_FEES_BPS", "1")),
-                        slippage_bps=float(os.getenv("MW_SLIPPAGE_BPS", "2")),
+                        fees_bps=float(fees_bps),
+                        slippage_bps=float(slippage_bps),
                     )
+                    per_symbol_metrics[sym] = _extract_metrics(bt)
 
-                    m = _extract_metrics(bt)
-                    per_symbol_metrics[sym] = m
+                agg = _agg_metrics(per_symbol_metrics)
+                key = (float(conf_min), int(debounce_min), int(horizon_h))
+                candidates.append((key, agg, per_symbol_metrics))
 
-                    # Aggregate arithmetic in a stable way
-                    agg_trades += m.n_trades
-                    agg_spd += m.signals_per_day
-                    # PF components: approximate using average win rate if no decomposition
-                    # We’ll approximate PF by weighting per-symbol PF by its trade share.
-                    pf_trades = max(m.n_trades, 1)
-                    # Convert PF to numerator/denominator proxy using win rate when possible:
-                    # PF = sum(win)/sum(abs(loss))  -> proxy with rate & count (not exact but consistent for CI)
-                    wins = int(round(m.win_rate * pf_trades))
-                    losses = pf_trades - wins
-                    # win/loss magnitude proxy: assume unit magnitude per trade (consistent for relative ranking)
-                    agg_pf_num += float(wins)
-                    agg_pf_den += float(abs(losses))
-                    agg_dd = min(agg_dd, m.max_drawdown)
+    # Choose best by objective
+    if len(candidates) == 0:
+        # absolute fallback
+        chosen = ((0.55, 15, 1), {"win_rate": 0.0, "profit_factor": 0.0, "max_drawdown": 0.0, "signals_per_day": 0.0, "n_trades": 0}, {})
+    else:
+        candidates.sort(key=lambda x: _objective_rank(x[1]))
+        chosen = candidates[0]
 
-                # Finalize aggregate metrics
-                agg_win_rate = 0.0
-                if agg_trades > 0:
-                    # recompute from proxies; keeps things consistent across backtest shapes
-                    total_wins = agg_pf_num
-                    total_losses = agg_pf_den
-                    if (total_wins + total_losses) > 0:
-                        agg_win_rate = total_wins / (total_wins + total_losses)
+    (c_conf, c_db, c_h), agg, per_symbol = chosen
 
-                agg_pf = (agg_pf_num / agg_pf_den) if agg_pf_den > 0 else 0.0
-
-                agg = BTMetrics(
-                    win_rate=agg_win_rate,
-                    profit_factor=agg_pf,
-                    max_drawdown=agg_dd,
-                    signals_per_day=agg_spd,
-                    n_trades=agg_trades,
-                )
-
-                # Constraint check
-                ok = (agg.win_rate >= TARGET_WIN) and (MIN_SPD <= agg.signals_per_day <= MAX_SPD)
-
-                # Pick best (satisfying constraints) by PF then drawdown
-                if ok:
-                    if best_agg is None or _score_candidate(agg) > _score_candidate(best_agg):
-                        best_agg = agg
-                        best_combo = (conf_min, debounce_min, horizon_h)
-                        best_per_symbol = per_symbol_metrics
-
-    # If nothing satisfied constraints, fall back to the *best PF* combo ignoring constraints
-    if best_combo is None:
-        best_pf = (-1.0, 0.0)  # (pf, -dd)
-        fallback_combo = None
-        fallback_agg = None
-        fallback_per = None
-
-        for conf_min in conf_grid:
-            for debounce_min in deb_grid:
-                for horizon_h in horiz_grid:
-                    per_symbol_metrics: Dict[str, BTMetrics] = {}
-                    agg_trades = 0
-                    agg_spd = 0.0
-                    agg_pf_num = 0.0
-                    agg_pf_den = 0.0
-                    agg_dd = 0.0
-
-                    for sym, df_pred in pred_dfs.items():
-                        px = prices.get(sym)
-                        if px is None or df_pred is None or df_pred.empty:
-                            per_symbol_metrics[sym] = BTMetrics()
-                            continue
-
-                        bt = run_backtest(
-                            pred_df=df_pred,
-                            prices_df=px,
-                            conf_min=float(conf_min),
-                            debounce_min=int(debounce_min),
-                            horizon_h=int(horizon_h),
-                            fees_bps=float(os.getenv("MW_FEES_BPS", "1")),
-                            slippage_bps=float(os.getenv("MW_SLIPPAGE_BPS", "2")),
-                        )
-                        m = _extract_metrics(bt)
-                        per_symbol_metrics[sym] = m
-
-                        agg_trades += m.n_trades
-                        agg_spd += m.signals_per_day
-                        pf_trades = max(m.n_trades, 1)
-                        wins = int(round(m.win_rate * pf_trades))
-                        losses = pf_trades - wins
-                        agg_pf_num += float(wins)
-                        agg_pf_den += float(abs(losses))
-                        agg_dd = min(agg_dd, m.max_drawdown)
-
-                    agg_pf_val = (agg_pf_num / agg_pf_den) if agg_pf_den > 0 else 0.0
-                    candidate_score = (agg_pf_val, -agg_dd)
-                    if candidate_score > best_pf:
-                        best_pf = candidate_score
-                        fallback_combo = (conf_min, debounce_min, horizon_h)
-                        fallback_agg = BTMetrics(
-                            win_rate=0.0,  # we don't recompute here for the fallback; not needed for tie-break
-                            profit_factor=agg_pf_val,
-                            max_drawdown=agg_dd,
-                            signals_per_day=agg_spd,
-                            n_trades=agg_trades,
-                        )
-                        fallback_per = per_symbol_metrics
-
-        best_combo = fallback_combo or (0.55, 15, 1)
-        best_agg = fallback_agg or BTMetrics()
-        best_per_symbol = fallback_per or {}
-
-    # Prepare outputs in the *expected* shape
-    conf_min, debounce_min, horizon_h = best_combo
-    agg_out = {
-        "win_rate": round(best_agg.win_rate, 4),
-        "profit_factor": round(best_agg.profit_factor, 4),
-        "max_drawdown": round(best_agg.max_drawdown, 4),
-        "signals_per_day": round(best_agg.signals_per_day, 4),
-        "n_trades": int(best_agg.n_trades),
+    # Write artifacts
+    thresholds_payload = {
+        "conf_min": c_conf,
+        "debounce_min": c_db,
+        "horizon_h": c_h,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    per_symbol_out: Dict[str, Any] = {}
-    for sym, m in best_per_symbol.items():
-        per_symbol_out[sym] = {
-            "win_rate": round(m.win_rate, 4),
-            "profit_factor": round(m.profit_factor, 4),
-            "max_drawdown": round(m.max_drawdown, 4),
-            "signals_per_day": round(m.signals_per_day, 4),
-            "n_trades": int(m.n_trades),
-        }
+    with open(MODELS_DIR / "signal_thresholds.json", "w") as f:
+        json.dump(thresholds_payload, f, indent=2)
 
-    result = {
-        "params": {
-            "conf_min": float(conf_min),
-            "debounce_min": int(debounce_min),
-            "horizon_h": int(horizon_h),
+    backtest_summary_payload = {
+        "aggregate": {
+            "win_rate": round(_as_float(agg.get("win_rate", 0.0)), 4),
+            "profit_factor": round(_as_float(agg.get("profit_factor", 0.0)), 4),
+            "max_drawdown": round(_as_float(agg.get("max_drawdown", 0.0)), 4),
+            "signals_per_day": round(_as_float(agg.get("signals_per_day", 0.0)), 4),
+            "n_trades": _as_int(agg.get("n_trades", 0), 0),
         },
-        "agg": agg_out,
-        "per_symbol": per_symbol_out,
+        "per_symbol": {
+            s: {
+                "win_rate": round(_as_float(m.get("win_rate", 0.0)), 4),
+                "profit_factor": round(_as_float(m.get("profit_factor", 0.0)), 4),
+                "max_drawdown": round(_as_float(m.get("max_drawdown", 0.0)), 4),
+                "signals_per_day": round(_as_float(m.get("signals_per_day", 0.0)), 4),
+                "n_trades": _as_int(m.get("n_trades", 0), 0),
+            }
+            for s, m in per_symbol.items()
+        },
+    }
+    with open(MODELS_DIR / "backtest_summary.json", "w") as f:
+        json.dump(backtest_summary_payload, f, indent=2)
+
+    # Return structure that tests and summary blocks expect
+    return {
+        "params": {"conf_min": c_conf, "debounce_min": c_db, "horizon_h": c_h},
+        "agg": agg,
+        "per_symbol": per_symbol,
     }
 
-    # Persist thresholds.json (flat params are easier for auto_loop)
-    out_path = MODELS_DIR / "signal_thresholds.json"
-    with out_path.open("w") as f:
-        json.dump(
-            {
-                "conf_min": float(conf_min),
-                "debounce_min": int(debounce_min),
-                "horizon_h": int(horizon_h),
-                "aggregate": agg_out,
-                "per_symbol": per_symbol_out,
-            },
-            f,
-            indent=2,
-        )
 
-    return result
+# Allow running by itself for quick smoke test
+if __name__ == "__main__":
+    # Minimal synthetic input to prove it runs without the rest of the pipeline.
+    # (The real CI/tests call this through train_predict; this is just a convenience.)
+    rng = pd.date_range("2024-01-01", periods=200, freq="H", tz="UTC")
+    demo_px = pd.DataFrame({"ts": rng, "close": np.cumsum(np.random.randn(len(rng)) * 5 + 100)})
+    demo_pred = pd.DataFrame({"ts": rng, "p_long": np.clip(np.random.rand(len(rng)) * 0.2 + 0.4, 0, 1)})
+
+    preds = {"BTC": demo_pred.copy(), "ETH": demo_pred.copy(), "SOL": demo_pred.copy()}
+    prices = {"BTC": demo_px.copy(), "ETH": demo_px.copy(), "SOL": demo_px.copy()}
+
+    res = tune_thresholds(preds, prices)
+    print(json.dumps(res["params"], indent=2))
