@@ -66,6 +66,34 @@ jobs:
               print("Trades already present:", trades)
           PY
 
+      - name: Run ML training/backtest/tuning
+        env:
+          MW_ML_SYMBOLS: BTC,ETH,SOL
+          MW_ML_LOOKBACK_DAYS: '180'
+          MW_FEES_BPS: '1'
+          MW_SLIPPAGE_BPS: '2'
+          MW_HORIZON_H: '1'
+          MW_OFFLINE_DEMO: '1'   # allows synthetic fallback if no internet
+        run: python -m scripts.ml.train_predict
+
+      - name: Upload ML artifacts (JSON/PNGs/Logs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-core
+          if-no-files-found: warn
+          path: |
+            models/ml_model_manifest.json
+            models/backtest_summary.json
+            models/signal_thresholds.json
+            logs/trades.jsonl
+            logs/equity_curve.jsonl
+            artifacts/ml_roc_pr_curve.png
+            artifacts/ml_feature_importance.png
+            artifacts/bt_equity_curve.png
+            artifacts/bt_drawdown.png
+            artifacts/bt_returns_hist.png
+            artifacts/bt_signals_per_day.png
+
       # --- Train trigger likelihood model(s) ---
       - name: Train trigger likelihood models (logistic)
         if: ${{ success() }}
