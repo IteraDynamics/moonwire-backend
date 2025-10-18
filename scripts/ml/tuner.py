@@ -10,11 +10,20 @@ from typing import Any, Dict, Iterable, List, Mapping, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import sys
 
-# Import using absolute path so this file can be run as a module or script
-from scripts.ml.backtest import run_backtest  # type: ignore
+try:
+    # when imported as package (pytest, normal runs)
+    from scripts.ml.backtest import run_backtest  # type: ignore
+except ModuleNotFoundError:
+    # when executed directly (no package on sys.path)
+    ROOT = Path(__file__).resolve().parents[2]
+    if str(ROOT) not in sys.path:
+        sys.path.append(str(ROOT))
+    from scripts.ml.backtest import run_backtest  # type: ignore
+# --------------------------------------------------------------------------
 
-ROOT = Path(__file__).resolve().parents[2]  # repo root
+
 MODELS_DIR = ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
