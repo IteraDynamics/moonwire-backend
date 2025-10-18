@@ -147,9 +147,9 @@ def _make_demo_prices(symbol: str, lookback_days: int) -> pd.DataFrame:
     seed = abs(hash(symbol.upper())) % (2**32)
     rng = np.random.default_rng(seed)
     ts = pd.date_range(
-        end=pd.Timestamp.utcnow().floor("H").tz_localize("UTC"),
-        periods=hours,
-        freq="H",
+    end=pd.Timestamp.now(tz="UTC").floor("H"),
+    periods=hours,
+    freq="H",
     )
     # Start level per symbol
     bases = {"BTC": 20000.0, "ETH": 1500.0, "SOL": 50.0}
