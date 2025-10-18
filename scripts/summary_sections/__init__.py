@@ -41,6 +41,7 @@ for name in (
     "governance_notifications_section",
     # v0.9.0 performance validation section (compact CI block)
     "performance_validation",
+    "ml_validation_tuning",
 ):
     m = _try(name)
     if m:
