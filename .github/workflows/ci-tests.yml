@@ -12,7 +12,7 @@ jobs:
     env:
       MW_ML_SYMBOLS: BTC,ETH,SOL
       MW_ML_LOOKBACK_DAYS: '180'
-      MW_ML_MODEL: gb         # or 'gb' if you enabled GradientBoosting
+      MW_ML_MODEL: hgb         # or 'gb' if you enabled GradientBoosting
       MW_HORIZON_H: '1'
       MW_FEES_BPS: '1'
       MW_SLIPPAGE_BPS: '3'
