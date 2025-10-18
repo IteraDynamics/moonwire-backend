@@ -15,11 +15,11 @@ jobs:
       MW_ML_MODEL: gb         # or 'gb' if you enabled GradientBoosting
       MW_HORIZON_H: '1'
       MW_FEES_BPS: '1'
-      MW_SLIPPAGE_BPS: '2'
+      MW_SLIPPAGE_BPS: '3'
       # Optional: steer the tuner grid (order matters for tie-breaks)
-      MW_CONF_GRID: '0.62,0.65,0.68,0.70,0.72'
-      MW_DEBOUNCE_GRID_MIN: '45,60,90'
-      MW_HORIZON_GRID_H: '1,2'
+      MW_CONF_GRID: "0.68,0.70,0.72,0.75,0.78,0.80"
+      MW_DEBOUNCE_GRID_MIN: '30,45,60,90'
+      MW_HORIZON_GRID_H: '1'
 
     steps:
       - name: Checkout code
