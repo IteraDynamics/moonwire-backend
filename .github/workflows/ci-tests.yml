@@ -102,6 +102,7 @@ jobs:
           MW_DEBOUNCE_GRID_MIN: '10,15'
           MW_HORIZON_GRID_H: '1,2'
           TUNER_STRICT: '0'
+          MW_TUNER_DEBUG: "1"
 
           # probability calibration
           MW_CALIBRATE_PROBS: 'platt'
