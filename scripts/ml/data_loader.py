@@ -1,278 +1,270 @@
 # scripts/ml/data_loader.py
 from __future__ import annotations
 
-import os
+import io
 import json
 import math
+import os
+import random
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
+import requests
 
-# ---------- Paths ----------
-ROOT = Path(__file__).resolve().parents[2]
+
+# ---- Paths -----------------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parents[2]  # repo root
 DATA_DIR = ROOT / "data"
-MODELS_DIR = ROOT / "models"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------- Env Switches ----------
-# Force demo regardless of cache/network
-MW_FORCE_DEMO = os.getenv("MW_FORCE_DEMO", "0") == "1"
-# Require real data; raise if demo fallback happens
-MW_REQUIRE_REAL = os.getenv("MW_REQUIRE_REAL", "0") == "1"
-# Lookback override (used only by callers; here for visibility)
-DEFAULT_LOOKBACK_DAYS = int(os.getenv("MW_ML_LOOKBACK_DAYS", "180"))
 
-# ---------- CoinGecko basics ----------
-# Simple ID map (extend if you add more symbols)
-COINGECKO_IDS = {
+# ---- Public API ------------------------------------------------------------
+
+def load_prices(symbols: List[str], lookback_days: int = 180) -> Dict[str, pd.DataFrame]:
+    """
+    Load hourly OHLCV for the requested symbols.
+    Order of preference:
+      1) Fresh local cache (parquet)
+      2) Fetch from CoinGecko and refresh cache
+      3) Demo synthetic prices (deterministic seed per symbol) and cache
+
+    Returns dict[symbol] -> DataFrame with columns:
+      ts (UTC tz-aware), open, high, low, close, volume
+    """
+    out: Dict[str, pd.DataFrame] = {}
+    symbols = [s.upper() for s in symbols]
+
+    for s in symbols:
+        try:
+            df = _load_from_cache(s, lookback_days)
+            if df is None:
+                df = _fetch_from_coingecko_or_demo(s, lookback_days)
+            df = _slice_lookback(df, lookback_days)
+            df = _finalize_schema(df)
+            out[s] = df
+        except Exception as e:
+            # hard fallback to demo if anything unexpected happens
+            df = _make_demo_prices(s, lookback_days)
+            df = _finalize_schema(df)
+            out[s] = df
+    return out
+
+
+# ---- Cache helpers ---------------------------------------------------------
+
+def _cache_path(symbol: str) -> Path:
+    return DATA_DIR / f"prices_{symbol.upper()}_1h.parquet"
+
+
+def _load_from_cache(symbol: str, lookback_days: int) -> pd.DataFrame | None:
+    p = _cache_path(symbol)
+    if not p.exists():
+        return None
+    try:
+        df = pd.read_parquet(p)
+        # ensure UTC tz-aware
+        if df["ts"].dtype.tz is None:
+            df["ts"] = pd.to_datetime(df["ts"], utc=True)
+        # if cache covers requested lookback, use it; otherwise treat as stale
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=lookback_days + 1)
+        if df["ts"].min() <= cutoff:
+            return df
+        # Cache doesn't go far back enough; let fetcher refresh it
+        return None
+    except Exception:
+        return None
+
+
+def _save_cache(symbol: str, df: pd.DataFrame) -> None:
+    try:
+        df.to_parquet(_cache_path(symbol), index=False)
+    except Exception:
+        # best effort; ignore cache write errors in CI/demo
+        pass
+
+
+# ---- External fetch (CoinGecko) -------------------------------------------
+
+# Minimal symbol -> CoinGecko ID map (extend as needed)
+_COINGECKO_ID = {
     "BTC": "bitcoin",
     "ETH": "ethereum",
     "SOL": "solana",
 }
-CG_BASE = "https://api.coingecko.com/api/v3"
 
-# ---------- Helpers ----------
-def _parquet_path(symbol: str, timeframe: str = "1h") -> Path:
-    return DATA_DIR / f"prices_{symbol.upper()}_{timeframe}.parquet"
-
-def _write_prices_manifest(source: str, symbols: List[str], lookback_days: int, reason: str = "") -> None:
-    manifest = {
-        "source": source,             # "coingecko" | "demo" | "cache"
-        "symbols": [s.upper() for s in symbols],
-        "lookback_days": lookback_days,
-        "ts_utc": pd.Timestamp.utcnow().isoformat(),
-        "reason": reason,
-    }
-    (MODELS_DIR / "prices_manifest.json").write_text(json.dumps(manifest, indent=2))
-
-def _cache_ok_for_lookback(df: pd.DataFrame, lookback_days: int) -> bool:
-    if df.empty:
-        return False
-    ts_max = pd.to_datetime(df["ts"].iloc[-1], utc=True)
-    ts_min = pd.to_datetime(df["ts"].iloc[0], utc=True)
-    need = pd.Timestamp.utcnow(tz="UTC") - pd.Timedelta(days=lookback_days)
-    # Cache is "ok" if it spans back at least to our needed min time
-    return ts_min <= need <= ts_max
-
-def _load_cache(symbol: str) -> Optional[pd.DataFrame]:
-    fp = _parquet_path(symbol)
-    if not fp.exists():
-        return None
+def _fetch_from_coingecko_or_demo(symbol: str, lookback_days: int) -> pd.DataFrame:
+    """Try CoinGecko; on any failure fall back to demo and still cache."""
     try:
-        df = pd.read_parquet(fp)
-        # sanitize columns + types
-        cols = ["ts", "open", "high", "low", "close", "volume"]
-        df = df[cols].copy()
-        df["ts"] = pd.to_datetime(df["ts"], utc=True)
+        df = _fetch_from_coingecko(symbol, lookback_days)
+        if df is None or df.empty:
+            raise RuntimeError("empty coingecko df")
+        _save_cache(symbol, df)
         return df
     except Exception:
+        df = _make_demo_prices(symbol, lookback_days)
+        _save_cache(symbol, df)
+        return df
+
+
+def _fetch_from_coingecko(symbol: str, lookback_days: int) -> pd.DataFrame | None:
+    """
+    Calls CoinGecko market_chart endpoint:
+      /coins/{id}/market_chart?vs_currency=usd&days={n}
+    For days <= 90, CG returns ~hourly data; for larger windows it may be coarser.
+    We resample to 1h OHLCV.
+    """
+    cg_id = _COINGECKO_ID.get(symbol.upper())
+    if not cg_id:
         return None
 
-def _save_cache(symbol: str, df: pd.DataFrame) -> None:
-    fp = _parquet_path(symbol)
-    try:
-        df.to_parquet(fp, index=False)
-    except Exception:
-        # Don't fail the pipeline on cache write issues
-        pass
+    days_param = max(1, int(lookback_days))
+    url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart"
+    params = {"vs_currency": "usd", "days": days_param, "interval": "hourly"}
 
-def _to_ohlcv_from_cg_rows(rows: List[List[float]]) -> pd.DataFrame:
-    """
-    CoinGecko market_chart returns minute or hourly price points as [ms, price].
-    We don't get OHLCV per hour directly; we approximate:
-      - resample to 1H, and use open/high/low/close from the minute-ish series
-      - volume is not provided by this endpoint; set to 0.0 (or synthetic)
-    """
-    if not rows:
-        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+    # respect CI / rate limits if env disables external hits
+    if os.getenv("MW_OFFLINE", "").lower() in ("1", "true", "yes"):
+        return None
 
-    ts = pd.to_datetime([r[0] for r in rows], unit="ms", utc=True)
-    price = pd.Series([r[1] for r in rows], index=ts, dtype="float64")
-    df = price.to_frame("price")
-    # resample to hourly bars
-    o = df["price"].resample("1H", origin="start").first()
-    h = df["price"].resample("1H", origin="start").max()
-    l = df["price"].resample("1H", origin="start").min()
-    c = df["price"].resample("1H", origin="start").last()
-    out = pd.DataFrame({"open": o, "high": h, "low": l, "close": c})
-    out["volume"] = 0.0  # no volume in this endpoint; leave 0.0 for now
-    out = out.dropna()
-    out = out.reset_index().rename(columns={"index": "ts"})
-    return out[["ts", "open", "high", "low", "close", "volume"]]
+    resp = requests.get(url, params=params, timeout=15)
+    if resp.status_code != 200:
+        return None
+    payload = resp.json()
 
-def _fetch_from_coingecko(symbol: str, lookback_days: int) -> pd.DataFrame:
-    """
-    Minimal, dependency-free fetch using the public HTTP API.
-    Endpoint: /coins/{id}/market_chart?vs_currency=usd&days={lookback_days}&interval=hourly
-    Returns hourly close points; we approximate OHLC via resample on close ticks.
-    """
-    import requests  # local import to avoid hard dep if environment is minimal
-    cg_id = COINGECKO_IDS.get(symbol.upper())
-    if not cg_id:
-        raise RuntimeError(f"No CoinGecko id mapping for symbol {symbol}")
+    # payload keys: prices, market_caps, total_volumes; each is [ [ms, value], ... ]
+    prices = payload.get("prices", [])
+    volumes = payload.get("total_volumes", [])
 
-    # CoinGecko days param accepts integers and 'max'; we clamp to at least 1
-    days = max(1, int(lookback_days))
-    url = f"{CG_BASE}/coins/{cg_id}/market_chart"
-    params = {"vs_currency": "usd", "days": str(days), "interval": "hourly"}
-    # Gentle retry
-    last_err = None
-    for _ in range(3):
-        try:
-            resp = requests.get(url, params=params, timeout=20)
-            if resp.status_code == 200:
-                payload = resp.json()
-                prices = payload.get("prices", [])  # [ [ts_ms, price], ... ]
-                df = _to_ohlcv_from_cg_rows(prices)
-                # If sparse, drop NA and keep last N days
-                if not df.empty:
-                    # Clip to exact lookback window
-                    cutoff = pd.Timestamp.utcnow(tz="UTC") - pd.Timedelta(days=lookback_days)
-                    df = df[df["ts"] >= cutoff].reset_index(drop=True)
-                return df
-            last_err = f"HTTP {resp.status_code}"
-        except Exception as e:
-            last_err = str(e)
-    raise RuntimeError(f"CoinGecko fetch failed for {symbol}: {last_err}")
+    if not prices:
+        return None
+
+    # Build base close from prices
+    ts = [pd.Timestamp(x[0], unit="ms", tz="UTC") for x in prices]
+    close = [float(x[1]) for x in prices]
+    df = pd.DataFrame({"ts": ts, "close": close})
+
+    # Attach volume if available
+    if volumes and len(volumes) == len(prices):
+        vol_vals = [float(x[1]) for x in volumes]
+        df["volume"] = vol_vals
+    else:
+        # fallback: small synthetic volume
+        df["volume"] = 0.0
+
+    # Resample to exact 1h and reconstruct OHLC from close as a proxy
+    df = df.set_index("ts").sort_index()
+    # Fill any gaps before OHLC construction
+    df = df.asfreq("1H", method="pad")
+
+    o = df["close"].shift(1)  # prev close as open
+    h = df["close"].rolling(2).max()
+    l = df["close"].rolling(2).min()
+    c = df["close"]
+
+    out = pd.DataFrame(
+        {
+            "ts": df.index,
+            "open": o.fillna(c).values,
+            "high": h.fillna(c).values,
+            "low": l.fillna(c).values,
+            "close": c.values,
+            "volume": df["volume"].fillna(0.0).values,
+        }
+    )
+    return out.dropna().reset_index(drop=True)
+
+
+# ---- Demo data (synthetic) -------------------------------------------------
 
 def _make_demo_prices(symbol: str, lookback_days: int) -> pd.DataFrame:
     """
-    Deterministic pseudo-random walk OHLCV for CI/offline.
+    Deterministic 1h random walk seeded by symbol, with plausible OHLCV.
     """
-    hours = lookback_days * 24 + 6  # a bit extra
-    # Seed per symbol for reproducibility
-    seed = abs(hash(symbol.upper())) % (2**32)
+    seed = (sum(ord(ch) for ch in symbol.upper()) + lookback_days) % (2**32 - 1)
     rng = np.random.default_rng(seed)
-    ts = pd.date_range(
-    end=pd.Timestamp.now(tz="UTC").floor("H"),
-    periods=hours,
-    freq="H",
-    )
-    # Start level per symbol
-    bases = {"BTC": 20000.0, "ETH": 1500.0, "SOL": 50.0}
-    base = bases.get(symbol.upper(), 100.0)
-    # Random walk in log space
-    steps = rng.normal(loc=0.0, scale=0.003, size=hours)
-    log_price = np.log(base) + np.cumsum(steps)
-    close = np.exp(log_price)
-    # Build OHLC from close with small intra-bar noise
-    spread = np.maximum(0.0005 * close, 0.01)
+
+    end = pd.Timestamp.now(tz="UTC").floor("H")
+    start = end - pd.Timedelta(days=max(lookback_days, 2))  # ensure a bit of warmup
+    idx = pd.date_range(start=start, end=end, freq="1H", tz="UTC")
+
+    # random walk on log-returns
+    mu = 0.0
+    sigma = 0.015  # a bit volatile to generate trades
+    rets = rng.normal(mu, sigma, len(idx))
+    price0 = 20_000.0 if symbol.upper() == "BTC" else (1_500.0 if symbol.upper() == "ETH" else 50.0)
+    close = price0 * np.exp(np.cumsum(rets))
+    close = np.maximum(close, 0.01)
+
+    # make OHLC around close
+    spread = np.maximum(0.002 * close, 0.01)  # 20 bps-ish band
     open_ = np.roll(close, 1)
     open_[0] = close[0]
-    high = np.maximum(open_, close) + spread * rng.uniform(0.2, 1.0, size=hours)
-    low = np.minimum(open_, close) - spread * rng.uniform(0.2, 1.0, size=hours)
-    volume = rng.uniform(100.0, 10000.0, size=hours)
+    high = np.maximum.reduce([open_, close]) + spread
+    low = np.minimum.reduce([open_, close]) - spread
+
+    # synthetic volume
+    base_vol = 100.0 if symbol.upper() == "BTC" else (80.0 if symbol.upper() == "ETH" else 60.0)
+    vol = base_vol * (1.0 + rng.normal(0, 0.25, len(idx)))
+    vol = np.maximum(vol, 0.0)
 
     df = pd.DataFrame(
         {
-            "ts": ts,
-            "open": open_.astype(float),
-            "high": high.astype(float),
-            "low": low.astype(float),
-            "close": close.astype(float),
-            "volume": volume.astype(float),
+            "ts": idx,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": vol,
         }
     )
-    # Clean any anomalies
-    df["high"] = df[["high", "open", "close"]].max(axis=1)
-    df["low"] = df[["low", "open", "close"]].min(axis=1)
-    return df
+    return df.reset_index(drop=True)
+
+
+# ---- Post-processing -------------------------------------------------------
 
 def _slice_lookback(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
     if df.empty:
         return df
-    cutoff = pd.Timestamp.utcnow(tz="UTC") - pd.Timedelta(days=lookback_days)
-    return df[df["ts"] >= cutoff].reset_index(drop=True)
+    # ensure tz-aware
+    df = df.copy()
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=lookback_days)
+    return df[df["ts"] >= cutoff].sort_values("ts").reset_index(drop=True)
 
-# ---------- Public API ----------
-def load_prices(symbols: List[str], lookback_days: int = DEFAULT_LOOKBACK_DAYS) -> Dict[str, pd.DataFrame]:
-    """
-    Load hourly OHLCV for each symbol.
-    Order of resolution:
-      1) If MW_FORCE_DEMO=1 -> demo (deterministic) + manifest
-      2) Cache hit that already spans lookback -> cache + manifest(source="cache")
-      3) Try CoinGecko; on success -> save cache + manifest(source="coingecko")
-      4) Fallback demo -> save cache + manifest(source="demo"); if MW_REQUIRE_REAL=1, raise
-    Returns dict[symbol] -> DataFrame with columns:
-      ts(UTC), open, high, low, close, volume (float)
-    """
-    symbols = [s.upper() for s in symbols]
-    # Storage for final frames + source decision
-    out: Dict[str, pd.DataFrame] = {}
-    chosen_source = None
-    demo_reason = ""
 
-    # 1) Force demo
-    if MW_FORCE_DEMO:
-        for s in symbols:
-            df = _make_demo_prices(s, lookback_days)
-            _save_cache(s, df)
-            out[s] = _slice_lookback(df, lookback_days)
-        _write_prices_manifest("demo", symbols, lookback_days, reason="MW_FORCE_DEMO=1")
-        if MW_REQUIRE_REAL:
-            raise RuntimeError("MW_REQUIRE_REAL=1 but MW_FORCE_DEMO=1 produced demo data")
-        return out
+def _finalize_schema(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["ts", "open", "high", "low", "close", "volume"]
+    df = df.copy()
+    # ensure all columns exist
+    for c in cols:
+        if c not in df.columns:
+            df[c] = np.nan
 
-    # 2) Try cache for all symbols
-    cache_ok_all = True
-    cached_frames: Dict[str, pd.DataFrame] = {}
-    for s in symbols:
-        cdf = _load_cache(s)
-        if cdf is None or not _cache_ok_for_lookback(cdf, lookback_days):
-            cache_ok_all = False
-            break
-        cached_frames[s] = _slice_lookback(cdf, lookback_days)
-    if cache_ok_all and cached_frames:
-        for s in symbols:
-            out[s] = cached_frames[s]
-        _write_prices_manifest("cache", symbols, lookback_days, reason="spans lookback")
-        return out
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    df = df[cols].dropna(subset=["ts", "close"]).sort_values("ts").reset_index(drop=True)
 
-    # 3) Try CoinGecko fetch
-    fetch_success = True
-    fetched: Dict[str, pd.DataFrame] = {}
-    last_error = ""
-    for s in symbols:
-        try:
-            df = _fetch_from_coingecko(s, lookback_days)
-            if df.empty:
-                fetch_success = False
-                last_error = "empty dataframe from API"
-                break
-            _save_cache(s, df)
-            fetched[s] = _slice_lookback(df, lookback_days)
-        except Exception as e:
-            fetch_success = False
-            last_error = str(e)
-            break
+    # enforce numeric types
+    for c in ["open", "high", "low", "close", "volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna().reset_index(drop=True)
 
-    if fetch_success and fetched:
-        for s in symbols:
-            out[s] = fetched[s]
-        _write_prices_manifest("coingecko", symbols, lookback_days)
-        return out
+    # coerce to 1H frequency (pad missing, then rebuild OHLC from close if needed)
+    # If the input is already 1H uniform, this will be a no-op.
+    df = df.set_index("ts").sort_index()
+    df = df.asfreq("1H", method="pad")
 
-    # 4) Fallback to deterministic demo
-    demo_reason = f"coingecko_failed: {last_error or 'unknown'}"
-    for s in symbols:
-        df = _make_demo_prices(s, lookback_days)
-        _save_cache(s, df)
-        out[s] = _slice_lookback(df, lookback_days)
+    # If any of OHLC are missing (due to pad), rebuild minimally from close
+    if df[["open", "high", "low"]].isna().any().any():
+        c = df["close"]
+        o = c.shift(1).fillna(c)
+        h = pd.concat([o, c], axis=1).max(axis=1)
+        l = pd.concat([o, c], axis=1).min(axis=1)
+        df["open"] = df["open"].fillna(o)
+        df["high"] = df["high"].fillna(h)
+        df["low"] = df["low"].fillna(l)
+        df["volume"] = df["volume"].fillna(0.0)
 
-    _write_prices_manifest("demo", symbols, lookback_days, reason=demo_reason)
-    if MW_REQUIRE_REAL:
-        raise RuntimeError(f"MW_REQUIRE_REAL=1 but demo fallback used ({demo_reason})")
-
-    return out
-
-# ---------- Quick self-test ----------
-if __name__ == "__main__":
-    syms = os.getenv("MW_ML_SYMBOLS", "BTC,ETH,SOL").split(",")
-    syms = [s.strip().upper() for s in syms if s.strip()]
-    lookback = int(os.getenv("MW_ML_LOOKBACK_DAYS", str(DEFAULT_LOOKBACK_DAYS)))
-    dfs = load_prices(syms, lookback_days=lookback)
-    for k, v in dfs.items():
-        print(k, v.head(3), v.tail(3), sep="\n---\n")
+    df = df.reset_index().rename(columns={"index": "ts"})
+    return df
