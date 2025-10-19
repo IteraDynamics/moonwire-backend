@@ -289,9 +289,9 @@ def _soft_objective(
 def tune_thresholds(
     pred_dfs: Dict[str, pd.DataFrame],
     prices: Dict[str, pd.DataFrame],
-    conf_grid: Iterable[float] | None = None,
-    debounce_grid: Iterable[int] | None = None,
-    horizon_grid: Iterable[int] | None = None,
+    conf_grid = list(conf_grid) if conf_grid is not None else _grid_from_env("MW_TUNE_CONF", default_conf, float)
+    debounce_grid = list(debounce_grid) if debounce_grid is not None else _grid_from_env("MW_TUNE_DEBOUNCE", default_db, int)
+    horizon_grid = list(horizon_grid) if horizon_grid is not None else _grid_from_env("MW_TUNE_HORIZON", default_hz, int)
     fees_bps: float | None = None,
     slippage_bps: float | None = None,
 ) -> Dict[str, Any]:
