@@ -103,6 +103,12 @@ jobs:
           MW_PROTECTED_PATTERN: "^main$"
         run: python -m scripts.ml.train_predict
 
+      - name: Show data provenance (debug)
+        if: ${{ success() }}
+        run: |
+          echo "data_provenance.json:"
+          test -f artifacts/data_provenance.json && cat artifacts/data_provenance.json || echo "not found"
+
       - name: Upload ML artifacts (JSON/PNGs/Logs)
         uses: actions/upload-artifact@v4
         with:
@@ -217,6 +223,15 @@ jobs:
           tail -n 1 logs/signal_history.jsonl || true
           echo "Tail (legacy):"
           tail -n 1 logs/signals.jsonl || true
+
+      - name: Upload data provenance
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-provenance
+          path: artifacts/data_provenance.json
+          if-no-files-found: warn
+          retention-days: 14
 
       # --- Build demo summary (read-only orchestrator) ---
       - name: Build demo summary (read-only)
