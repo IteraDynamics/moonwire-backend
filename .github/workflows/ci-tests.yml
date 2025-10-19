@@ -22,10 +22,7 @@ jobs:
       MW_HORIZON_GRID_H: '2,3'
       TUNER_STRICT: "1"
       MW_CALIBRATE_PROBS: "platt"
-  data:
-    mode: real      # real | demo
-  # optionally: file_glob: "data/**.parquet"
-
+  
 
     steps:
       - name: Checkout code
