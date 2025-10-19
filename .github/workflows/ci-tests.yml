@@ -9,21 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      MW_ML_SYMBOLS: BTC,ETH,SOL
-      MW_ML_LOOKBACK_DAYS: '180'
-      MW_ML_MODEL: logreg         # or 'gb' if you enabled GradientBoosting
-      MW_HORIZON_H: '1'
-      MW_FEES_BPS: '1'
-      MW_SLIPPAGE_BPS: '3'
-      # Optional: steer the tuner grid (order matters for tie-breaks)
-      MW_CONF_GRID: "0.42,0.45,0.48,0.50"
-      MW_DEBOUNCE_GRID_MIN: '10,15'
-      MW_HORIZON_GRID_H: '1,2'
-      TUNER_STRICT: "0"
-      MW_CALIBRATE_PROBS: "platt"
   
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -92,16 +78,40 @@ jobs:
 
       - name: Run ML training/backtest/tuning
         env:
+          # core
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'
+          MW_ML_MODEL: logreg
+          MW_HORIZON_H: '1'
+
+          # trading costs
           MW_FEES_BPS: '1'
           MW_SLIPPAGE_BPS: '2'
-          MW_HORIZON_H: '1'
-          MW_OFFLINE_DEMO: '0'   # allows synthetic fallback if no internet
-          MW_FAIL_ON_DEMO: "0"              # don't block main yet
+
+          # social OFF for price-only tuning
+          MW_SOCIAL_ENABLED: '0'
+
+          # guardrails
+          MW_OFFLINE_DEMO: '0'
+          MW_FAIL_ON_DEMO: '0'
           MW_BRANCH: ${{ github.ref_name }}
-          MW_PROTECTED_PATTERN: "^main$"
+          MW_PROTECTED_PATTERN: '^main$'
+
+          # tuner controls (these WILL be used)
+          MW_CONF_GRID: '0.42,0.45,0.48,0.50'
+          MW_DEBOUNCE_GRID_MIN: '10,15'
+          MW_HORIZON_GRID_H: '1,2'
+          TUNER_STRICT: '0'
+
+          # probability calibration
+          MW_CALIBRATE_PROBS: 'platt'
         run: python -m scripts.ml.train_predict
+
+      - name: Show tuner env
+        run: |
+          echo "CONF=$MW_CONF_GRID"
+          echo "DEBOUNCE=$MW_DEBOUNCE_GRID_MIN"
+          echo "HORIZON=$MW_HORIZON_GRID_H"
 
       - name: Show data provenance (debug)
         if: ${{ success() }}
