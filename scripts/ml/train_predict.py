@@ -16,6 +16,27 @@ from .splitter import walk_forward_splits
 from .model_runner import train_model, predict_proba
 from .tuner import tune_thresholds
 
+# --- optional provenance (no-op if module not present)
+try:
+    from ._provenance import detect_provenance  # optional
+except Exception:
+    detect_provenance = None
+
+def _write_provenance(prices_map, symbols):
+    """Write artifacts/data_provenance.json if detect_provenance exists."""
+    if detect_provenance is None:
+        print("[provenance] module not present; skipping write")
+        return
+    try:
+        out = ROOT / "artifacts" / "data_provenance.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        prov = detect_provenance(prices_map, symbols)
+        with out.open("w", encoding="utf-8") as f:
+            json.dump(prov, f, indent=2, sort_keys=True, default=str)
+        print(f"[provenance] wrote {out}")
+    except Exception as e:
+        print(f"[provenance] skip ({e})")
+
 # --- optional provenance hook (safe if missing) ---
 try:
     from ._provenance import detect_provenance  # type: ignore
@@ -87,6 +108,8 @@ def main():
     # --- Load + build features (unchanged behavior) ---
     prices = load_prices(symbols, lookback_days=lookback_days)
     feats = build_features(prices)
+    
+    _write_provenance(prices, symbols)
 
     # --- Data provenance (new; harmless if _provenance not present) ---
     provenance_payload = None
