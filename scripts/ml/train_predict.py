@@ -33,6 +33,10 @@ except Exception:
     ROOT = Path(__file__).resolve().parents[2]
     MODELS_DIR = ROOT / "models"
     ARTIFACTS_DIR = ROOT / "artifacts"
+    
+    import sys
+    if str(ROOT) not in sys.path:
+      sys.path.insert(0, str(ROOT))
 
 from scripts.ml.data_loader import load_prices
 from scripts.ml.features import build_features, label_next_horizon, walk_forward_splits
