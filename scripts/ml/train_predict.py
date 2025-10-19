@@ -133,7 +133,7 @@ def main():
     prices = load_prices(symbols, lookback_days=lookback_days)
     feats = build_features(prices)
     
-    _write_provenance(prices, symbols, lookback_days
+    _write_provenance(prices, symbols, lookback_days)
 
     pred_dfs: Dict[str, pd.DataFrame] = {}
     manifest = {
