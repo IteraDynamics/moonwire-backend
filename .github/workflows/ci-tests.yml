@@ -290,6 +290,73 @@ jobs:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python scripts/mw_demo_summary.py
 
+      # --- Social Demo Probe: ingest demo Reddit/Twitter + upload artifacts (Draft PRs only) ---
+      - name: Social demo ingest (Reddit/Twitter)
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_DEMO: "true"
+          MW_REDDIT_MODE: "rss"              # demo path still uses synthetic in our ingest when MW_DEMO=true
+          MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
+          MW_REDDIT_SORT: "new"
+          MW_REDDIT_LOOKBACK_H: "72"
+          MW_TWITTER_MODE: "demo"            # forces synthetic tweets
+          MW_TWITTER_KEYWORDS: "bitcoin,ethereum,solana,crypto"
+          MW_TWITTER_LOOKBACK_H: "72"
+        run: |
+          python -m scripts.social.reddit_lite_ingest
+          python -m scripts.social.twitter_lite_ingest
+          echo "Reddit/Twitter demo ingest complete."
+
+      - name: Upload social demo artifacts
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-demo
+          if-no-files-found: warn
+          path: |
+            logs/social_reddit.jsonl
+            logs/social_twitter.jsonl
+            models/social_reddit_context.json
+            models/social_twitter_context.json
+            artifacts/reddit_activity_*.png
+            artifacts/reddit_bursts_*.png
+            artifacts/twitter_activity.png
+            artifacts/twitter_bursts.png
+
+      # --- Social-ON experiment: train_predict with social features (Draft PRs only; doesn't fail CI) ---
+      - name: Experimental run with social features
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_SOCIAL_ENABLED: "1"
+          # keep price env consistent with your main run:
+          MW_ML_SYMBOLS: BTC,ETH,SOL
+          MW_ML_LOOKBACK_DAYS: '180'
+          MW_HORIZON_H: '1'
+          MW_FEES_BPS: '1'
+          MW_SLIPPAGE_BPS: '2'
+        run: |
+          python -m scripts.ml.train_predict
+          echo "Experimental social run completed (continue-on-error)."
+
+      - name: Upload ML artifacts (social-on, experimental)
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-core-social-on
+          if-no-files-found: warn
+          path: |
+            models/ml_model_manifest.json
+            models/backtest_summary.json
+            models/signal_thresholds.json
+            artifacts/ml_roc_pr_curve.png
+            artifacts/bt_equity_curve.png
+            artifacts/bt_drawdown.png
+            artifacts/bt_returns_hist.png
+            artifacts/bt_signals_per_day.png
+
       # -----------------------------
       # Artifact uploads begin here
       # -----------------------------
