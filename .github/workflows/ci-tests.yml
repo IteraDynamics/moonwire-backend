@@ -9,6 +9,21 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      MW_ML_SYMBOLS: BTC,ETH,SOL
+      MW_ML_LOOKBACK_DAYS: '180'
+      MW_ML_MODEL: hybrid         # or 'gb' if you enabled GradientBoosting
+      MW_HORIZON_H: '1'
+      MW_FEES_BPS: '1'
+      MW_SLIPPAGE_BPS: '3'
+      # Optional: steer the tuner grid (order matters for tie-breaks)
+      MW_CONF_GRID: "0.68,0.70,0.72,0.75,0.78"
+      MW_DEBOUNCE_GRID_MIN: '45,60,90'
+      MW_HORIZON_GRID_H: '2,3'
+      TUNER_STRICT: "1"
+      MW_CALIBRATE_PROBS: "platt"
+  
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -25,6 +40,15 @@ jobs:
         run: |
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-dev.txt
+
+      - name: Run tests and ML pipeline
+        env:
+          MW_WRITE_BT_LOGS: "1"          # ✅ ensures trades.jsonl and backtest logs are written
+          MW_ENV: "ci"                   # optional: tag environment for CI runs
+          PYTHONUNBUFFERED: "1"          # cleaner CI logs
+        run: |
+          python -m pytest tests/ --maxfail=1 --disable-warnings -q
+          python scripts/ml/tuner.py     # optional explicit tuner run 
 
       - name: Run pytest suite
         env:
@@ -65,6 +89,43 @@ jobs:
           else:
               print("Trades already present:", trades)
           PY
+
+      - name: Run ML training/backtest/tuning
+        env:
+          MW_ML_SYMBOLS: BTC,ETH,SOL
+          MW_ML_LOOKBACK_DAYS: '180'
+          MW_FEES_BPS: '1'
+          MW_SLIPPAGE_BPS: '2'
+          MW_HORIZON_H: '1'
+          MW_OFFLINE_DEMO: '0'   # allows synthetic fallback if no internet
+          MW_FAIL_ON_DEMO: "0"              # don't block main yet
+          MW_BRANCH: ${{ github.ref_name }}
+          MW_PROTECTED_PATTERN: "^main$"
+        run: python -m scripts.ml.train_predict
+
+      - name: Show data provenance (debug)
+        if: ${{ success() }}
+        run: |
+          echo "data_provenance.json:"
+          test -f artifacts/data_provenance.json && cat artifacts/data_provenance.json || echo "not found"
+
+      - name: Upload ML artifacts (JSON/PNGs/Logs)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-core
+          if-no-files-found: warn
+          path: |
+            models/ml_model_manifest.json
+            models/backtest_summary.json
+            models/signal_thresholds.json
+            logs/trades.jsonl
+            logs/equity_curve.jsonl
+            artifacts/ml_roc_pr_curve.png
+            artifacts/ml_feature_importance.png
+            artifacts/bt_equity_curve.png
+            artifacts/bt_drawdown.png
+            artifacts/bt_returns_hist.png
+            artifacts/bt_signals_per_day.png
 
       # --- Train trigger likelihood model(s) ---
       - name: Train trigger likelihood models (logistic)
@@ -162,6 +223,15 @@ jobs:
           tail -n 1 logs/signal_history.jsonl || true
           echo "Tail (legacy):"
           tail -n 1 logs/signals.jsonl || true
+
+      - name: Upload data provenance
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-provenance
+          path: artifacts/data_provenance.json
+          if-no-files-found: warn
+          retention-days: 14
 
       # --- Build demo summary (read-only orchestrator) ---
       - name: Build demo summary (read-only)

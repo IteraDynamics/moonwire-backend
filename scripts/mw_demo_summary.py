@@ -364,7 +364,7 @@ def _write_md(md_lines: List[str], out_path: Path) -> None:
 
     enhanced_lines = ["🌙 MoonWire CI Demo Summary", "---"]
     enhanced_lines.append("### 🚀 Overview")
-    enhanced_lines.append("📊 Version: v0.9.0 | Run: 🟢 All checks passed")
+    enhanced_lines.append("📊 Version: v0.9.1 - ML-core | Run: 🟢 All checks passed")
     enhanced_lines.append(f"[View Artifacts]({run_url})" if run_url else "View Artifacts")
     enhanced_lines.append("---")
 
