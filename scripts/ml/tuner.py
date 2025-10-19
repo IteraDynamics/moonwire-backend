@@ -243,6 +243,11 @@ def tune_thresholds(
     and writes models/signal_thresholds.json and models/backtest_summary.json
     """
     # defaults for grid (used when env not set)
+    # --- fallback grids used when env vars are not set ---
+    default_conf = [0.52, 0.55, 0.58, 0.60, 0.62, 0.65]
+    default_db   = [10, 15, 20, 30, 45, 60]
+    default_hz   = [1, 2, 3]
+    
     conf_grid     = list(conf_grid) if conf_grid is not None else _grid_from_env("MW_CONF_GRID", default_conf, float)
     debounce_grid = list(debounce_grid) if debounce_grid is not None else _grid_from_env("MW_DEBOUNCE_GRID_MIN", default_db, int)
     horizon_grid  = list(horizon_grid) if horizon_grid is not None else _grid_from_env("MW_HORIZON_GRID_H", default_hz, int)
