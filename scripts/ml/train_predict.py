@@ -16,28 +16,58 @@ from .splitter import walk_forward_splits
 from .model_runner import train_model, predict_proba
 from .tuner import tune_thresholds
 
+ROOT = pathlib.Path(".").resolve()
+
 # --- optional provenance (no-op if module not present)
 try:
     from ._provenance import detect_provenance  # optional
 except Exception:
     detect_provenance = None
 
-def _write_provenance(prices_map, symbols):
-    """Write artifacts/data_provenance.json if detect_provenance exists."""
-    if detect_provenance is None:
-        print("[provenance] module not present; skipping write")
-        return
-    try:
-        out = ROOT / "artifacts" / "data_provenance.json"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        prov = detect_provenance(prices_map, symbols)
-        with out.open("w", encoding="utf-8") as f:
-            json.dump(prov, f, indent=2, sort_keys=True, default=str)
-        print(f"[provenance] wrote {out}")
-    except Exception as e:
-        print(f"[provenance] skip ({e})")
+def _write_provenance(prices_map, symbols, lookback_days):
+    """
+    Always write artifacts/data_provenance.json.
+    - If detect_provenance exists, try (prices_map, symbols) first, then kwargs.
+    - On any error, write a minimal payload with the error string so CI still uploads.
+    """
+    out = ROOT / "artifacts" / "data_provenance.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-ROOT = pathlib.Path(".").resolve()
+    base = {
+        "symbols": symbols,
+        "lookback_days": int(lookback_days),
+        "env": {
+            "MW_OFFLINE_DEMO": os.getenv("MW_OFFLINE_DEMO"),
+            "MW_DEMO": os.getenv("MW_DEMO"),
+            "DEMO_MODE": os.getenv("DEMO_MODE"),
+            "MW_BRANCH": os.getenv("MW_BRANCH"),
+        },
+    }
+
+    payload = None
+    if callable(detect_provenance):
+        try:
+            # Try simple positional signature
+            try:
+                payload = detect_provenance(prices_map, symbols)
+            except TypeError:
+                # Fallback: keyword signature
+                payload = detect_provenance(
+                    prices=prices_map,
+                    symbols=symbols,
+                    lookback_days=lookback_days,
+                    env=base["env"],
+                )
+        except Exception as e:
+            base["error"] = f"{type(e).__name__}: {e}"
+    else:
+        base["error"] = "provenance_module_missing"
+
+    to_write = {**base, **(payload or {})}
+    with out.open("w", encoding="utf-8") as f:
+        json.dump(to_write, f, indent=2, sort_keys=True, default=str)
+    print(f"[provenance] wrote {out}")
+
 
 def _feature_matrix(df: pd.DataFrame):
     feature_cols = ["r_1h","r_3h","r_6h","vol_6h","atr_14h","sma_gap","high_vol","social_score"]
@@ -103,7 +133,7 @@ def main():
     prices = load_prices(symbols, lookback_days=lookback_days)
     feats = build_features(prices)
     
-    _write_provenance(prices, symbols)
+    _write_provenance(prices, symbols, lookback_days
 
     pred_dfs: Dict[str, pd.DataFrame] = {}
     manifest = {
