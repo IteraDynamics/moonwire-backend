@@ -74,7 +74,7 @@ def _env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
-def _grid_from_env(name: str, cast=float, default: Iterable) -> List:
+def _grid_from_env(name: str, default: Iterable, cast=float) -> List:
     """
     Parse CSV grid from env, e.g. "0.55,0.58,0.60" or "15,30,60".
     """
