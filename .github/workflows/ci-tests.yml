@@ -17,9 +17,9 @@ jobs:
       MW_FEES_BPS: '1'
       MW_SLIPPAGE_BPS: '3'
       # Optional: steer the tuner grid (order matters for tie-breaks)
-      MW_CONF_GRID: "0.55,0.57,0.60"
-      MW_DEBOUNCE_GRID_MIN: '10,15'
-      MW_HORIZON_GRID_H: '2'
+      MW_CONF_GRID: "0.48,0.50,0.52,0.55,0.58"
+      MW_DEBOUNCE_GRID_MIN: '5,10,15'
+      MW_HORIZON_GRID_H: '1,2'
       TUNER_STRICT: "1"
       MW_CALIBRATE_PROBS: "platt"
   
@@ -330,7 +330,7 @@ jobs:
         continue-on-error: true
         env:
           PYTHONPATH: ${{ github.workspace }}
-          MW_SOCIAL_ENABLED: "1"
+          MW_SOCIAL_ENABLED: "0"
           # keep price env consistent with your main run:
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'
