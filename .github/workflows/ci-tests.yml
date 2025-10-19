@@ -81,7 +81,7 @@ jobs:
           # core
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'
-          MW_ML_MODEL: logreg
+          MW_ML_MODEL: hybrid
           MW_HORIZON_H: '1'
 
           # trading costs
