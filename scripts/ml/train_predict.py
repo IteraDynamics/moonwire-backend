@@ -105,33 +105,6 @@ def main():
     
     _write_provenance(prices, symbols)
 
-    # --- Data provenance (new; harmless if _provenance not present) ---
-    provenance_payload = None
-    if callable(detect_provenance):
-        try:
-            provenance_payload = detect_provenance(
-                prices=prices,
-                symbols=symbols,
-                lookback_days=lookback_days,
-                env=dict(
-                    MW_OFFLINE_DEMO=os.getenv("MW_OFFLINE_DEMO"),
-                    MW_DEMO=os.getenv("MW_DEMO"),
-                    DEMO_MODE=os.getenv("DEMO_MODE"),
-                ),
-            )
-        except Exception as _:
-            provenance_payload = {"error": "detect_provenance_failed"}
-
-        # write artifacts/data_provenance.json (doesn't affect tests)
-        try:
-            save_json("artifacts/data_provenance.json", provenance_payload)
-        except Exception:
-            # never fail test run just because provenance write failed
-            pass
-
-        # optional hard-fail if configured
-        _maybe_fail_on_demo(provenance_payload)
-
     pred_dfs: Dict[str, pd.DataFrame] = {}
     manifest = {
         "model_type": model_type,
