@@ -19,9 +19,21 @@ _RE_BTC = re.compile(r"\b(bitcoin|btc)\b", re.I)
 _RE_ETH = re.compile(r"\b(ethereum|eth)\b", re.I)
 _RE_SOL = re.compile(r"\b(solana|sol)\b", re.I)
 
-def _to_utc(ts: str) -> datetime:
-    # tolerant ISO parser: "....Z" or "+00:00"
-    return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+def _to_utc(dt_str: str) -> datetime:
+    """Parse tolerant ISO string ('Z' or '+00:00') → aware UTC datetime."""
+    return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+def _to_utc_ts(x) -> pd.Timestamp:
+    """
+    Convert a variety of inputs (datetime, pd.Timestamp, str) into a UTC-aware
+    pandas.Timestamp. If naive → localize UTC; if tz-aware → convert to UTC.
+    """
+    t = pd.Timestamp(x)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
+    return t
 
 def _as_hour_series(df: pd.DataFrame) -> Optional[pd.Series]:
     """
@@ -35,6 +47,7 @@ def _as_hour_series(df: pd.DataFrame) -> Optional[pd.Series]:
         ts = pd.Series(idx, index=df.index)
     if ts.isna().all():
         return None
+    # use lowercase 'h' to avoid FutureWarning
     return ts.dt.floor("h")
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -65,7 +78,6 @@ def _symbol_match_from_row(sym: str, row: dict) -> bool:
     """
     sub = (row.get("subreddit") or "").lower()
     title = (row.get("title") or row.get("text") or "")
-    # reddit rows may have 'title', twitter rows have 'text'
     if sym == "BTC":
         if sub == "bitcoin" or _RE_BTC.search(title):
             return True
@@ -92,26 +104,16 @@ def _collect_hour_counts_for_symbol(sym: str, look_hours: List[pd.Timestamp]) ->
     # Window bounds (inclusive) from feature hours
     if not look_hours:
         return {}
-    start_h = pd.Timestamp(min(look_hours), tz="UTC")
-    end_h = pd.Timestamp(max(look_hours), tz="UTC") + pd.Timedelta(hours=1)
 
-    def _to_utc_ts(x) -> pd.Timestamp:
-        t = pd.Timestamp(x)
-        if t.tzinfo is None:
-            t = t.tz_localize("UTC")
-        else:
-            t = t.tz_convert("UTC")
-        return t
-
+    # tz-safe + lowercase hour
     start_h = _to_utc_ts(min(look_hours)).floor("h")
     end_h   = _to_utc_ts(max(look_hours)).floor("h") + pd.Timedelta(hours=1)
-    
-    
-
 
     buckets: Dict[pd.Timestamp, int] = {}
+
     def bump(dt: datetime):
-        h = pd.Timestamp(dt.replace(minute=0, second=0, microsecond=0), tz="UTC")
+        # convert to UTC-aware Timestamp and bucket to hour (lowercase 'h')
+        h = _to_utc_ts(dt).floor("h")
         if h < start_h or h >= end_h:
             return
         buckets[h] = buckets.get(h, 0) + 1
@@ -155,7 +157,7 @@ def _normalize_counts_to_score(hrs: List[pd.Timestamp], counts: Dict[pd.Timestam
         return pd.Series([0.5] * len(xs), index=hrs, dtype=float)
     # min/max normalize with a soft prior (pull towards 0.5 a bit)
     raw = [(x - mn) / (mx - mn) for x in xs]
-    score = [0.75*r + 0.25*0.5 for r in raw]  # shrink towards 0.5
+    score = [0.75 * r + 0.25 * 0.5 for r in raw]  # shrink towards 0.5
     return pd.Series(score, index=hrs, dtype=float)
 
 def _attach_social_score(df: pd.DataFrame, sym: str) -> pd.DataFrame:
@@ -165,7 +167,6 @@ def _attach_social_score(df: pd.DataFrame, sym: str) -> pd.DataFrame:
     No leakage: we only use posts within each hour bucket (<= that hour).
     """
     enabled = _env_bool("MW_SOCIAL_ENABLED", False)
-    # default neutral, then optionally overwrite
     df = df.copy()
     df["social_score"] = 0.5
     if not enabled:
