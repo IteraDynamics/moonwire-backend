@@ -98,6 +98,9 @@ jobs:
           MW_SLIPPAGE_BPS: '2'
           MW_HORIZON_H: '1'
           MW_OFFLINE_DEMO: '1'   # allows synthetic fallback if no internet
+          MW_FAIL_ON_DEMO: "0"              # don't block main yet
+          MW_BRANCH: ${{ github.ref_name }}
+          MW_PROTECTED_PATTERN: "^main$"
         run: python -m scripts.ml.train_predict
 
       - name: Upload ML artifacts (JSON/PNGs/Logs)
