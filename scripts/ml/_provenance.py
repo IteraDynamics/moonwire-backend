@@ -1,45 +1,42 @@
-# scripts/ml/_provenance.py
-from pathlib import Path
-import json
-import pandas as pd
-import time
+from __future__ import annotations
+from typing import Dict, List, Any
+from datetime import datetime, timezone
 
-
-def write_data_provenance(prices: dict, *, source_tag: str, lookback_days: int, out_dir: Path):
-    """
-    Write a provenance record for the loaded market data.
-
-    Args:
-        prices (dict): mapping of symbol -> DataFrame
-        source_tag (str): 'real', 'demo', 'api', etc.
-        lookback_days (int): number of days of data requested
-        out_dir (Path): directory to save the provenance file
-
-    Returns:
-        dict: provenance info
-    """
-    rows = 0
-    ts_min = None
-    ts_max = None
-
-    for df in prices.values():
-        if df is None or len(df) == 0:
-            continue
-        rows += len(df)
-        lo, hi = df["ts"].min(), df["ts"].max()
-        ts_min = lo if ts_min is None else min(ts_min, lo)
-        ts_max = hi if ts_max is None else max(ts_max, hi)
-
-    prov = {
-        "source": source_tag,
-        "lookback_days": lookback_days,
-        "symbols": sorted(prices.keys()),
-        "rows_total": int(rows),
-        "ts_min": None if ts_min is None else pd.Timestamp(ts_min).isoformat(),
-        "ts_max": None if ts_max is None else pd.Timestamp(ts_max).isoformat(),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+def detect_provenance(prices: Dict[str, Any], symbols: List[str]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "symbols": symbols,
+        "per_symbol": {},
+        "overall_source": "unknown",
     }
+    sources = set()
+    for s in symbols:
+        df = prices.get(s)
+        if df is None or getattr(df, "empty", True):
+            out["per_symbol"][s] = {"rows": 0, "ts_start": None, "ts_end": None, "source": "missing"}
+            sources.add("missing")
+            continue
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "data_provenance.json").write_text(json.dumps(prov, indent=2))
-    return prov
+        src = None
+        if hasattr(df, "attrs") and isinstance(df.attrs, dict):
+            src = df.attrs.get("source")  # e.g. "api" or "synthetic"
+
+        info = {
+            "rows": int(getattr(df, "shape", (0,))[0]),
+            "ts_start": df.index.min().isoformat() if len(df) else None,
+            "ts_end": df.index.max().isoformat() if len(df) else None,
+            "source": src or "unknown",
+        }
+        out["per_symbol"][s] = info
+        sources.add(info["source"])
+
+    if "synthetic" in sources or "demo" in sources:
+        out["overall_source"] = "synthetic_or_demo"
+    elif "api" in sources:
+        out["overall_source"] = "api"
+    elif "missing" in sources:
+        out["overall_source"] = "missing"
+    else:
+        out["overall_source"] = "unknown"
+
+    return out
