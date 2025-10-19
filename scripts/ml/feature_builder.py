@@ -35,7 +35,7 @@ def _as_hour_series(df: pd.DataFrame) -> Optional[pd.Series]:
         ts = pd.Series(idx, index=df.index)
     if ts.isna().all():
         return None
-    return ts.dt.floor("H")
+    return ts.dt.floor("h")
 
 def _env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
@@ -94,6 +94,20 @@ def _collect_hour_counts_for_symbol(sym: str, look_hours: List[pd.Timestamp]) ->
         return {}
     start_h = pd.Timestamp(min(look_hours), tz="UTC")
     end_h = pd.Timestamp(max(look_hours), tz="UTC") + pd.Timedelta(hours=1)
+
+    def _to_utc_ts(x) -> pd.Timestamp:
+        t = pd.Timestamp(x)
+        if t.tzinfo is None:
+            t = t.tz_localize("UTC")
+        else:
+            t = t.tz_convert("UTC")
+        return t
+
+    start_h = _to_utc_ts(min(look_hours)).floor("h")
+    end_h   = _to_utc_ts(max(look_hours)).floor("h") + pd.Timedelta(hours=1)
+    
+    
+
 
     buckets: Dict[pd.Timestamp, int] = {}
     def bump(dt: datetime):
