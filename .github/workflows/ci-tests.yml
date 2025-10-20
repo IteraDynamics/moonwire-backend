@@ -76,12 +76,32 @@ jobs:
               print("Trades already present:", trades)
           PY
 
-
-      - name: Replay 180d social into logs (reddit only)
-        run: |
-          python -m scripts.social.replay_to_logs --clear --only reddit
+      # 1) Run 180-day REAL social backfill (not demo)
+      - name: Social backfill (180d)
         env:
-          MW_SOCIAL_DATA_DIR: data/social
+          MW_OFFLINE_DEMO: "0"          # demo OFF — required
+          MW_SOCIAL_BACKFILL: "1"       # turn backfill ON
+          MW_BACKFILL_DAYS: "180"       # window length
+          MW_REDDIT_MODE: "rss"         # or "api" if you’ve set creds
+          MW_TWITTER_MODE: "demo"       # keep demo unless you have a real bearer
+          # If you DO have a real Twitter bearer, switch the line above to "api"
+          # and add:
+          # MW_TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER }}
+        run: python -m scripts.social.backfill_social
+
+      # 2) Upload ONLY the backfill artifacts
+      - name: Upload social backfill artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-backfill-report
+          path: |
+            models/social_backfill_summary.json
+            artifacts/social_backfill_plots/**
+          if-no-files-found: warn
+            
+
+
 
       - name: Run ML training/backtest/tuning
         env:
