@@ -76,8 +76,33 @@ jobs:
               print("Trades already present:", trades)
           PY
 
+      # --- Reddit API backfill (writes logs/social_reddit.jsonl) ---
+      - name: Reddit API backfill (180d)
+        if: ${{ success() }}
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
+          MW_REDDIT_BACKFILL_DAYS: "180"
+          MW_SOCIAL_ENABLED: "1"
+          MW_REDDIT_MODE: "api"
+        run: |
+          python -m scripts.social.backfill_reddit_api
+          test -s logs/social_reddit.jsonl || (echo "No reddit data written" && exit 1)
+
+      - name: Upload Reddit JSONL (api backfill)
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: social_reddit.jsonl
+          path: logs/social_reddit.jsonl
+          if-no-files-found: error
+
+      
+
       # 1) Run 180-day REAL social backfill (not demo)
       - name: Social backfill (180d)
+      if: ${{ success() && !hashFiles('logs/social_reddit.jsonl') }}
         env:
           MW_OFFLINE_DEMO: "0"          # demo OFF — required
           MW_SOCIAL_BACKFILL: "1"       # turn backfill ON
