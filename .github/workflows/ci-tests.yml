@@ -76,6 +76,13 @@ jobs:
               print("Trades already present:", trades)
           PY
 
+
+      - name: Replay 180d social into logs (reddit only)
+        run: |
+          python -m scripts.social.replay_to_logs --clear --only reddit
+        env:
+          MW_SOCIAL_DATA_DIR: data/social
+
       - name: Run ML training/backtest/tuning
         env:
           # core
@@ -89,7 +96,7 @@ jobs:
           MW_SLIPPAGE_BPS: '2'
 
           # social OFF for price-only tuning
-          MW_SOCIAL_ENABLED: '0'
+          MW_SOCIAL_ENABLED: '1'
 
           # guardrails
           MW_OFFLINE_DEMO: '0'
