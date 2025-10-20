@@ -98,9 +98,9 @@ jobs:
           MW_PROTECTED_PATTERN: '^main$'
 
           # tuner controls (these WILL be used)
-          MW_CONF_GRID: '0.56'
+          MW_CONF_GRID: '0.58'
           MW_DEBOUNCE_GRID_MIN: '12'
-          MW_HORIZON_GRID_H: '2'
+          MW_HORIZON_GRID_H: '3'
           TUNER_STRICT: '0'
           MW_TUNER_DEBUG: "1"
 
