@@ -89,7 +89,7 @@ jobs:
           MW_SLIPPAGE_BPS: '2'
 
           # social OFF for price-only tuning
-          MW_SOCIAL_ENABLED: '1'
+          MW_SOCIAL_ENABLED: '0'
 
           # guardrails
           MW_OFFLINE_DEMO: '0'
