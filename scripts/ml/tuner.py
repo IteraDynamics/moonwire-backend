@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -144,7 +143,7 @@ def _agg_metrics(metrics_per_symbol: Dict[str, Dict[str, Any]]) -> Dict[str, Any
     Aggregate over symbols with sensible weighting:
       - win_rate weighted by n_trades
       - signals_per_day is sum across symbols
-      - profit_factor: fallback to weighted mean by n_trades
+      - profit_factor: weighted mean by n_trades
       - max_drawdown: worst (min)
     """
     if not metrics_per_symbol:
@@ -165,7 +164,7 @@ def _agg_metrics(metrics_per_symbol: Dict[str, Dict[str, Any]]) -> Dict[str, Any
         ) / max(1, total_trades)
 
     signals_per_day = sum(_as_float(v.get("signals_per_day", 0.0), 0.0) for v in metrics_per_symbol.values())
-    # profit_factor weighted mean
+
     if total_trades > 0:
         profit_factor = sum(
             _as_float(v.get("profit_factor", 0.0), 0.0) * _as_int(v.get("n_trades", 0), 0)
@@ -174,7 +173,6 @@ def _agg_metrics(metrics_per_symbol: Dict[str, Dict[str, Any]]) -> Dict[str, Any
     else:
         profit_factor = 0.0
 
-    # worst drawdown
     max_drawdown = min(_as_float(v.get("max_drawdown", 0.0), 0.0) for v in metrics_per_symbol.values())
 
     return {
@@ -203,6 +201,25 @@ def _objective_rank(agg: Dict[str, Any]) -> Tuple[int, float, float]:
     return (feasible, -pf, mdd)
 
 
+def _grid_from_env(name: str, default: Iterable, cast=float) -> List:
+    """
+    Parse CSV grid from env, e.g. "0.55,0.58,0.60" or "15,30,60".
+    """
+    v = os.getenv(name)
+    if not v:
+        return list(default)
+    out: List = []
+    for tok in v.split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        try:
+            out.append(cast(t))
+        except Exception:
+            continue
+    return out or list(default)
+
+
 # ----------------------------- main API ---------------------------------------
 
 
@@ -225,10 +242,22 @@ def tune_thresholds(
       }
     and writes models/signal_thresholds.json and models/backtest_summary.json
     """
-    # grids & params
-    conf_grid = list(conf_grid or [0.55, 0.58, 0.60, 0.62])
-    debounce_grid = list(debounce_grid or [15, 30, 45, 60])
-    horizon_grid = list(horizon_grid or [1, 2])
+    # defaults for grid (used when env not set)
+    # --- fallback grids used when env vars are not set ---
+    default_conf = [0.52, 0.55, 0.58, 0.60, 0.62, 0.65]
+    default_db   = [10, 15, 20, 30, 45, 60]
+    default_hz   = [1, 2, 3]
+    
+    conf_grid     = list(conf_grid) if conf_grid is not None else _grid_from_env("MW_CONF_GRID", default_conf, float)
+    debounce_grid = list(debounce_grid) if debounce_grid is not None else _grid_from_env("MW_DEBOUNCE_GRID_MIN", default_db, int)
+    horizon_grid  = list(horizon_grid) if horizon_grid is not None else _grid_from_env("MW_HORIZON_GRID_H", default_hz, int)
+
+    strict = (os.getenv("TUNER_STRICT", "0").strip() in ("1","true","yes","on"))
+
+    # grids & params (env overrides allowed)
+    conf_grid = list(conf_grid) if conf_grid is not None else _grid_from_env("MW_TUNE_CONF", default_conf, float)
+    debounce_grid = list(debounce_grid) if debounce_grid is not None else _grid_from_env("MW_TUNE_DEBOUNCE", default_db, int)
+    horizon_grid = list(horizon_grid) if horizon_grid is not None else _grid_from_env("MW_TUNE_HORIZON", default_hz, int)
     fees_bps = 1.0 if fees_bps is None else fees_bps
     slippage_bps = 2.0 if slippage_bps is None else slippage_bps
 
@@ -291,8 +320,9 @@ def tune_thresholds(
 
     # Choose best by objective
     if len(candidates) == 0:
-        # absolute fallback
-        chosen = ((0.55, 15, 1), {"win_rate": 0.0, "profit_factor": 0.0, "max_drawdown": 0.0, "signals_per_day": 0.0, "n_trades": 0}, {})
+        chosen = ((0.55, 15, 1),
+                  {"win_rate": 0.0, "profit_factor": 0.0, "max_drawdown": 0.0, "signals_per_day": 0.0, "n_trades": 0},
+                  {})
     else:
         candidates.sort(key=lambda x: _objective_rank(x[1]))
         chosen = candidates[0]
@@ -342,9 +372,8 @@ def tune_thresholds(
 # Allow running by itself for quick smoke test
 if __name__ == "__main__":
     # Minimal synthetic input to prove it runs without the rest of the pipeline.
-    # (The real CI/tests call this through train_predict; this is just a convenience.)
     rng = pd.date_range("2024-01-01", periods=200, freq="H", tz="UTC")
-    demo_px = pd.DataFrame({"ts": rng, "close": np.cumsum(np.random.randn(len(rng)) * 5 + 100)})
+    demo_px = pd.DataFrame({"ts": rng, "close": np.cumsum(np.random.randn(len(rng))) + 100})
     demo_pred = pd.DataFrame({"ts": rng, "p_long": np.clip(np.random.rand(len(rng)) * 0.2 + 0.4, 0, 1)})
 
     preds = {"BTC": demo_pred.copy(), "ETH": demo_pred.copy(), "SOL": demo_pred.copy()}

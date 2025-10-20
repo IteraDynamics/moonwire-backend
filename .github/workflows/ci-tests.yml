@@ -9,21 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      MW_ML_SYMBOLS: BTC,ETH,SOL
-      MW_ML_LOOKBACK_DAYS: '180'
-      MW_ML_MODEL: hybrid         # or 'gb' if you enabled GradientBoosting
-      MW_HORIZON_H: '1'
-      MW_FEES_BPS: '1'
-      MW_SLIPPAGE_BPS: '3'
-      # Optional: steer the tuner grid (order matters for tie-breaks)
-      MW_CONF_GRID: "0.68,0.70,0.72,0.75,0.78"
-      MW_DEBOUNCE_GRID_MIN: '45,60,90'
-      MW_HORIZON_GRID_H: '2,3'
-      TUNER_STRICT: "1"
-      MW_CALIBRATE_PROBS: "platt"
   
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -92,16 +78,41 @@ jobs:
 
       - name: Run ML training/backtest/tuning
         env:
+          # core
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'
+          MW_ML_MODEL: hybrid
+          MW_HORIZON_H: '1'
+
+          # trading costs
           MW_FEES_BPS: '1'
           MW_SLIPPAGE_BPS: '2'
-          MW_HORIZON_H: '1'
-          MW_OFFLINE_DEMO: '0'   # allows synthetic fallback if no internet
-          MW_FAIL_ON_DEMO: "0"              # don't block main yet
+
+          # social OFF for price-only tuning
+          MW_SOCIAL_ENABLED: '0'
+
+          # guardrails
+          MW_OFFLINE_DEMO: '0'
+          MW_FAIL_ON_DEMO: '0'
           MW_BRANCH: ${{ github.ref_name }}
-          MW_PROTECTED_PATTERN: "^main$"
+          MW_PROTECTED_PATTERN: '^main$'
+
+          # tuner controls (these WILL be used)
+          MW_CONF_GRID: '0.55,0.58,0.60,0.62'
+          MW_DEBOUNCE_GRID_MIN: '15,20,25'
+          MW_HORIZON_GRID_H: '2,3,4'
+          TUNER_STRICT: '0'
+          MW_TUNER_DEBUG: "1"
+
+          # probability calibration
+          MW_CALIBRATE_PROBS: 'platt'
         run: python -m scripts.ml.train_predict
+
+      - name: Show tuner env
+        run: |
+          echo "CONF=$MW_CONF_GRID"
+          echo "DEBOUNCE=$MW_DEBOUNCE_GRID_MIN"
+          echo "HORIZON=$MW_HORIZON_GRID_H"
 
       - name: Show data provenance (debug)
         if: ${{ success() }}
@@ -289,6 +300,73 @@ jobs:
           MW_LEADLAG_MAX_SHIFT_H: "12"
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python scripts/mw_demo_summary.py
+
+      # --- Social Demo Probe: ingest demo Reddit/Twitter + upload artifacts (Draft PRs only) ---
+      - name: Social demo ingest (Reddit/Twitter)
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_DEMO: "true"
+          MW_REDDIT_MODE: "rss"              # demo path still uses synthetic in our ingest when MW_DEMO=true
+          MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
+          MW_REDDIT_SORT: "new"
+          MW_REDDIT_LOOKBACK_H: "72"
+          MW_TWITTER_MODE: "demo"            # forces synthetic tweets
+          MW_TWITTER_KEYWORDS: "bitcoin,ethereum,solana,crypto"
+          MW_TWITTER_LOOKBACK_H: "72"
+        run: |
+          python -m scripts.social.reddit_lite_ingest
+          python -m scripts.social.twitter_lite_ingest
+          echo "Reddit/Twitter demo ingest complete."
+
+      - name: Upload social demo artifacts
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-demo
+          if-no-files-found: warn
+          path: |
+            logs/social_reddit.jsonl
+            logs/social_twitter.jsonl
+            models/social_reddit_context.json
+            models/social_twitter_context.json
+            artifacts/reddit_activity_*.png
+            artifacts/reddit_bursts_*.png
+            artifacts/twitter_activity.png
+            artifacts/twitter_bursts.png
+
+      # --- Social-ON experiment: train_predict with social features (Draft PRs only; doesn't fail CI) ---
+      - name: Experimental run with social features
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+        continue-on-error: true
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_SOCIAL_ENABLED: "0"
+          # keep price env consistent with your main run:
+          MW_ML_SYMBOLS: BTC,ETH,SOL
+          MW_ML_LOOKBACK_DAYS: '180'
+          MW_HORIZON_H: '1'
+          MW_FEES_BPS: '1'
+          MW_SLIPPAGE_BPS: '2'
+        run: |
+          python -m scripts.ml.train_predict
+          echo "Experimental social run completed (continue-on-error)."
+
+      - name: Upload ML artifacts (social-on, experimental)
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-core-social-on
+          if-no-files-found: warn
+          path: |
+            models/ml_model_manifest.json
+            models/backtest_summary.json
+            models/signal_thresholds.json
+            artifacts/ml_roc_pr_curve.png
+            artifacts/bt_equity_curve.png
+            artifacts/bt_drawdown.png
+            artifacts/bt_returns_hist.png
+            artifacts/bt_signals_per_day.png
 
       # -----------------------------
       # Artifact uploads begin here
