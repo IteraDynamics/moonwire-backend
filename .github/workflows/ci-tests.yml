@@ -103,12 +103,12 @@ jobs:
       # 1) Run 180-day REAL social backfill (not demo)
       - name: Social backfill (180d)
         if: ${{ success() && !hashFiles('logs/social_reddit.jsonl') }}
-          env:
-            MW_OFFLINE_DEMO: "0"          # demo OFF — required
-            MW_SOCIAL_BACKFILL: "1"       # turn backfill ON
-            MW_BACKFILL_DAYS: "180"       # window length
-            MW_REDDIT_MODE: "rss"         # or "api" if you’ve set creds
-            MW_TWITTER_MODE: "demo"       # keep demo unless you have a real bearer
+        env:
+          MW_OFFLINE_DEMO: "0"          # demo OFF — required
+          MW_SOCIAL_BACKFILL: "1"       # turn backfill ON
+          MW_BACKFILL_DAYS: "180"       # window length
+          MW_REDDIT_MODE: "rss"         # or "api" if you’ve set creds
+          MW_TWITTER_MODE: "demo"       # keep demo unless you have a real bearer
           # If you DO have a real Twitter bearer, switch the line above to "api"
           # and add:
           # MW_TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER }}
