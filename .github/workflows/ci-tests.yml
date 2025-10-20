@@ -98,8 +98,8 @@ jobs:
           MW_PROTECTED_PATTERN: '^main$'
 
           # tuner controls (these WILL be used)
-          MW_CONF_GRID: '0.55,0.58,0.60,0.62'
-          MW_DEBOUNCE_GRID_MIN: '15,20,25'
+          MW_CONF_GRID: '0.52,0.55,0.58'
+          MW_DEBOUNCE_GRID_MIN: '12,15,18'
           MW_HORIZON_GRID_H: '2,3,4'
           TUNER_STRICT: '0'
           MW_TUNER_DEBUG: "1"
