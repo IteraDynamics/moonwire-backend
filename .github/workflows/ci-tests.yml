@@ -144,7 +144,7 @@ jobs:
           MW_SOCIAL_ENABLED: '1'
 
           # guardrails
-          MW_OFFLINE_DEMO: '1'
+          MW_OFFLINE_DEMO: '0'
           MW_FAIL_ON_DEMO: '0'
           MW_BRANCH: ${{ github.ref_name }}
           MW_PROTECTED_PATTERN: '^main$'
