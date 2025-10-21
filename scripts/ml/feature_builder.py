@@ -1,5 +1,6 @@
 # scripts/ml/feature_builder.py
 from __future__ import annotations
+
 import os
 import json
 import re
@@ -10,11 +11,16 @@ from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
 
+# Use the canonical social series builder (already anti-leak lagged)
+try:
+    from scripts.ml.social_features import compute_social_series
+except Exception:
+    compute_social_series = None  # handled below
+
 
 # ----------------------------
 # Helpers (timestamps & parsing)
 # ----------------------------
-_ISO = "%Y-%m-%dT%H:%M:%SZ"
 _RE_BTC = re.compile(r"\b(bitcoin|btc)\b", re.I)
 _RE_ETH = re.compile(r"\b(ethereum|eth)\b", re.I)
 _RE_SOL = re.compile(r"\b(solana|sol)\b", re.I)
@@ -58,139 +64,71 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 # ----------------------------
-# Social score (optional/gated)
+# Social merge (canonical path)
 # ----------------------------
-def _load_jsonl_safe(path: Path) -> List[dict]:
+def _load_social_hourly(repo_root: Path = Path(".")) -> pd.DataFrame:
+    """
+    Load the canonical hourly social series:
+      index (UTC hourly), columns ['reddit_score','twitter_score','social_score'].
+    Returns empty df if disabled or unavailable.
+    """
+    if not _env_bool("MW_SOCIAL_ENABLED", False):
+        return pd.DataFrame()
+    if compute_social_series is None:
+        return pd.DataFrame()
     try:
-        if not path.exists():
-            return []
-        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        return [json.loads(ln) for ln in lines if ln.strip()]
+        df = compute_social_series(repo_root)
+        # Ensure hourly tz-aware index for robust joins
+        if df is not None and not df.empty:
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("UTC")
+            df = df.asfreq("h").fillna(0.5)
+        return df
     except Exception:
-        return []
+        return pd.DataFrame()
 
-def _symbol_match_from_row(sym: str, row: dict) -> bool:
+
+def _attach_social_score(df: pd.DataFrame, social_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Cheap symbol mapping based on subreddit/keywords/text (no hard deps).
-    - BTC: subreddit 'Bitcoin' OR title/text hits 'bitcoin|btc'
-    - ETH: subreddit 'ethtrader' OR hits 'ethereum|eth'
-    - SOL: subreddit 'Solana' OR hits 'solana|sol'
+    Attach 'social_score' to the per-row frame by hourly key. If disabled or missing,
+    default to neutral 0.5. No leakage: the canonical series is already lagged +1h.
     """
-    sub = (row.get("subreddit") or "").lower()
-    title = (row.get("title") or row.get("text") or "")
-    if sym == "BTC":
-        if sub == "bitcoin" or _RE_BTC.search(title):
-            return True
-    elif sym == "ETH":
-        if sub == "ethtrader" or _RE_ETH.search(title):
-            return True
-    elif sym == "SOL":
-        if sub == "solana" or _RE_SOL.search(title):
-            return True
-    return False
-
-def _collect_hour_counts_for_symbol(sym: str, look_hours: List[pd.Timestamp]) -> Dict[pd.Timestamp, int]:
-    """
-    Build per-hour post/tweet counts within the look window for a symbol.
-    Uses:
-      - logs/social_reddit.jsonl
-      - logs/social_twitter.jsonl
-    Falls back to empty counts if files missing.
-    """
-    logs_dir = Path("logs")
-    r_rows = _load_jsonl_safe(logs_dir / "social_reddit.jsonl")
-    t_rows = _load_jsonl_safe(logs_dir / "social_twitter.jsonl")
-
-    # Window bounds (inclusive) from feature hours
-    if not look_hours:
-        return {}
-
-    # tz-safe + lowercase hour
-    start_h = _to_utc_ts(min(look_hours)).floor("h")
-    end_h   = _to_utc_ts(max(look_hours)).floor("h") + pd.Timedelta(hours=1)
-
-    buckets: Dict[pd.Timestamp, int] = {}
-
-    def bump(dt: datetime):
-        # convert to UTC-aware Timestamp and bucket to hour (lowercase 'h')
-        h = _to_utc_ts(dt).floor("h")
-        if h < start_h or h >= end_h:
-            return
-        buckets[h] = buckets.get(h, 0) + 1
-
-    # Reddit rows: expect created_utc + optional mode/source fields
-    for r in r_rows:
-        try:
-            if not _symbol_match_from_row(sym, r):
-                continue
-            ciso = r.get("created_utc")
-            if not ciso:
-                continue
-            bump(_to_utc(ciso))
-        except Exception:
-            continue
-
-    # Twitter rows: created_utc present in lite ingest
-    for r in t_rows:
-        try:
-            if not _symbol_match_from_row(sym, r):
-                continue
-            ciso = r.get("created_utc")
-            if not ciso:
-                continue
-            bump(_to_utc(ciso))
-        except Exception:
-            continue
-
-    return buckets
-
-def _normalize_counts_to_score(hrs: List[pd.Timestamp], counts: Dict[pd.Timestamp, int]) -> pd.Series:
-    """
-    Map hourly integer counts → [0,1] score with a neutral prior (0.5) and safety for flat series.
-    """
-    xs = [int(counts.get(h, 0)) for h in hrs]
-    if len(xs) == 0:
-        return pd.Series([], dtype=float)
-    mn, mx = min(xs), max(xs)
-    if mx == mn:
-        # all same -> return neutral 0.5
-        return pd.Series([0.5] * len(xs), index=hrs, dtype=float)
-    # min/max normalize with a soft prior (pull towards 0.5 a bit)
-    raw = [(x - mn) / (mx - mn) for x in xs]
-    score = [0.75 * r + 0.25 * 0.5 for r in raw]  # shrink towards 0.5
-    return pd.Series(score, index=hrs, dtype=float)
-
-def _attach_social_score(df: pd.DataFrame, sym: str) -> pd.DataFrame:
-    """
-    If MW_SOCIAL_ENABLED=1, attach real social_score aligned by hour (left-join).
-    Otherwise keep neutral 0.5.
-    No leakage: we only use posts within each hour bucket (<= that hour).
-    """
-    enabled = _env_bool("MW_SOCIAL_ENABLED", False)
     df = df.copy()
+    hours = _as_hour_series(df)
     df["social_score"] = 0.5
-    if not enabled:
+
+    if hours is None or social_df is None or social_df.empty:
         return df
 
-    # Need hourly buckets from df
-    hours = _as_hour_series(df)
-    if hours is None:
-        return df  # can't align -> stay neutral
+    # Align and map per row
+    # Ensure social_df index is hourly UTC
+    s = social_df.get("social_score")
+    if s is None or s.empty:
+        return df
 
-    # Build score series for the set of hours present
-    unique_hours = sorted(pd.Series(hours).dropna().unique())
-    hour_counts = _collect_hour_counts_for_symbol(sym, unique_hours)
-    hour_scores = _normalize_counts_to_score(unique_hours, hour_counts)
+    # Reindex onto the union of hours to avoid KeyErrors, fill neutral 0.5
+    # Convert Series to DataFrame to avoid index alignment pitfalls later
+    s = s.astype(float)
+    # Build a frame with the exact hours we need
+    need_idx = pd.to_datetime(pd.Series(hours), utc=True, errors="coerce")
+    uniq_hours = sorted(need_idx.dropna().unique())
+    if len(uniq_hours) == 0:
+        return df
 
-    # Map row-wise
-    df["social_score"] = [float(hour_scores.get(h, 0.5)) for h in hours]
+    # Reindex social to requested hours, fill with 0.5
+    s_re = s.reindex(uniq_hours).fillna(0.5)
+
+    # Map row-wise by hour
+    mapper = dict(zip(uniq_hours, s_re.values.tolist()))
+    df["social_score"] = [float(mapper.get(h, 0.5)) for h in hours]
+
     return df
 
 
 # ----------------------------
 # Price-derived features
 # ----------------------------
-def _features_for_symbol(df: pd.DataFrame, sym: str) -> pd.DataFrame:
+def _features_for_symbol(df: pd.DataFrame, sym: str, social_df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     # basic returns
@@ -219,19 +157,52 @@ def _features_for_symbol(df: pd.DataFrame, sym: str) -> pd.DataFrame:
     df["high_vol"] = (df["vol_6h"] > thresh).astype(int)
 
     # social (neutral by default; overwrite if gate enabled & logs exist)
-    df = _attach_social_score(df, sym)
+    df = _attach_social_score(df, social_df)
 
     # clean
     df = df.dropna().reset_index(drop=True)
     return df
 
 
+def _write_feature_manifest(frames: Dict[str, pd.DataFrame], out_path: Path = Path("models/ml_model_manifest.json")) -> None:
+    """
+    Non-destructively update the model manifest with the union of feature columns
+    actually produced by the builder (for CI verification).
+    """
+    # Union of columns across symbols (exclude obvious non-features if needed)
+    feats: List[str] = sorted(set().union(*[set(df.columns.tolist()) for df in frames.values() if not df.empty]))
+    try:
+        if out_path.exists():
+            j = json.loads(out_path.read_text(encoding="utf-8"))
+        else:
+            j = {}
+        # Preserve any existing fields; just update 'features'
+        j["features"] = feats
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(j, indent=2), encoding="utf-8")
+    except Exception:
+        # best-effort only; don't break training
+        pass
+
+
 def build_features(df_prices: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     """
+    Build per-symbol feature frames.
+
     Price-only by default.
-    If MW_SOCIAL_ENABLED=1 and social logs exist, attach aligned hourly social_score.
+    If MW_SOCIAL_ENABLED=1 and social logs exist, attach aligned hourly social_score
+    from the canonical lagged social series.
+
+    Returns: dict[symbol] -> DataFrame
     """
+    # Load shared social time-series once
+    social_df = _load_social_hourly(Path("."))
+
     out: Dict[str, pd.DataFrame] = {}
     for sym, df in df_prices.items():
-        out[sym] = _features_for_symbol(df, sym)
+        out[sym] = _features_for_symbol(df, sym, social_df)
+
+    # Write features list for CI verification (non-blocking)
+    _write_feature_manifest(out)
+
     return out
