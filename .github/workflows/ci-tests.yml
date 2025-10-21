@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      MW_SOCIAL_ENABLED: '1'
   
     steps:
       - name: Checkout code
