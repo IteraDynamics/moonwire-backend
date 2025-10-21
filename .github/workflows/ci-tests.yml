@@ -124,50 +124,6 @@ jobs:
             models/social_backfill_summary.json
             artifacts/social_backfill_plots/**
           if-no-files-found: warn
-            
-
-      - name: Verify social features are in use
-        if: ${{ success() }}
-        shell: bash
-        run: |
-         python - <<'PY'
-         import os, json, pathlib
-         from pathlib import Path
-         from scripts.ml.social_features import compute_social_series
-
-         # 1) Confirm social is enabled and file exists
-         assert str(os.getenv("MW_SOCIAL_ENABLED","0")).lower() in {"1","true","yes"}, "MW_SOCIAL_ENABLED is off"
-         f = Path("logs/social_reddit.jsonl")
-         assert f.exists() and f.stat().st_size > 0, "social_reddit.jsonl missing or empty"
-
-         # 2) Build social series and sanity-check
-         df = compute_social_series(Path("."))
-         assert (not df.empty) and ("social_score" in df.columns), "social_score series is missing/empty"
-
-         s = df["social_score"].dropna()
-         non_neutral = int((s != 0.5).sum())
-         ratio = float(non_neutral) / max(1, len(s))
-         span = (str(s.index.min()), str(s.index.max()))
-
-         # 3) Optional: check model manifest for feature names
-         features_note = ""
-         manifest = Path("models/ml_model_manifest.json")
-         if manifest.exists():
-             try:
-                 jm = json.loads(manifest.read_text())
-                 feats = jm.get("features") or []
-                 has_social = any(("social" in str(x).lower()) for x in feats)
-                 features_note = f" | model_has_social_features={has_social}"
-            except Exception:
-                pass
-
-         with open(os.environ.get("GITHUB_STEP_SUMMARY","summary.md"), "a", encoding="utf-8") as out:
-          out.write("### Social feature verification\n")
-          out.write(f"- social_reddit.jsonl size: {f.stat().st_size} bytes\n")
-          out.write(f"- social_score rows: {len(s)}\n")
-          out.write(f"- non-neutral share: {ratio:.2%}\n")
-          out.write(f"- time span: {span[0]} → {span[1]}{features_note}\n")
-         PY
 
 
       - name: Run ML training/backtest/tuning
@@ -213,6 +169,10 @@ jobs:
         run: |
           echo "data_provenance.json:"
           test -f artifacts/data_provenance.json && cat artifacts/data_provenance.json || echo "not found"
+
+      - name: Verify social features are in use
+        if: ${{ success() }}
+        run: python -m scripts.ci.verify_social_features
 
       - name: Upload ML artifacts (JSON/PNGs/Logs)
         uses: actions/upload-artifact@v4
