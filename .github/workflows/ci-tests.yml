@@ -127,6 +127,9 @@ jobs:
             artifacts/social_backfill_plots/**
           if-no-files-found: warn
 
+      - name: Which feature_builder is used?
+        run: python -c "import importlib, sys; m=importlib.import_module('src.ml.feature_builder'); print('USING:', m.__file__)"
+
 
       - name: Run ML training/backtest/tuning
         env:
