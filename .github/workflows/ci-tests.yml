@@ -38,12 +38,7 @@ jobs:
           python -m pytest tests/ --maxfail=1 --disable-warnings -q
           python scripts/ml/tuner.py     # optional explicit tuner run 
 
-      - name: Run pytest suite
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
-
-      - name: Smoke emit one signal dual-write default
+            - name: Smoke emit one signal dual-write default
         if: success() && hashFiles('tools/emit_signal.py') != ''
         env:
           PYTHONPATH: ${{ github.workspace }}
@@ -104,7 +99,8 @@ jobs:
 
       # 1) Run 180-day REAL social backfill (not demo)
       - name: Social backfill (180d)
-        if: ${{ success() && !hashFiles('logs/social_reddit.jsonl') }}
+        if: ${{ success() && hashFiles('logs/social_reddit.jsonl') == '' }}
+
         env:
           MW_OFFLINE_DEMO: "0"          # demo OFF — required
           MW_SOCIAL_BACKFILL: "1"       # turn backfill ON
@@ -133,6 +129,7 @@ jobs:
 
       - name: Run ML training/backtest/tuning
         env:
+          PYTHONPATH: ${{ github.workspace }}
           # core
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'
