@@ -25,16 +25,16 @@ def _parse_csv_env(name: str) -> set[str]:
     return {s.strip().upper() for s in raw.split(",") if s.strip()}
 
 # Global gate + allow/deny lists:
+_SOC_INCLUDE = _parse_csv_env("MW_SOCIAL_INCLUDE")
 _GLOBAL_SOC_ON = str(os.getenv("MW_SOCIAL_ENABLED", "0")).lower() in {"1","true","yes"}
-_SOC_INCLUDE = _parse_csv_env("MW_SOCIAL_INCLUDE")   # e.g. "BTC,SOL"
-_SOC_EXCLUDE = _parse_csv_env("MW_SOCIAL_EXCLUDE")   # e.g. "ETH"
+
 
 def _should_use_social(symbol: str) -> bool:
     sym = (symbol or "").upper()
-    return (
-        _GLOBAL_SOC_ON
-        and (not _SOC_INCLUDE or sym in _SOC_INCLUDE)
-        and (sym not in _SOC_EXCLUDE)
+    if _SOC_INCLUDE:
+        # INCLUDE list is authoritative
+        return sym in _SOC_INCLUDE
+    return _GLOBAL_SOC_ON
     )
 
 
@@ -209,16 +209,12 @@ def build_features(df_prices: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame
     social_df = _load_social_hourly(Path("."))
 
 
-    # --- Per-symbol social gating (do NOT change schema) ---
-    try:
-        for _sym, _df in out.items():  # or whatever your dict is called
-            if "social_score" in _df.columns and not _should_use_social(_sym):
-                _df["social_score"] = 0.0
-    except Exception:
-        # be fail-safe; never break the feature build if something odd happens
-        pass
+# Per-symbol social gating
+for _sym, _df in out.items():  # replace 'out' with your actual dict
+    if "social_score" in _df.columns and not _should_use_social(_sym):
+        _df["social_score"] = 0.0
 
-    return out
+return out
    
 
     out: Dict[str, pd.DataFrame] = {}
