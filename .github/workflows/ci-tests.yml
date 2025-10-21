@@ -206,22 +206,22 @@ jobs:
           MW_TUNER_DEBUG: "1"
           MW_CALIBRATE_PROBS: 'platt'
           MW_OFFLINE_DEMO: '0'
-      run: |
-        python -m scripts.ml.train_predict
-        mv models/backtest_summary.json models/backtest_summary_off.json
+        run: |
+          python -m scripts.ml.train_predict
+          mv models/backtest_summary.json models/backtest_summary_off.json
 
     # --- Compare results and write deltas to the job summary ---
-    - name: Compare social ON vs OFF
-      if: ${{ success() }}
-      run: |
-        python - <<'PY'
-        import json, os
-        on  = json.load(open("models/backtest_summary_on.json"))
-        off = json.load(open("models/backtest_summary_off.json"))
-        A, B = on["aggregate"], off["aggregate"]
+      - name: Compare social ON vs OFF
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json, os
+          on  = json.load(open("models/backtest_summary_on.json"))
+          off = json.load(open("models/backtest_summary_off.json"))
+          A, B = on["aggregate"], off["aggregate"]
         def line(k, fmt=".4f"):
             ao, bo = A[k], B[k]; d = ao - bo
-            return f"{k}: ON={ao:{fmt}}  OFF={bo:{fmt}}  Δ={d:+{fmt}}"
+            return f"{k}: ON={ao:{fmt}} OFF={bo:{fmt}} Δ={d:+{fmt}}"
         lines = [
           "### A/B: Social ON vs OFF",
           line("win_rate"),
