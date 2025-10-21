@@ -1,227 +1,265 @@
-# src/ml/feature_builder.py
+# scripts/ml/feature_builder.py
 from __future__ import annotations
 
 import os
 import json
-import re
+from dataclasses import dataclass
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, Optional, Set, Iterable, Tuple
 
-import pandas as pd
 import numpy as np
-
-# Use the canonical social series builder from scripts (already anti-leak lagged).
-# PYTHONPATH in CI includes repo root, so this import is valid.
-try:
-    from scripts.ml.social_features import compute_social_series
-except Exception:
-    compute_social_series = None  # handled gracefully below
+import pandas as pd
 
 
-# --- Social gating helpers (add near imports) ---
-def _parse_csv_env(name: str) -> set[str]:
-    raw = os.getenv(name, "") or ""
-    return {s.strip().upper() for s in raw.split(",") if s.strip()}
+# =========================
+# Env flags for social use
+# =========================
 
-# Global gate + allow/deny lists:
-_SOC_INCLUDE = _parse_csv_env("MW_SOCIAL_INCLUDE")
-_GLOBAL_SOC_ON = str(os.getenv("MW_SOCIAL_ENABLED", "0")).lower() in {"1","true","yes"}
+SOCIAL_ENABLED: bool = str(os.getenv("MW_SOCIAL_ENABLED", "1")).strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
+_raw_include = os.getenv("MW_SOCIAL_INCLUDE", "").strip()
+if _raw_include == "":
+    # None => allow social for ALL symbols
+    SOCIAL_INCLUDE: Optional[Set[str]] = None
+else:
+    SOCIAL_INCLUDE = {
+        tok.strip().upper()
+        for tok in _raw_include.replace(";", ",").split(",")
+        if tok.strip()
+    }
 
 
-def _should_use_social(symbol: str) -> bool:
-    sym = (symbol or "").upper()
-    if _SOC_INCLUDE:
-        # INCLUDE list is authoritative
-        return sym in _SOC_INCLUDE
-    return _GLOBAL_SOC_ON
-    
+# =========================
+# Helpers
+# =========================
 
-
-# ----------------------------
-# Helpers (timestamps & parsing)
-# ----------------------------
-_RE_BTC = re.compile(r"\b(bitcoin|btc)\b", re.I)
-_RE_ETH = re.compile(r"\b(ethereum|eth)\b", re.I)
-_RE_SOL = re.compile(r"\b(solana|sol)\b", re.I)
-
-def _to_utc(dt_str: str) -> datetime:
-    """Parse tolerant ISO string ('Z' or '+00:00') → aware UTC datetime."""
-    return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-
-def _to_utc_ts(x) -> pd.Timestamp:
+def _ensure_ts(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert a variety of inputs (datetime, pd.Timestamp, str) into a UTC-aware
-    pandas.Timestamp. If naive → localize UTC; if tz-aware → convert to UTC.
+    Ensure a 'ts' datetime64[ns, UTC] column exists and is sorted.
+    Accepts either:
+      - DataFrame with 'ts' column (datetime-like or epoch-like)
+      - DataFrame with DateTimeIndex
     """
-    t = pd.Timestamp(x)
-    if t.tzinfo is None:
-        t = t.tz_localize("UTC")
+    out = df.copy()
+    if "ts" in out.columns:
+        out["ts"] = pd.to_datetime(out["ts"], utc=True, errors="coerce")
     else:
-        t = t.tz_convert("UTC")
-    return t
-
-def _as_hour_series(df: pd.DataFrame) -> Optional[pd.Series]:
-    """
-    Return a UTC hourly bucket series aligned to df rows.
-    Prefers 'ts' column; falls back to datetime-like index.
-    """
-    if "ts" in df.columns:
-        ts = pd.to_datetime(df["ts"], utc=True, errors="coerce")
-    else:
-        idx = pd.to_datetime(df.index, utc=True, errors="coerce")
-        ts = pd.Series(idx, index=df.index)
-    if ts.isna().all():
-        return None
-    # use lowercase 'h' to avoid FutureWarning
-    return ts.dt.floor("h")
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-# ----------------------------
-# Social merge (canonical path)
-# ----------------------------
-def _load_social_hourly(repo_root: Path = Path(".")) -> pd.DataFrame:
-    """
-    Load the canonical hourly social series:
-      index (UTC hourly), columns ['reddit_score','twitter_score','social_score'].
-    Returns empty df if disabled or unavailable.
-    """
-    if not _env_bool("MW_SOCIAL_ENABLED", False):
-        return pd.DataFrame()
-    if compute_social_series is None:
-        return pd.DataFrame()
-    try:
-        df = compute_social_series(repo_root)
-        # Ensure hourly tz-aware index for robust joins
-        if df is not None and not df.empty:
-            if df.index.tz is None:
-                df.index = df.index.tz_localize("UTC")
-            df = df.asfreq("h").fillna(0.5)
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
-def _attach_social_score(df: pd.DataFrame, social_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Attach 'social_score' to the per-row frame by hourly key. If disabled or missing,
-    default to neutral 0.5. No leakage: the canonical series is already lagged +1h.
-    """
-    df = df.copy()
-    hours = _as_hour_series(df)
-    df["social_score"] = 0.5
-
-    if hours is None or social_df is None or social_df.empty:
-        return df
-
-    s = social_df.get("social_score")
-    if s is None or s.empty:
-        return df
-
-    # Build the exact hours we need, reindex social, and map row-wise.
-    need_idx = pd.to_datetime(pd.Series(hours), utc=True, errors="coerce")
-    uniq_hours = sorted(need_idx.dropna().unique())
-    if len(uniq_hours) == 0:
-        return df
-
-    s_re = s.astype(float).reindex(uniq_hours).fillna(0.5)
-    mapper = dict(zip(uniq_hours, s_re.values.tolist()))
-    df["social_score"] = [float(mapper.get(h, 0.5)) for h in hours]
-
-    return df
-
-
-# ----------------------------
-# Price-derived features
-# ----------------------------
-def _features_for_symbol(df: pd.DataFrame, sym: str, social_df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    # basic returns
-    df["ret_1h"] = df["close"].pct_change(1)
-    df["r_1h"] = df["ret_1h"]
-    df["r_3h"] = df["close"].pct_change(3)
-    df["r_6h"] = df["close"].pct_change(6)
-
-    # volatility
-    df["vol_6h"] = df["ret_1h"].rolling(6).std()
-
-    # ATR approx over 14h (true range on OHLC)
-    tr = (df["high"] - df["low"]).abs()
-    tr_prev_close = (df["high"] - df["close"].shift(1)).abs().combine(
-        (df["low"] - df["close"].shift(1)).abs(), max
-    )
-    df["atr_14h"] = pd.concat([tr, tr_prev_close], axis=1).max(axis=1).rolling(14).mean()
-
-    # momentum
-    df["sma_6h"] = df["close"].rolling(6).mean()
-    df["sma_24h"] = df["close"].rolling(24).mean()
-    df["sma_gap"] = df["sma_6h"] / df["sma_24h"] - 1.0
-
-    # regime flag
-    thresh = df["vol_6h"].quantile(0.75)
-    df["high_vol"] = (df["vol_6h"] > thresh).astype(int)
-
-    # social (neutral by default; overwrite if gate enabled & logs exist)
-    df = _attach_social_score(df, social_df)
-
-    # clean
-    df = df.dropna().reset_index(drop=True)
-    return df
-
-
-def _write_feature_manifest(frames: Dict[str, pd.DataFrame], out_path: Path = Path("models/ml_model_manifest.json")) -> None:
-    """
-    Non-destructively update the model manifest with the union of feature columns
-    actually produced by the builder (for CI verification).
-    """
-    feats: List[str] = sorted(set().union(*[set(df.columns.tolist()) for df in frames.values() if not df.empty]))
-    try:
-        if out_path.exists():
-            j = json.loads(out_path.read_text(encoding="utf-8"))
+        if isinstance(out.index, pd.DatetimeIndex):
+            out = out.reset_index().rename(columns={"index": "ts"})
+            out["ts"] = pd.to_datetime(out["ts"], utc=True, errors="coerce")
         else:
-            j = {}
-        j["features"] = feats
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(j, indent=2), encoding="utf-8")
-    except Exception:
-        # best-effort only; don't break training
-        pass
+            raise ValueError("Price frame must have a 'ts' column or a DateTimeIndex.")
+    out = out.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+    return out
 
 
-def build_features(df_prices: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+def _as_price_df(obj: pd.DataFrame | pd.Series) -> pd.DataFrame:
     """
-    Build per-symbol feature frames.
-
-    Price-only by default.
-    If MW_SOCIAL_ENABLED=1 and social logs exist, attach aligned hourly social_score
-    from the canonical lagged social series.
-
-    Returns: dict[symbol] -> DataFrame
+    Normalize incoming prices to a DataFrame with ['ts','price'].
+    Accepts:
+      - DataFrame with 'price' (preferred) or 'close' column
+      - Series of prices with DateTimeIndex
     """
-    # Load shared social time-series once
-    social_df = _load_social_hourly(Path("."))
+    if isinstance(obj, pd.Series):
+        df = obj.to_frame(name="price")
+    else:
+        df = obj.copy()
+
+    if "price" not in df.columns:
+        if "close" in df.columns:
+            df = df.rename(columns={"close": "price"})
+        else:
+            # last resort: first numeric column
+            num_cols = [c for c in df.columns if np.issubdtype(df[c].dtype, np.number)]
+            if not num_cols:
+                raise ValueError("Could not find a numeric price column.")
+            df = df.rename(columns={num_cols[0]: "price"})
+
+    df = _ensure_ts(df)
+    # make sure price is float
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df = df.dropna(subset=["price"])
+    return df[["ts", "price"]]
 
 
-# Per-symbol social gating
-for _sym, _df in out.items():  # replace 'out' with your actual dict
-    if "social_score" in _df.columns and not _should_use_social(_sym):
-        _df["social_score"] = 0.0
+def _pct_change(series: pd.Series, periods: int) -> pd.Series:
+    return series.pct_change(periods=periods)
 
-return out
-   
 
+def _rolling_vol(returns: pd.Series, window: int) -> pd.Series:
+    return returns.rolling(window=window, min_periods=max(2, window // 2)).std()
+
+
+def _atr_like(price: pd.Series, window: int) -> pd.Series:
+    """
+    ATR proxy when only close/price is available:
+      use rolling (max(price) - min(price)) / previous price over the window.
+    It isn't classic ATR (needs high/low/close), but is a stable volatility proxy.
+    """
+    roll_max = price.rolling(window, min_periods=max(2, window // 2)).max()
+    roll_min = price.rolling(window, min_periods=max(2, window // 2)).min()
+    prev = price.shift(1).replace(0, np.nan)
+    atr = (roll_max - roll_min) / prev
+    return atr
+
+
+def _sma_gap(price: pd.Series, window: int) -> pd.Series:
+    sma = price.rolling(window=window, min_periods=max(2, window // 2)).mean()
+    return (price / sma) - 1.0
+
+
+def _zscore(x: pd.Series) -> pd.Series:
+    m = x.rolling(72, min_periods=12).mean()
+    s = x.rolling(72, min_periods=12).std()
+    z = (x - m) / s.replace(0, np.nan)
+    return z.fillna(0.0)
+
+
+def _read_jsonl(path: Path) -> Iterable[dict]:
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except Exception:
+                # skip bad lines
+                continue
+
+
+def _load_social_series() -> pd.DataFrame:
+    """
+    Load social activity from logs/social_reddit.jsonl (if present) and return
+    an hourly series: ['ts', 'social_count'].
+    Very tolerant to schema; uses any of these timestamp fields if found:
+    'ts', 'created_utc', 'created_at'.
+    """
+    log_path = Path("logs/social_reddit.jsonl")
+    if not log_path.exists():
+        # empty frame with ts for merge_asof
+        return pd.DataFrame(columns=["ts", "social_count"], dtype=float)
+
+    rows: list[Tuple[pd.Timestamp, int]] = []
+    for rec in _read_jsonl(log_path):
+        ts_val = rec.get("ts") or rec.get("created_utc") or rec.get("created_at")
+        if ts_val is None:
+            continue
+        try:
+            # support epoch seconds or ISO8601
+            if isinstance(ts_val, (int, float)):
+                ts = pd.to_datetime(int(ts_val), unit="s", utc=True)
+            else:
+                ts = pd.to_datetime(ts_val, utc=True)
+        except Exception:
+            continue
+        rows.append((ts, 1))
+
+    if not rows:
+        return pd.DataFrame(columns=["ts", "social_count"], dtype=float)
+
+    df = pd.DataFrame(rows, columns=["ts", "one"])
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    # floor to hour and count
+    df["ts"] = df["ts"].dt.floor("h")
+    s = df.groupby("ts")["one"].sum().rename("social_count").astype(float).reset_index()
+    return s[["ts", "social_count"]]
+
+
+def _build_base_features(price_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Given a price frame ['ts','price'] (hourly), compute base features.
+    """
+    df = price_df.copy()
+
+    # Returns (assumed hourly bars)
+    df["r_1h"] = _pct_change(df["price"], 1)
+    df["r_3h"] = _pct_change(df["price"], 3)
+    df["r_6h"] = _pct_change(df["price"], 6)
+
+    # Volatility proxies
+    df["vol_6h"] = _rolling_vol(df["r_1h"], 6)
+    df["atr_14h"] = _atr_like(df["price"], 14)
+
+    # Trend
+    df["sma_gap"] = _sma_gap(df["price"], 24)
+
+    # High-vol flag (binary-ish; keep as float)
+    med_vol = df["vol_6h"].rolling(96, min_periods=24).median()
+    df["high_vol"] = (df["vol_6h"] > (1.5 * med_vol)).astype(float)
+
+    return df
+
+
+def _merge_social(df: pd.DataFrame, social_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge hourly social counts and convert to a normalized score.
+    """
+    if social_df.empty:
+        df["social_score"] = 0.0
+        return df
+
+    # join on hourly ts
+    base = df.copy()
+    s = social_df.copy()
+    base["ts"] = pd.to_datetime(base["ts"], utc=True)
+    s["ts"] = pd.to_datetime(s["ts"], utc=True)
+
+    merged = base.merge(s, on="ts", how="left")
+    merged["social_count"] = merged["social_count"].fillna(0.0)
+
+    # Normalize -> zscore, then clip to sensible range
+    merged["social_score"] = _zscore(merged["social_count"]).clip(-4, 6)
+    merged = merged.drop(columns=["social_count"])
+    return merged
+
+
+# =========================
+# Public API
+# =========================
+
+def build_features(prices: Dict[str, pd.DataFrame | pd.Series]) -> Dict[str, pd.DataFrame]:
+    """
+    Construct model features for each symbol.
+
+    Input:
+      prices: dict like { "BTC": df_or_series, "ETH": ... }
+              where each value has at least time + price info.
+
+    Output:
+      dict of symbol -> DataFrame with columns:
+        ['ts','price','r_1h','r_3h','r_6h','vol_6h','atr_14h','sma_gap','high_vol','social_score']
+      (labeling happens downstream)
+    """
     out: Dict[str, pd.DataFrame] = {}
-    for sym, df in df_prices.items():
-        out[sym] = _features_for_symbol(df, sym, social_df)
 
-    # Write features list for CI verification (non-blocking)
-    _write_feature_manifest(out)
+    # Load social once (hourly counts), reuse for all merges
+    social_hourly = _load_social_series()
+
+    for sym, obj in prices.items():
+        sym_u = str(sym).upper()
+
+        # Base price features
+        p = _as_price_df(obj)
+        df = _build_base_features(p)
+
+        # Decide whether social is enabled for this symbol
+        use_social = SOCIAL_ENABLED and (SOCIAL_INCLUDE is None or sym_u in SOCIAL_INCLUDE)
+
+        if use_social:
+            df = _merge_social(df, social_hourly)
+        else:
+            # Ensure the column exists and is zero when disabled
+            df["social_score"] = 0.0
+
+        # Final cleanup: fill remaining NaNs with 0 for model safety
+        for col in ["r_1h", "r_3h", "r_6h", "vol_6h", "atr_14h", "sma_gap", "high_vol", "social_score"]:
+            if col not in df.columns:
+                df[col] = 0.0
+            df[col] = df[col].astype(float).fillna(0.0)
+
+        out[sym_u] = df[["ts", "price", "r_1h", "r_3h", "r_6h", "vol_6h", "atr_14h", "sma_gap", "high_vol", "social_score"]]
 
     return out
