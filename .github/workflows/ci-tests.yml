@@ -12,6 +12,7 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}
       MW_SOCIAL_ENABLED: '1'
+      MW_FIX_END_TS: "2025-10-21T20:00:00Z"
   
     steps:
       - name: Checkout code
