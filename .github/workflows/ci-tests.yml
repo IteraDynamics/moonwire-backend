@@ -135,7 +135,14 @@ jobs:
           if-no-files-found: warn
 
       - name: Which feature_builder is used?
-        run: python -c "import importlib, sys; m=importlib.import_module('src.ml.feature_builder'); print('USING:', m.__file__)"
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python - <<'PY'
+          import importlib
+          m = importlib.import_module('scripts.ml.feature_builder')
+          print('USING:', m.__file__)
+          PY
 
 
       - name: Run ML training/backtest/tuning
