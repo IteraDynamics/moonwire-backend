@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      MW_SOCIAL_ENABLED: '1'
   
     steps:
       - name: Checkout code
@@ -36,10 +39,14 @@ jobs:
           python -m pytest tests/ --maxfail=1 --disable-warnings -q
           python scripts/ml/tuner.py     # optional explicit tuner run 
 
-      - name: Run pytest suite
+      - name: Run tests and ML pipeline
         env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: python -m pytest tests/ --maxfail=1 --disable-warnings -q
+          MW_WRITE_BT_LOGS: "1"          # ✅ ensures trades.jsonl and backtest logs are written
+          MW_ENV: "ci"                   # optional: tag environment for CI runs
+          PYTHONUNBUFFERED: "1"          # cleaner CI logs
+        run: |
+          python -m pytest tests/ --maxfail=1 --disable-warnings -q
+          python scripts/ml/tuner.py     # optional explicit tuner run
 
       - name: Smoke emit one signal dual-write default
         if: success() && hashFiles('tools/emit_signal.py') != ''
@@ -76,8 +83,71 @@ jobs:
               print("Trades already present:", trades)
           PY
 
+
+      # --- Reddit API backfill (writes logs/social_reddit.jsonl) ---
+      - name: Reddit API backfill (180d)
+        if: ${{ success() }}
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
+          MW_REDDIT_BACKFILL_DAYS: "180"
+          MW_SOCIAL_ENABLED: "1"
+          MW_REDDIT_MODE: "api"
+        run: |
+          python -m scripts.social.backfill_reddit_api
+          test -s logs/social_reddit.jsonl || (echo "No reddit data written" && exit 1)
+
+      - name: Upload Reddit JSONL (api backfill)
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: social_reddit.jsonl
+          path: logs/social_reddit.jsonl
+          if-no-files-found: error
+
+      
+
+      # 1) Run 180-day REAL social backfill (not demo)
+      - name: Social backfill (180d)
+        if: ${{ success() && hashFiles('logs/social_reddit.jsonl') == '' }}
+
+        env:
+          MW_OFFLINE_DEMO: "0"          # demo OFF — required
+          MW_SOCIAL_BACKFILL: "1"       # turn backfill ON
+          MW_BACKFILL_DAYS: "180"       # window length
+          MW_REDDIT_MODE: "rss"         # or "api" if you’ve set creds
+          MW_TWITTER_MODE: "demo"       # keep demo unless you have a real bearer
+          # If you DO have a real Twitter bearer, switch the line above to "api"
+          # and add:
+          # MW_TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER }}
+        run: python -m scripts.social.backfill_social
+
+      # 2) Upload ONLY the backfill artifacts
+      - name: Upload social backfill artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-backfill-report
+          path: |
+            models/social_backfill_summary.json
+            artifacts/social_backfill_plots/**
+          if-no-files-found: warn
+
+      - name: Which feature_builder is used?
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python - <<'PY'
+          import importlib
+          m = importlib.import_module('scripts.ml.feature_builder')
+          print('USING:', m.__file__)
+          PY
+
+
       - name: Run ML training/backtest/tuning
         env:
+          PYTHONPATH: ${{ github.workspace }}
           # core
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'
@@ -89,7 +159,7 @@ jobs:
           MW_SLIPPAGE_BPS: '2'
 
           # social OFF for price-only tuning
-          MW_SOCIAL_ENABLED: '0'
+          MW_SOCIAL_ENABLED: '1'
 
           # guardrails
           MW_OFFLINE_DEMO: '0'
@@ -98,9 +168,9 @@ jobs:
           MW_PROTECTED_PATTERN: '^main$'
 
           # tuner controls (these WILL be used)
-          MW_CONF_GRID: '0.55,0.58,0.60,0.62'
-          MW_DEBOUNCE_GRID_MIN: '15,20,25'
-          MW_HORIZON_GRID_H: '2,3,4'
+          MW_CONF_GRID: '0.50,0.52,0.55,0.58,0.60'
+          MW_DEBOUNCE_GRID_MIN: '5,10,15'
+          MW_HORIZON_GRID_H: '2,3'
           TUNER_STRICT: '0'
           MW_TUNER_DEBUG: "1"
 
@@ -119,6 +189,10 @@ jobs:
         run: |
           echo "data_provenance.json:"
           test -f artifacts/data_provenance.json && cat artifacts/data_provenance.json || echo "not found"
+
+      - name: Verify social features are in use
+        if: ${{ success() }}
+        run: python -m scripts.ci.verify_social_features
 
       - name: Upload ML artifacts (JSON/PNGs/Logs)
         uses: actions/upload-artifact@v4
@@ -341,7 +415,7 @@ jobs:
         continue-on-error: true
         env:
           PYTHONPATH: ${{ github.workspace }}
-          MW_SOCIAL_ENABLED: "0"
+          MW_SOCIAL_ENABLED: "1"
           # keep price env consistent with your main run:
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'

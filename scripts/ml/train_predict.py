@@ -24,6 +24,13 @@ try:
 except Exception:
     detect_provenance = None
 
+# canonical feature list used throughout
+FEATURES = [
+    "r_1h","r_3h","r_6h",
+    "vol_6h","atr_14h","sma_gap","high_vol",
+    "social_score",
+]
+
 def _write_provenance(prices_map, symbols, lookback_days):
     """
     Always write artifacts/data_provenance.json.
@@ -47,11 +54,9 @@ def _write_provenance(prices_map, symbols, lookback_days):
     payload = None
     if callable(detect_provenance):
         try:
-            # Try simple positional signature
             try:
                 payload = detect_provenance(prices_map, symbols)
             except TypeError:
-                # Fallback: keyword signature
                 payload = detect_provenance(
                     prices=prices_map,
                     symbols=symbols,
@@ -70,19 +75,19 @@ def _write_provenance(prices_map, symbols, lookback_days):
 
 
 def _feature_matrix(df: pd.DataFrame):
-    feature_cols = ["r_1h","r_3h","r_6h","vol_6h","atr_14h","sma_gap","high_vol","social_score"]
-    X = df[feature_cols].values.astype(float)
+    X = df[FEATURES].values.astype(float)
     y = df["y_long"].values.astype(int)
-    return X, y, feature_cols
+    return X, y, FEATURES
+
 
 def _plots_roc_pr_placeholder():
-    # Simple placeholder figure (we're not computing ROC/PR here to keep deps minimal)
     (ROOT / "artifacts").mkdir(parents=True, exist_ok=True)
     plt.figure()
     plt.title("ML ROC/PR (placeholder)")
     plt.plot([0,1],[0,1])
     plt.savefig(ROOT/"artifacts/ml_roc_pr_curve.png")
     plt.close()
+
 
 def _plot_equity_placeholder():
     (ROOT / "artifacts").mkdir(parents=True, exist_ok=True)
@@ -91,6 +96,7 @@ def _plot_equity_placeholder():
     plt.plot([0,1,2,3],[1,1.01,0.99,1.02])
     plt.savefig(ROOT/"artifacts/bt_equity_curve.png")
     plt.close()
+
 
 def _maybe_fail_on_demo(prov: dict):
     """
@@ -110,7 +116,6 @@ def _maybe_fail_on_demo(prov: dict):
     pattern = os.getenv("MW_PROTECTED_PATTERN", r"^main$")
     is_protected = bool(re.search(pattern, branch or ""))
 
-    # We treat these flags as "demo" hints; adjust to your _provenance payload.
     is_demo = bool(prov.get("demo", False)) or str(prov.get("source", "")).lower().startswith("demo")
 
     if is_protected and is_demo:
@@ -118,6 +123,7 @@ def _maybe_fail_on_demo(prov: dict):
             f"Provenance indicates demo data on protected branch '{branch}'. "
             f"Set MW_FAIL_ON_DEMO=0 to bypass, or switch to real data."
         )
+
 
 def main():
     ensure_dirs()
@@ -129,10 +135,9 @@ def main():
     test_days = env_int("MW_TEST_DAYS", 30)
     horizon_h = env_int("MW_HORIZON_H", 1)
 
-    # --- Load + build features (unchanged behavior) ---
+    # --- Load + build features ---
     prices = load_prices(symbols, lookback_days=lookback_days)
     feats = build_features(prices)
-    
     _write_provenance(prices, symbols, lookback_days)
 
     pred_dfs: Dict[str, pd.DataFrame] = {}
@@ -140,7 +145,10 @@ def main():
         "model_type": model_type,
         "symbols": symbols,
         "lookback_days": lookback_days,
-        "feature_list": ["r_1h","r_3h","r_6h","vol_6h","atr_14h","sma_gap","high_vol","social_score"],
+        # Write BOTH keys for compatibility
+        "features": FEATURES,
+        "feature_list": FEATURES,
+        "social_enabled": str(os.getenv("MW_SOCIAL_ENABLED","0")).lower() in {"1","true","yes"},
         "train_days": train_days,
         "test_days": test_days,
         "horizon_h": horizon_h,
@@ -155,12 +163,11 @@ def main():
         preds = np.zeros(len(df))
         fold_ix = 0
         for tr_ix, te_ix in walk_forward_splits(df, n_splits=3, train_days=train_days, test_days=test_days):
-            if len(tr_ix) < 10 or len(te_ix) < 5:  # tiny safety
+            if len(tr_ix) < 10 or len(te_ix) < 5:
                 continue
             m = train_model(X[tr_ix], y[tr_ix], model_type=model_type)
             p = predict_proba(m, X[te_ix])
             preds[te_ix] = p
-            # simple fold metric
             manifest["fold_metrics"].append({
                 "symbol": sym,
                 "fold": fold_ix,
@@ -177,9 +184,10 @@ def main():
     save_json("models/backtest_summary.json", {"aggregate": best["agg"], "per_symbol": best["per_symbol"]})
     save_json("models/ml_model_manifest.json", manifest)
 
-    # --- placeholder plots (unchanged) ---
+    # --- placeholder plots ---
     _plots_roc_pr_placeholder()
     _plot_equity_placeholder()
+
 
 if __name__ == "__main__":
     main()

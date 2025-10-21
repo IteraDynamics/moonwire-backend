@@ -1,71 +1,190 @@
 # scripts/ml/social_features.py
 from __future__ import annotations
+
+import os
+import json
 from pathlib import Path
-from typing import Dict
-import os, json
+from typing import Dict, List, Tuple
+
+import numpy as np
 import pandas as pd
 
+
+# ----------------------------
+# Helpers
+# ----------------------------
 def _load_jsonl(path: Path) -> pd.DataFrame:
-    if not path.exists():
+    """
+    Load a JSONL file into a DataFrame. If missing/empty, return empty with created_utc column.
+    """
+    if not path.exists() or path.stat().st_size == 0:
         return pd.DataFrame(columns=["created_utc"])
-    rows = []
+    rows: List[Dict] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
-            if line.strip():
-                rows.append(json.loads(line))
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                rows.append(json.loads(s))
+            except Exception:
+                # skip malformed lines
+                continue
+    if not rows:
+        return pd.DataFrame(columns=["created_utc"])
     return pd.DataFrame(rows)
 
-def _hour_floor(ts: pd.Series) -> pd.Series:
-    # expects ISO strings with Z
-    return pd.to_datetime(ts.str.replace("Z", "+00:00"), utc=True).dt.floor("H")
 
-def _series_from_logs(df: pd.DataFrame, kind: str) -> pd.Series:
+def _to_hour_floor_iso(series: pd.Series) -> pd.Series:
     """
-    Turns social logs into an hourly score in [0,1].
-    For now: min-max normalize per-hour counts -> score; neutral = 0.5 fallback.
+    Convert ISO8601 '...Z' strings to UTC hourly floor timestamps.
     """
-    if df.empty:
+    ts = pd.to_datetime(series.astype(str).str.replace("Z", "+00:00"), utc=True, errors="coerce")
+    # Pandas deprecates "H" in favor of "h"
+    return ts.dt.floor("h")
+
+
+def _minmax_01(s: pd.Series) -> pd.Series:
+    """
+    Map to [0,1]. If constant or empty -> 0.5.
+    """
+    if s is None or s.empty:
+        return pd.Series(dtype="float64")
+    s = s.astype("float64")
+    lo, hi = s.min(), s.max()
+    if pd.isna(lo) or pd.isna(hi):
+        return pd.Series(dtype="float64")
+    if hi == lo:
+        return pd.Series(0.5, index=s.index, dtype="float64")
+    return (s - lo) / (hi - lo)
+
+
+def _squash_away_from_extremes(x: pd.Series, low: float = 0.1, high: float = 0.9) -> pd.Series:
+    """
+    Take a [0,1] score and squash into [low, high] to avoid hard 0/1.
+    """
+    if x is None or x.empty:
+        return pd.Series(dtype="float64")
+    x = x.clip(0.0, 1.0)
+    return x * (high - low) + low
+
+
+def _hourly_counts(df: pd.DataFrame, time_col: str = "created_utc") -> pd.Series:
+    """
+    Count events per hour from a DataFrame with an ISO 'created_utc' column.
+    """
+    if df.empty or time_col not in df:
+        return pd.Series(dtype="int64")
+    hours = _to_hour_floor_iso(df[time_col])
+    vc = hours.value_counts().sort_index()
+    vc.index.name = "hour"
+    return vc
+
+
+def _normalized_from_counts(counts: pd.Series) -> pd.Series:
+    """
+    Prefer a rolling z-score mapped to [0,1]; fall back to min-max if needed.
+    """
+    if counts is None or counts.empty:
         return pd.Series(dtype="float64")
 
-    if kind == "reddit":
-        ts = _hour_floor(df["created_utc"].astype(str))
-        counts = ts.value_counts().sort_index()
-    else:  # twitter
-        ts = _hour_floor(df["created_utc"].astype(str))
-        counts = ts.value_counts().sort_index()
+    # Ensure continuous hourly index
+    counts = counts.asfreq("h").fillna(0).astype("float64")
 
+    # Rolling window ~30d of hours; require at least 24 hours to start
+    roll = counts.rolling(window=24 * 30, min_periods=24)
+    mean = roll.mean()
+    std = roll.std(ddof=0)
+
+    # z = (x - mean) / std; handle div-by-zero and infs explicitly
+    z = (counts - mean) / std
+    z = z.replace([np.inf, -np.inf], np.nan)
+
+    if z.dropna().empty:
+        s01 = _minmax_01(counts)
+    else:
+        # clip to reasonable band, then scale to [0,1]
+        zc = z.clip(-3, 3)
+        zmin, zmax = zc.min(skipna=True), zc.max(skipna=True)
+        if pd.isna(zmin) or pd.isna(zmax) or zmax == zmin:
+            s01 = _minmax_01(counts)
+        else:
+            s01 = (zc - zmin) / (zmax - zmin)
+
+    return _squash_away_from_extremes(s01)  # ~[0.1, 0.9]
+
+
+# ----------------------------
+# Core: build social series
+# ----------------------------
+def _reddit_series(reddit_df: pd.DataFrame) -> pd.Series:
+    """
+    Build a normalized reddit_score from hourly post counts, then lag by +1 hour (anti-leak).
+    """
+    if reddit_df.empty:
+        return pd.Series(dtype="float64")
+
+    counts = _hourly_counts(reddit_df, "created_utc")
     if counts.empty:
         return pd.Series(dtype="float64")
 
-    c = counts.astype("float64")
-    lo, hi = c.min(), c.max()
-    if hi == lo:
-        score = pd.Series(0.5, index=c.index)
-    else:
-        score = (c - lo) / (hi - lo) * 0.8 + 0.1  # keep away from 0/1 extremes
+    score = _normalized_from_counts(counts)
+    score.name = "reddit_score"
 
-    score.name = f"{kind}_score"
-    return score
+    # Anti-leak: shift forward by +1 hour so hour T uses info from T-1 and earlier.
+    return score.shift(1)
+
+
+def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
+    """
+    Same approach for Twitter if logs are present; otherwise returns empty.
+    """
+    if tw_df.empty:
+        return pd.Series(dtype="float64")
+
+    counts = _hourly_counts(tw_df, "created_utc")
+    if counts.empty:
+        return pd.Series(dtype="float64")
+
+    score = _normalized_from_counts(counts)
+    score.name = "twitter_score"
+
+    # Anti-leak lag
+    return score.shift(1)
+
 
 def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
     """
-    Returns a single DataFrame indexed hourly with columns:
+    Returns a DataFrame indexed hourly with columns:
       ['reddit_score','twitter_score','social_score']
-    If disabled or no data → empty df (caller defaults to neutral 0.5).
-    Gated by MW_SOCIAL_ENABLED (default off).
+
+    - Gated by MW_SOCIAL_ENABLED (default off).
+    - If disabled or no data, returns empty (caller should default to neutral 0.5).
+    - Applies a conservative +1h lag to avoid information leakage.
     """
-    if str(os.getenv("MW_SOCIAL_ENABLED", "0")).lower() not in {"1","true","yes"}:
+    if str(os.getenv("MW_SOCIAL_ENABLED", "0")).lower() not in {"1", "true", "yes"}:
         return pd.DataFrame()
 
     logs_dir = repo_root / "logs"
     reddit_df = _load_jsonl(logs_dir / "social_reddit.jsonl")
-    tw_df     = _load_jsonl(logs_dir / "social_twitter.jsonl")
+    tw_df = _load_jsonl(logs_dir / "social_twitter.jsonl")
 
-    rs = _series_from_logs(reddit_df, "reddit")
-    ts = _series_from_logs(tw_df, "twitter")
+    rs = _reddit_series(reddit_df)
+    ts = _twitter_series(tw_df)
 
     df = pd.concat([rs, ts], axis=1).sort_index()
-    if "reddit_score" not in df: df["reddit_score"] = 0.5
-    if "twitter_score" not in df: df["twitter_score"] = 0.5
-    df["social_score"] = df[["reddit_score","twitter_score"]].mean(axis=1).fillna(0.5)
+    if "reddit_score" not in df:
+        df["reddit_score"] = pd.Series(dtype="float64")
+    if "twitter_score" not in df:
+        df["twitter_score"] = pd.Series(dtype="float64")
+
+    # Combine (simple mean) and fill missing with neutral 0.5
+    df["social_score"] = df[["reddit_score", "twitter_score"]].mean(axis=1)
+    df = df.fillna(0.5)
+
+    # Ensure hourly continuity (helps feature_builder alignment)
+    if not df.empty:
+        idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="h", tz="UTC")
+        df = df.reindex(idx).fillna(0.5)
+
     return df
