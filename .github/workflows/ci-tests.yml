@@ -39,7 +39,7 @@ jobs:
           python -m pytest tests/ --maxfail=1 --disable-warnings -q
           python scripts/ml/tuner.py     # optional explicit tuner run 
 
-            - name: Run tests and ML pipeline
+      - name: Run tests and ML pipeline
         env:
           MW_WRITE_BT_LOGS: "1"          # ✅ ensures trades.jsonl and backtest logs are written
           MW_ENV: "ci"                   # optional: tag environment for CI runs
