@@ -1,4 +1,4 @@
-# scripts/ml/feature_builder.py
+# src/ml/feature_builder.py
 from __future__ import annotations
 
 import os
@@ -11,11 +11,12 @@ from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
 
-# Use the canonical social series builder (already anti-leak lagged)
+# Use the canonical social series builder from scripts (already anti-leak lagged).
+# PYTHONPATH in CI includes repo root, so this import is valid.
 try:
     from scripts.ml.social_features import compute_social_series
 except Exception:
-    compute_social_series = None  # handled below
+    compute_social_series = None  # handled gracefully below
 
 
 # ----------------------------
@@ -100,25 +101,17 @@ def _attach_social_score(df: pd.DataFrame, social_df: pd.DataFrame) -> pd.DataFr
     if hours is None or social_df is None or social_df.empty:
         return df
 
-    # Align and map per row
-    # Ensure social_df index is hourly UTC
     s = social_df.get("social_score")
     if s is None or s.empty:
         return df
 
-    # Reindex onto the union of hours to avoid KeyErrors, fill neutral 0.5
-    # Convert Series to DataFrame to avoid index alignment pitfalls later
-    s = s.astype(float)
-    # Build a frame with the exact hours we need
+    # Build the exact hours we need, reindex social, and map row-wise.
     need_idx = pd.to_datetime(pd.Series(hours), utc=True, errors="coerce")
     uniq_hours = sorted(need_idx.dropna().unique())
     if len(uniq_hours) == 0:
         return df
 
-    # Reindex social to requested hours, fill with 0.5
-    s_re = s.reindex(uniq_hours).fillna(0.5)
-
-    # Map row-wise by hour
+    s_re = s.astype(float).reindex(uniq_hours).fillna(0.5)
     mapper = dict(zip(uniq_hours, s_re.values.tolist()))
     df["social_score"] = [float(mapper.get(h, 0.5)) for h in hours]
 
@@ -169,14 +162,12 @@ def _write_feature_manifest(frames: Dict[str, pd.DataFrame], out_path: Path = Pa
     Non-destructively update the model manifest with the union of feature columns
     actually produced by the builder (for CI verification).
     """
-    # Union of columns across symbols (exclude obvious non-features if needed)
     feats: List[str] = sorted(set().union(*[set(df.columns.tolist()) for df in frames.values() if not df.empty]))
     try:
         if out_path.exists():
             j = json.loads(out_path.read_text(encoding="utf-8"))
         else:
             j = {}
-        # Preserve any existing fields; just update 'features'
         j["features"] = feats
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(j, indent=2), encoding="utf-8")
