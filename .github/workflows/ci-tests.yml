@@ -395,7 +395,7 @@ jobs:
         continue-on-error: true
         env:
           PYTHONPATH: ${{ github.workspace }}
-          MW_SOCIAL_ENABLED: "0"
+          MW_SOCIAL_ENABLED: "1"
           # keep price env consistent with your main run:
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'
