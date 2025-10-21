@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import numpy as np
 import pandas as pd
 
 
@@ -39,7 +40,8 @@ def _to_hour_floor_iso(series: pd.Series) -> pd.Series:
     Convert ISO8601 '...Z' strings to UTC hourly floor timestamps.
     """
     ts = pd.to_datetime(series.astype(str).str.replace("Z", "+00:00"), utc=True, errors="coerce")
-    return ts.dt.floor("H")
+    # Pandas deprecates "H" in favor of "h"
+    return ts.dt.floor("h")
 
 
 def _minmax_01(s: pd.Series) -> pd.Series:
@@ -61,6 +63,8 @@ def _squash_away_from_extremes(x: pd.Series, low: float = 0.1, high: float = 0.9
     """
     Take a [0,1] score and squash into [low, high] to avoid hard 0/1.
     """
+    if x is None or x.empty:
+        return pd.Series(dtype="float64")
     x = x.clip(0.0, 1.0)
     return x * (high - low) + low
 
@@ -77,6 +81,39 @@ def _hourly_counts(df: pd.DataFrame, time_col: str = "created_utc") -> pd.Series
     return vc
 
 
+def _normalized_from_counts(counts: pd.Series) -> pd.Series:
+    """
+    Prefer a rolling z-score mapped to [0,1]; fall back to min-max if needed.
+    """
+    if counts is None or counts.empty:
+        return pd.Series(dtype="float64")
+
+    # Ensure continuous hourly index
+    counts = counts.asfreq("h").fillna(0).astype("float64")
+
+    # Rolling window ~30d of hours; require at least 24 hours to start
+    roll = counts.rolling(window=24 * 30, min_periods=24)
+    mean = roll.mean()
+    std = roll.std(ddof=0)
+
+    # z = (x - mean) / std; handle div-by-zero and infs explicitly
+    z = (counts - mean) / std
+    z = z.replace([np.inf, -np.inf], np.nan)
+
+    if z.dropna().empty:
+        s01 = _minmax_01(counts)
+    else:
+        # clip to reasonable band, then scale to [0,1]
+        zc = z.clip(-3, 3)
+        zmin, zmax = zc.min(skipna=True), zc.max(skipna=True)
+        if pd.isna(zmin) or pd.isna(zmax) or zmax == zmin:
+            s01 = _minmax_01(counts)
+        else:
+            s01 = (zc - zmin) / (zmax - zmin)
+
+    return _squash_away_from_extremes(s01)  # ~[0.1, 0.9]
+
+
 # ----------------------------
 # Core: build social series
 # ----------------------------
@@ -91,28 +128,11 @@ def _reddit_series(reddit_df: pd.DataFrame) -> pd.Series:
     if counts.empty:
         return pd.Series(dtype="float64")
 
-    # Optional robustness: use 30-day rolling zscore to stabilize scaling if a long backfill is present.
-    # Fallback to min-max if rolling stats are degenerate.
-    counts = counts.asfreq("H").fillna(0)
-    roll = counts.rolling(window=24 * 30, min_periods=24)  # ~30d
-    mean = roll.mean()
-    std = roll.std(ddof=0)
-    with pd.option_context("mode.use_inf_as_na", True):
-        z = (counts - mean) / std
-    if z.dropna().empty:
-        s01 = _minmax_01(counts)
-    else:
-        # map z to [0,1] via CDF-ish clipping
-        zc = z.clip(-3, 3)  # -3..3
-        s01 = (zc - zc.min()) / (zc.max() - zc.min()).replace(0, 1)
-
-    score = _squash_away_from_extremes(s01)  # map to ~[0.1,0.9]
+    score = _normalized_from_counts(counts)
     score.name = "reddit_score"
 
     # Anti-leak: shift forward by +1 hour so hour T uses info from T-1 and earlier.
-    score = score.shift(1)
-
-    return score
+    return score.shift(1)
 
 
 def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
@@ -126,25 +146,11 @@ def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
     if counts.empty:
         return pd.Series(dtype="float64")
 
-    counts = counts.asfreq("H").fillna(0)
-    roll = counts.rolling(window=24 * 30, min_periods=24)
-    mean = roll.mean()
-    std = roll.std(ddof=0)
-    with pd.option_context("mode.use_inf_as_na", True):
-        z = (counts - mean) / std
-    if z.dropna().empty:
-        s01 = _minmax_01(counts)
-    else:
-        zc = z.clip(-3, 3)
-        s01 = (zc - zc.min()) / (zc.max() - zc.min()).replace(0, 1)
-
-    score = _squash_away_from_extremes(s01)
+    score = _normalized_from_counts(counts)
     score.name = "twitter_score"
 
     # Anti-leak lag
-    score = score.shift(1)
-
-    return score
+    return score.shift(1)
 
 
 def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
@@ -176,9 +182,9 @@ def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
     df["social_score"] = df[["reddit_score", "twitter_score"]].mean(axis=1)
     df = df.fillna(0.5)
 
-    # Ensure hourly frequency continuity (helps feature_builder alignment)
+    # Ensure hourly continuity (helps feature_builder alignment)
     if not df.empty:
-        idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="H", tz="UTC")
+        idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="h", tz="UTC")
         df = df.reindex(idx).fillna(0.5)
 
     return df
