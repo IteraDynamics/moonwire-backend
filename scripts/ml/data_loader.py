@@ -21,6 +21,25 @@ DATA_DIR = ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _trim_to_fixed_window(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
+    """
+    If MW_FIX_END_TS is set (ISO8601), pin the window to [end - lookback_days, end].
+    This runs after all other post-processing to ensure a final clean cut.
+    """
+    end_env = os.getenv("MW_FIX_END_TS", "").strip()
+    if not end_env:
+        return df
+    end = pd.to_datetime(end_env, utc=True)
+    start = end - pd.Timedelta(days=int(lookback_days))
+
+    df = df.copy()
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    out = df.loc[(df["ts"] >= start) & (df["ts"] <= end)].sort_values("ts").reset_index(drop=True)
+    if len(out) != len(df):
+        print(f"[data_loader] Trimmed {len(df) - len(out)} rows outside {start} → {end}")
+    return out
+
+
 # ---- Public API ------------------------------------------------------------
 
 def load_prices(symbols: List[str], lookback_days: int = 180) -> Dict[str, pd.DataFrame]:
@@ -44,6 +63,7 @@ def load_prices(symbols: List[str], lookback_days: int = 180) -> Dict[str, pd.Da
                 df = _fetch_from_coingecko_or_demo(s, lookback_days)
             df = _slice_lookback(df, lookback_days)
             df = _finalize_schema(df)
+            df = _trim_to_fixed_window(df, lookback_days)
             out[s] = df
         except Exception as e:
             # hard fallback to demo if anything unexpected happens
