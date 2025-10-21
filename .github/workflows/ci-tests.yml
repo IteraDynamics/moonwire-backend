@@ -170,20 +170,19 @@ jobs:
         run: python -m scripts.ml.train_predict
 
 
-    # --- A/B: keep the social-ON result from your main run ---
+            # --- A/B: keep the social-ON result from your main run ---
       - name: Preserve social-ON backtest summary
         if: ${{ success() }}
         run: |
           test -f models/backtest_summary.json || (echo "backtest_summary.json missing" && exit 1)
           cp models/backtest_summary.json models/backtest_summary_on.json
 
-    # --- CONTROL run: social OFF (price-only) with the same knobs ---
-      - name: Train/backtest (CONTROL:social OFF)
+      # --- CONTROL run: social OFF (price-only) with the same knobs ---
+      - name: "Train/backtest (CONTROL: social OFF)"
         if: ${{ success() }}
         env:
           PYTHONPATH: ${{ github.workspace }}
-          MW_SOCIAL_ENABLED: "0"     # <-- OFF for control
-          # keep these identical to your main run so it's a fair A/B:
+          MW_SOCIAL_ENABLED: "0"     # OFF for control
           MW_ML_SYMBOLS: BTC,ETH,SOL
           MW_ML_LOOKBACK_DAYS: '180'
           MW_ML_MODEL: hybrid
@@ -201,7 +200,7 @@ jobs:
           python -m scripts.ml.train_predict
           mv models/backtest_summary.json models/backtest_summary_off.json
 
-    # --- Compare results and write deltas to the job summary ---
+      # --- Compare results and write deltas to the job summary ---
       - name: Compare social ON vs OFF
         if: ${{ success() }}
         run: |
@@ -210,23 +209,25 @@ jobs:
           on  = json.load(open("models/backtest_summary_on.json"))
           off = json.load(open("models/backtest_summary_off.json"))
           A, B = on["aggregate"], off["aggregate"]
-          
+
           def line(k, fmt=".4f"):
-              ao, bo = A[k], B[k]; d = ao - bo
+              ao, bo = A[k], B[k]
+              d = ao - bo
               return f"{k}: ON={ao:{fmt}}  OFF={bo:{fmt}}  Δ={d:+{fmt}}"
+
           lines = [
-              "### A/B:Social ON vs OFF",
+              "### A/B: Social ON vs OFF",
               line("win_rate"),
               line("profit_factor"),
               line("signals_per_day"),
               line("max_drawdown"),
-              f"trades:ON={A.get('n_trades','?')}  OFF={B.get('n_trades','?')}",
+              f"trades: ON={A.get('n_trades','?')}  OFF={B.get('n_trades','?')}",
           ]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
               out.write("\n".join(lines) + "\n")
           PY
 
-  # --- Restore ON summary so downstream uploads publish the ON result ---
+      # --- Restore ON summary so downstream uploads publish the ON result ---
       - name: Restore social-ON backtest summary
         if: ${{ success() }}
         run: cp models/backtest_summary_on.json models/backtest_summary.json
