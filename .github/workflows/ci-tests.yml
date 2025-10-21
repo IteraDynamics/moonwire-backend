@@ -161,13 +161,13 @@ jobs:
             except Exception:
                 pass
 
-        with open(os.environ.get("GITHUB_STEP_SUMMARY","summary.md"), "a", encoding="utf-8") as out:
-         out.write("### Social feature verification\n")
-         out.write(f"- social_reddit.jsonl size: {f.stat().st_size} bytes\n")
-         out.write(f"- social_score rows: {len(s)}\n")
-         out.write(f"- non-neutral share: {ratio:.2%}\n")
-         out.write(f"- time span: {span[0]} → {span[1]}{features_note}\n")
-       PY
+         with open(os.environ.get("GITHUB_STEP_SUMMARY","summary.md"), "a", encoding="utf-8") as out:
+          out.write("### Social feature verification\n")
+          out.write(f"- social_reddit.jsonl size: {f.stat().st_size} bytes\n")
+          out.write(f"- social_score rows: {len(s)}\n")
+          out.write(f"- non-neutral share: {ratio:.2%}\n")
+          out.write(f"- time span: {span[0]} → {span[1]}{features_note}\n")
+        PY
 
 
       - name: Run ML training/backtest/tuning
