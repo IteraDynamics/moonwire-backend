@@ -167,7 +167,7 @@ jobs:
           out.write(f"- social_score rows: {len(s)}\n")
           out.write(f"- non-neutral share: {ratio:.2%}\n")
           out.write(f"- time span: {span[0]} → {span[1]}{features_note}\n")
-        PY
+         PY
 
 
       - name: Run ML training/backtest/tuning
