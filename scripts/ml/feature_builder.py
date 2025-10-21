@@ -35,7 +35,7 @@ def _should_use_social(symbol: str) -> bool:
         # INCLUDE list is authoritative
         return sym in _SOC_INCLUDE
     return _GLOBAL_SOC_ON
-    )
+    
 
 
 # ----------------------------
