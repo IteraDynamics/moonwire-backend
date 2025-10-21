@@ -159,9 +159,9 @@ jobs:
           MW_PROTECTED_PATTERN: '^main$'
 
           # tuner controls (these WILL be used)
-          MW_CONF_GRID: '0.48,0.50,0.52,0.55,0.58,0.60,0.62'
-          MW_DEBOUNCE_GRID_MIN: '3,5,10,15'
-          MW_HORIZON_GRID_H: '2,3'
+          MW_CONF_GRID: '0.45,0.48,0.50,0.52,0.55,0.58,0.60,0.62,0.65'
+          MW_DEBOUNCE_GRID_MIN: '0,3,5,10,15'
+          MW_HORIZON_GRID_H: '1,2,3'
           TUNER_STRICT: '0'
           MW_TUNER_DEBUG: "1"
 
@@ -189,9 +189,9 @@ jobs:
           MW_HORIZON_H: '1'
           MW_FEES_BPS: '1'
           MW_SLIPPAGE_BPS: '2'
-          MW_CONF_GRID: '0.48,0.50,0.52,0.55,0.58,0.60,0.62'
-          MW_DEBOUNCE_GRID_MIN: '3,5,10,15'
-          MW_HORIZON_GRID_H: '2,3'
+          MW_CONF_GRID: '0.45,0.48,0.50,0.52,0.55,0.58,0.60,0.62,0.65'
+          MW_DEBOUNCE_GRID_MIN: '0,3,5,10,15'
+          MW_HORIZON_GRID_H: '1,2,3'
           TUNER_STRICT: '0'
           MW_TUNER_DEBUG: "1"
           MW_CALIBRATE_PROBS: 'platt'
@@ -232,8 +232,30 @@ jobs:
         if: ${{ success() }}
         run: cp models/backtest_summary_on.json models/backtest_summary.json
 
-      
 
+      - name: Compare per-symbol (ON vs OFF)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json, os
+          on  = json.load(open("models/backtest_summary_on.json"))
+          off = json.load(open("models/backtest_summary_off.json"))
+          lines = ["### A/B per-symbol (Social ON – OFF)"]
+          for sym in sorted(set(on["per_symbol"]) | set(off["per_symbol"])):
+              Ao, Bo = on["per_symbol"].get(sym, {}), off["per_symbol"].get(sym, {})
+              def g(d,k,default=float('nan')): return d.get(k, default)
+              metrics = ["win_rate","profit_factor","signals_per_day","max_drawdown","n_trades"]
+              parts = []
+              for m in metrics:
+                  a, b = g(Ao,m), g(Bo,m)
+                  if isinstance(a,(int,float)) and isinstance(b,(int,float)):
+                      parts.append(f"{m} Δ={a-b:+.4f}")
+              lines.append(f"- {sym}: " + ", ".join(parts))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
+          PY
+
+    
       - name: Show tuner env
         run: |
           echo "CONF=$MW_CONF_GRID"
