@@ -152,7 +152,7 @@ jobs:
 
           # social OFF for price-only tuning
           MW_SOCIAL_ENABLED: '1'
-          MW_SOCIAL_INCLUDE: ''
+          MW_SOCIAL_INCLUDE: 'BTC'
 
           # guardrails
           MW_OFFLINE_DEMO: '0'
@@ -336,7 +336,7 @@ jobs:
         if: ${{ success() }}
         run: |
           cp models/backtest_summary_on.json models/backtest_summary.json
-          cp models/ml_model_manifest_on.json models/ml_model_manifest.
+          cp models/ml_model_manifest_on.json models/ml_model_manifest.json
 
       - name: Compare per-symbol (ON vs OFF)
         if: ${{ success() }}
