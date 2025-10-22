@@ -181,7 +181,7 @@ def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
     if str(os.getenv("MW_SOCIAL_ENABLED", "0")).lower() not in {"1", "true", "yes"}:
         return pd.DataFrame()
 
-    # Coerce in case caller passed a str (e.g., ".")
+    # Coerce in case caller passes a str (e.g., ".")
     repo_root = Path(repo_root)
 
     logs_dir = repo_root / "logs"
@@ -191,7 +191,21 @@ def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
     rs = _reddit_series(reddit_df).rename("reddit_score")
     ts = _twitter_series(tw_df).rename("twitter_score")
 
-    df = pd.concat([rs, ts], axis=1).sort_index()
+    df = pd.concat([rs, ts], axis=1)
+
+    # Ensure datetime, tz-aware, sorted
+    if not df.empty:
+        dt = pd.to_datetime(df.index, utc=True, errors="coerce")
+        mask = ~dt.isna()
+        df = df.loc[mask].copy()
+        df.index = pd.DatetimeIndex(dt[mask])
+        df = df.sort_index()
+
+        # Build full hourly range and reindex
+        start = df.index.min().floor("h")
+        end = df.index.max().floor("h")
+        full = pd.date_range(start=start, end=end, freq="h", tz="UTC")
+        df = df.reindex(full)
 
     # Ensure both columns exist
     if "reddit_score" not in df.columns:
@@ -199,18 +213,9 @@ def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
     if "twitter_score" not in df.columns:
         df["twitter_score"] = pd.Series(dtype="float64")
 
-    # Combine → social_score
+    # Combine → social_score and fill neutrals
     df["social_score"] = df[["reddit_score", "twitter_score"]].mean(axis=1)
-
-    # Ensure hourly continuity from min..max and fill neutral
-    if not df.empty:
-        # Ensure tz-aware index
-        if df.index.tz is None:
-            df.index = df.index.tz_localize("UTC")
-        idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="h", tz="UTC")
-        df = df.reindex(idx)
-
     df = df.fillna(0.5)
 
-    # Only keep intended columns (avoid any stray unnamed column)
+    # Only keep intended columns
     return df[["reddit_score", "twitter_score", "social_score"]]
