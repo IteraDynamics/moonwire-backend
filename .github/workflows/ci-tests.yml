@@ -172,6 +172,60 @@ jobs:
         run: python -m scripts.ml.train_predict
 
 
+      - name: Debug social series (canonical)
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python - <<'PY'
+          from scripts.ml.social_features import compute_social_series
+          import pandas as pd
+          df = compute_social_series(".")
+          if df is None or df.empty:
+              print("[SOCIAL] canonical series is EMPTY")
+          else:
+              print("[SOCIAL] cols:", list(df.columns))
+              print("[SOCIAL] index range:", df.index.min(), "→", df.index.max(), "len:", len(df))
+              s = df.get("social_score")
+              if s is None:
+                  print("[SOCIAL] missing 'social_score' column")
+              else:
+                  print("[SOCIAL] social_score describe:\n", s.describe())
+                  print("[SOCIAL] unique sample:", s.dropna().unique()[:10])
+          PY
+
+
+      - name: Debug attached social per-symbol
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          MW_SOCIAL_ENABLED: "1"
+          MW_SOCIAL_INCLUDE: "BTC"
+          MW_ML_SYMBOLS: BTC,ETH,SOL
+          MW_ML_LOOKBACK_DAYS: "180"
+        run: |
+          python - <<'PY'
+          from scripts.ml.data_loader import load_prices
+          from scripts.ml.feature_builder import build_features
+          from scripts.ml.train_predict import FEATURES
+          import os
+          syms = [s.strip() for s in os.getenv("MW_ML_SYMBOLS","BTC,ETH,SOL").split(",")]
+          prices = load_prices(syms, lookback_days=int(os.getenv("MW_ML_LOOKBACK_DAYS","180")))
+          feats = build_features(prices)
+          for k, df in feats.items():
+              has = "social_score" in df.columns
+              mean = df["social_score"].mean() if has and len(df)>0 else float('nan')
+              std  = df["social_score"].std()  if has and len(df)>0 else float('nan')
+              print(f"[FEATS] {k}: rows={len(df)} social_col={has} mean={mean:.4f} std={std:.4f}")
+              # Print first few non-0.5 rows to prove it varies
+              if has:
+                  nz = df[(df["social_score"]!=0.5)].head(3)
+                  if len(nz)>0:
+                      print(f"[FEATS] {k} sample non-neutral:\n", nz[["ts","social_score"]])
+          PY
+
+
+
             # --- A/B: keep the social-ON result from your main run ---
       - name: Preserve social-ON backtest summary
         if: ${{ success() }}
