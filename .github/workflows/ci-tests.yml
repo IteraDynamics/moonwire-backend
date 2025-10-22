@@ -171,6 +171,38 @@ jobs:
           MW_CALIBRATE_PROBS: 'platt'
         run: python -m scripts.ml.train_predict
 
+      - name: Stamp run config (ON)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import os, json, pathlib
+          OUT = pathlib.Path("models/run_config_on.json")
+          KEYS = [
+              "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE",
+              "MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
+              "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
+              "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",
+              "GITHUB_SHA","GITHUB_REF_NAME"
+          ]
+          cfg = {k: os.getenv(k, "") for k in KEYS}
+
+          # Attach manifest context if present
+          try:
+              man = json.load(open("models/ml_model_manifest.json","r"))
+              cfg["manifest_model_type"] = man.get("model_type")
+              cfg["manifest_social_enabled"] = man.get("social_enabled")
+              cfg["manifest_social_include"] = os.getenv("MW_SOCIAL_INCLUDE","")
+              feats = man.get("features", [])
+              cfg["manifest_has_social_score_feature"] = ("social_score" in feats)
+          except Exception as e:
+              cfg["manifest_error"] = str(e)
+
+          OUT.parent.mkdir(parents=True, exist_ok=True)
+          OUT.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+          print("Wrote", OUT)
+          PY
+  
+
       - name: Sanity AFTER MAIN (should be ON)
         if: ${{ success() }}
         env:
@@ -281,6 +313,39 @@ jobs:
           mv models/backtest_summary.json models/backtest_summary_off.json
 
 
+      - name: Stamp run config (OFF)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import os, json, pathlib
+          OUT = pathlib.Path("models/run_config_off.json")
+          KEYS = [
+              "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE",
+              "MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
+              "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
+              "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",
+              "GITHUB_SHA","GITHUB_REF_NAME"
+          ]
+          cfg = {k: os.getenv(k, "") for k in KEYS}
+
+          # Attach manifest context if present
+          try:
+              man = json.load(open("models/ml_model_manifest.json","r"))
+              cfg["manifest_model_type"] = man.get("model_type")
+              cfg["manifest_social_enabled"] = man.get("social_enabled")
+              cfg["manifest_social_include"] = os.getenv("MW_SOCIAL_INCLUDE","")
+              feats = man.get("features", [])
+              cfg["manifest_has_social_score_feature"] = ("social_score" in feats)
+          except Exception as e:
+              cfg["manifest_error"] = str(e)
+
+          OUT.parent.mkdir(parents=True, exist_ok=True)
+          OUT.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+          print("Wrote", OUT)
+          PY
+
+
+
       - name: Sanity AFTER CONTROL (should be OFF)
         if: ${{ success() }}
         env:
@@ -328,6 +393,40 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
               out.write("\n".join(lines) + "\n")
           PY
+
+      - name: Append A/B run-config table to summary
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json, os
+          on  = json.load(open("models/run_config_on.json"))
+          off = json.load(open("models/run_config_off.json"))
+
+          ORDER = [
+              "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE",
+              "MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
+              "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
+              "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",
+              "manifest_model_type","manifest_social_enabled","manifest_has_social_score_feature"
+          ]
+
+          lines = []
+          lines.append("### ⚙️ Run Configs (A/B)")
+          lines.append("| Param | ON | OFF |")
+          lines.append("|---|---|---|")
+          for k in ORDER:
+              v_on  = on.get(k, "")
+              v_off = off.get(k, "")
+              # stringify lists cleanly
+              if isinstance(v_on, list):  v_on  = ", ".join(map(str, v_on))
+              if isinstance(v_off, list): v_off = ", ".join(map(str, v_off))
+              lines.append(f"| {k} | {v_on} | {v_off} |")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
+          PY
+
+          
 
       # --- Restore ON summary so downstream uploads publish the ON result ---
 
