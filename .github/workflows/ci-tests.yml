@@ -172,17 +172,39 @@ jobs:
         run: python -m scripts.ml.train_predict
 
 
-      - name: Capture env/manifest (ON)
+      - name: Capture ON run config
         if: ${{ success() }}
         env:
-          # OPTIONAL: limit/order which MW_* keys to show in summary
-          MW_ENV_SUMMARY_KEYS: >
-            MW_SOCIAL_ENABLED,MW_SOCIAL_INCLUDE,
-            MW_ML_SYMBOLS,MW_ML_LOOKBACK_DAYS,MW_ML_MODEL,MW_HORIZON_H,
-            MW_CONF_GRID,MW_DEBOUNCE_GRID_MIN,MW_HORIZON_GRID_H,
-            MW_FEES_BPS,MW_SLIPPAGE_BPS,MW_CALIBRATE_PROBS,MW_FIX_END_TS
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          python scripts/ci/dump_env.py models/run_env_on.json
+          python - <<'PY'
+          import os, json, pathlib
+          p = pathlib.Path("models"); p.mkdir(parents=True, exist_ok=True)
+
+          # What we want to show in the table (extend if you like)
+          KEYS = [
+            "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE",
+            "MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
+            "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
+            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS"
+          ]
+          env_on = {k: os.getenv(k, "") for k in KEYS}
+
+          # Pull from manifest written by train_predict
+          man = {}
+          try:
+              man = json.load(open("models/ml_model_manifest.json","r"))
+          except Exception as e:
+              man = {"_manifest_error": str(e)}
+          env_on["manifest_model_type"] = man.get("model_type")
+          env_on["manifest_social_enabled"] = man.get("social_enabled")
+          feats = man.get("features", [])
+          env_on["manifest_has_social_score_feature"] = ("social_score" in feats)
+
+          json.dump(env_on, open("models/run_config_on.json","w"), indent=2)
+          print("[ON] wrote models/run_config_on.json")
+          PY
+
 
 
 
@@ -303,53 +325,76 @@ jobs:
 
 
 
-      - name: Capture env/manifest (OFF)
+      - name: Capture OFF run config
         if: ${{ success() }}
         env:
-          MW_ENV_SUMMARY_KEYS: >
-            MW_SOCIAL_ENABLED,MW_SOCIAL_INCLUDE,
-            MW_ML_SYMBOLS,MW_ML_LOOKBACK_DAYS,MW_ML_MODEL,MW_HORIZON_H,
-            MW_CONF_GRID,MW_DEBOUNCE_GRID_MIN,MW_HORIZON_GRID_H,
-            MW_FEES_BPS,MW_SLIPPAGE_BPS,MW_CALIBRATE_PROBS,MW_FIX_END_TS
+          PYTHONPATH: ${{ github.workspace }}
         run: |
-          python scripts/ci/dump_env.py models/run_env_off.json
+          python - <<'PY'
+          import os, json, pathlib
+          p = pathlib.Path("models"); p.mkdir(parents=True, exist_ok=True)
+
+          KEYS = [
+            "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE",
+            "MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
+            "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
+            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS"
+          ]
+          env_off = {k: os.getenv(k, "") for k in KEYS}
+
+          man = {}
+          try:
+              man = json.load(open("models/ml_model_manifest.json","r"))
+          except Exception as e:
+              man = {"_manifest_error": str(e)}
+          env_off["manifest_model_type"] = man.get("model_type")
+          env_off["manifest_social_enabled"] = man.get("social_enabled")
+          feats = man.get("features", [])
+          env_off["manifest_has_social_score_feature"] = ("social_score" in feats)
+
+          json.dump(env_off, open("models/run_config_off.json","w"), indent=2)
+          print("[OFF] wrote models/run_config_off.json")
+          PY
 
 
-      - name: Emit Run Configs (A/B) to summary
+
+      - name: Render Run Configs (A/B)
         if: ${{ success() }}
         run: |
           python - <<'PY'
-          import json, os
-          on  = json.load(open("models/run_env_on.json"))
-          off = json.load(open("models/run_env_off.json"))
+          import json, os, sys
 
-          # prefer ordered keys if MW_ENV_SUMMARY_KEYS was set during capture
-          keys = list(on["env"].keys() or []) or list(sorted(set(on["env"]) | set(off["env"])))
-          lines = []
-          lines.append("### ⚙️ Run Configs (A/B)")
-          lines.append("| Param | ON | OFF |")
-          lines.append("|---|---:|---:|")
+          def safe_load(path):
+            try:
+              with open(path, "r") as f:
+                return json.load(f)
+            except Exception as e:
+              print(f"[WARN] could not load {path}: {e}")
+              return None
+
+          on  = safe_load("models/run_config_on.json")
+          off = safe_load("models/run_config_off.json")
+
+          if not on or not off:
+            print("[INFO] Run-config files missing; skipping table.")
+            sys.exit(0)
+
+          keys = [
+            "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE",
+            "MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
+            "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
+            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",
+            "manifest_model_type","manifest_social_enabled","manifest_has_social_score_feature",
+          ]
+
+          lines = ["", "⚙️ Run Configs (A/B)", "Param\tON\tOFF"]
           for k in keys:
-              lines.append(f"| {k} | {on['env'].get(k,'')} | {off['env'].get(k,'')} |")
-
-          # also surface a few manifest fields that tell us what really happened
-          def mf(o, k): 
-              m = o.get("manifest", {})
-              v = m.get(k, "")
-              if isinstance(v, list): v = ",".join(v)
-              if isinstance(v, (list, dict)): v = json.dumps(v)
-              return v
-
-          lines.append("| manifest_model_type | %s | %s |" % (mf(on,"model_type"), mf(off,"model_type")))
-          lines.append("| manifest_social_enabled | %s | %s |" % (mf(on,"social_enabled"), mf(off,"social_enabled")))
-          lines.append("| manifest_social_include | %s | %s |" % (mf(on,"social_include"), mf(off,"social_include")))
-          lines.append("| manifest_has_social_score_feature | %s | %s |" % (
-              "social_score" in (on.get("manifest",{}).get("features") or []),
-              "social_score" in (off.get("manifest",{}).get("features") or []),
-          ))
+            lines.append(f"{k}\t{on.get(k,'')}\t{off.get(k,'')}")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
-              out.write("\n".join(lines) + "\n")
+            out.write("\n".join(lines) + "\n")
+          print("[OK] appended configs table to summary")
           PY
+
 
 
     
