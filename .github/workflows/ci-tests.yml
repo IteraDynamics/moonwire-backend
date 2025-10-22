@@ -265,6 +265,47 @@ jobs:
           json.dump(env_off, open("models/run_config_off.json","w"), indent=2)
           PY
 
+
+      - name: Render Run Configs (A/B)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json, os
+
+          def load(path):
+              try:
+                  return json.load(open(path,"r",encoding="utf-8"))
+              except Exception:
+                  return {}
+
+          on  = load("models/run_config_on.json")
+          off = load("models/run_config_off.json")
+
+          keys = [
+            "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE","MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
+            "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
+            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",
+            "manifest_model_type","manifest_social_enabled","manifest_social_include","manifest_has_social_score_feature"
+          ]
+
+          def esc(v):
+              s = "" if v is None else str(v)
+              return s.replace("|","\\|").replace("\n","<br>")
+
+          lines = []
+          lines.append("### ⚙️ Run Configs (A/B)")
+          lines.append("")
+          lines.append("| Param | ON | OFF |")
+          lines.append("|:--|:--|:--|")
+          for k in keys:
+              lines.append(f"| {k} | {esc(on.get(k,''))} | {esc(off.get(k,''))} |")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n\n")
+          PY
+
+          
+
       # =========================
       # C) Compare + Summarize
       # =========================
