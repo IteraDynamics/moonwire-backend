@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -35,12 +35,27 @@ def _load_jsonl(path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _to_hour_floor_iso(series: pd.Series) -> pd.Series:
+def _to_hour_floor_any(series: pd.Series) -> pd.Series:
     """
-    Convert ISO8601 '...Z' strings to UTC hourly floor timestamps.
+    Robust timestamp parser:
+      - Accepts ISO8601 ('...Z' or '+00:00') strings
+      - Accepts epoch seconds (int/float/str)
+    Returns UTC hourly floor timestamps.
     """
-    ts = pd.to_datetime(series.astype(str).str.replace("Z", "+00:00"), utc=True, errors="coerce")
-    # Pandas deprecates "H" in favor of "h"
+    # Try ISO strings
+    a = pd.to_datetime(
+        series.astype(str).str.replace("Z", "+00:00"),
+        utc=True,
+        errors="coerce",
+    )
+    # Try epoch seconds
+    b = pd.to_datetime(
+        pd.to_numeric(series, errors="coerce"),
+        unit="s",
+        utc=True,
+        errors="coerce",
+    )
+    ts = a.fillna(b)
     return ts.dt.floor("h")
 
 
@@ -71,11 +86,12 @@ def _squash_away_from_extremes(x: pd.Series, low: float = 0.1, high: float = 0.9
 
 def _hourly_counts(df: pd.DataFrame, time_col: str = "created_utc") -> pd.Series:
     """
-    Count events per hour from a DataFrame with an ISO 'created_utc' column.
+    Count events per hour from a DataFrame with a 'created_utc' timestamp column.
+    Accepts ISO strings or epoch seconds.
     """
     if df.empty or time_col not in df:
         return pd.Series(dtype="int64")
-    hours = _to_hour_floor_iso(df[time_col])
+    hours = _to_hour_floor_any(df[time_col])
     vc = hours.value_counts().sort_index()
     vc.index.name = "hour"
     return vc
@@ -154,8 +170,6 @@ def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
 
 
 def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
-    # Coerce in case caller passes a str (e.g., ".")
-    repo_root = Path(repo_root)
     """
     Returns a DataFrame indexed hourly with columns:
       ['reddit_score','twitter_score','social_score']
@@ -167,26 +181,36 @@ def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
     if str(os.getenv("MW_SOCIAL_ENABLED", "0")).lower() not in {"1", "true", "yes"}:
         return pd.DataFrame()
 
+    # Coerce in case caller passed a str (e.g., ".")
+    repo_root = Path(repo_root)
+
     logs_dir = repo_root / "logs"
     reddit_df = _load_jsonl(logs_dir / "social_reddit.jsonl")
     tw_df = _load_jsonl(logs_dir / "social_twitter.jsonl")
 
-    rs = _reddit_series(reddit_df)
-    ts = _twitter_series(tw_df)
+    rs = _reddit_series(reddit_df).rename("reddit_score")
+    ts = _twitter_series(tw_df).rename("twitter_score")
 
     df = pd.concat([rs, ts], axis=1).sort_index()
-    if "reddit_score" not in df:
+
+    # Ensure both columns exist
+    if "reddit_score" not in df.columns:
         df["reddit_score"] = pd.Series(dtype="float64")
-    if "twitter_score" not in df:
+    if "twitter_score" not in df.columns:
         df["twitter_score"] = pd.Series(dtype="float64")
 
-    # Combine (simple mean) and fill missing with neutral 0.5
+    # Combine → social_score
     df["social_score"] = df[["reddit_score", "twitter_score"]].mean(axis=1)
+
+    # Ensure hourly continuity from min..max and fill neutral
+    if not df.empty:
+        # Ensure tz-aware index
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("UTC")
+        idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="h", tz="UTC")
+        df = df.reindex(idx)
+
     df = df.fillna(0.5)
 
-    # Ensure hourly continuity (helps feature_builder alignment)
-    if not df.empty:
-        idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="h", tz="UTC")
-        df = df.reindex(idx).fillna(0.5)
-
-    return df
+    # Only keep intended columns (avoid any stray unnamed column)
+    return df[["reddit_score", "twitter_score", "social_score"]]
