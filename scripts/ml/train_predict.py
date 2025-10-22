@@ -154,7 +154,9 @@ def main():
         "horizon_h": horizon_h,
         "fold_metrics": [],
     }
-
+    manifest["social_include"] = os.getenv("MW_SOCIAL_INCLUDE")  # e.g. 'BTC' or None (means ALL)
+    manifest["fix_end_ts"] = os.getenv("MW_FIX_END_TS")          # helpful provenance
+    
     for sym in symbols:
         df = label_next_horizon(feats[sym], horizon_h=horizon_h)
         X, y, feature_cols = _feature_matrix(df)
