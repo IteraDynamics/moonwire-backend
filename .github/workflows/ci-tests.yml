@@ -175,8 +175,12 @@ jobs:
           print("manifest.features has social_score =", "social_score" in man.get("features", []))
           PY
 
+      # --- Capture run config (ON)
       - name: Capture run config (ON)
         if: ${{ success() }}
+        env:
+          MW_SOCIAL_ENABLED: "1"
+          MW_SOCIAL_INCLUDE: "BTC"
         run: |
           python - <<'PY'
           import os, json
@@ -196,6 +200,7 @@ jobs:
           env_on["manifest_has_social_score_feature"] = "social_score" in man.get("features", [])
           json.dump(env_on, open("models/run_config_on.json","w"), indent=2)
           PY
+
 
       - name: Preserve social-ON artifacts (manifest + summary)
         if: ${{ success() }}
@@ -234,8 +239,12 @@ jobs:
           print("manifest.features has social_score =", "social_score" in man.get("features", []))
           PY
 
+      # --- Capture run config (OFF)
       - name: Capture run config (OFF)
         if: ${{ success() }}
+        env:
+          MW_SOCIAL_ENABLED: "0"
+          MW_SOCIAL_INCLUDE: ""
         run: |
           python - <<'PY'
           import os, json
@@ -255,6 +264,7 @@ jobs:
           env_off["manifest_has_social_score_feature"] = "social_score" in man.get("features", [])
           json.dump(env_off, open("models/run_config_off.json","w"), indent=2)
           PY
+
 
       # =========================
       # C) Compare + Summarize
