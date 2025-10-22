@@ -152,7 +152,7 @@ jobs:
 
           # social OFF for price-only tuning
           MW_SOCIAL_ENABLED: '1'
-          MW_SOCIAL_INCLUDE: 'BTC'
+          MW_SOCIAL_INCLUDE: ''
 
           # guardrails
           MW_OFFLINE_DEMO: '0'
