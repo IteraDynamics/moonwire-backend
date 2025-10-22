@@ -172,45 +172,18 @@ jobs:
         run: python -m scripts.ml.train_predict
 
 
-      - name: Stamp run config (ON)
+      - name: Capture env/manifest (ON)
         if: ${{ success() }}
         env:
-          MW_SOCIAL_ENABLED: '1'
-          MW_SOCIAL_INCLUDE: 'BTC'              # match ON run
-          MW_ML_SYMBOLS: BTC
-          MW_ML_LOOKBACK_DAYS: '180'
-          MW_ML_MODEL: hybrid
-          MW_HORIZON_H: '1'
-          MW_FEES_BPS: '1'
-          MW_SLIPPAGE_BPS: '2'
-          MW_CONF_GRID: '0.45,0.50,0.55,0.60,0.65'
-          MW_DEBOUNCE_GRID_MIN: '2,5,10,15'
-          MW_HORIZON_GRID_H: '2,3'
-          MW_CALIBRATE_PROBS: 'platt'
-          MW_FIX_END_TS: ${{ env.MW_FIX_END_TS }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          GITHUB_SHA: ${{ github.sha }}
+          # OPTIONAL: limit/order which MW_* keys to show in summary
+          MW_ENV_SUMMARY_KEYS: >
+            MW_SOCIAL_ENABLED,MW_SOCIAL_INCLUDE,
+            MW_ML_SYMBOLS,MW_ML_LOOKBACK_DAYS,MW_ML_MODEL,MW_HORIZON_H,
+            MW_CONF_GRID,MW_DEBOUNCE_GRID_MIN,MW_HORIZON_GRID_H,
+            MW_FEES_BPS,MW_SLIPPAGE_BPS,MW_CALIBRATE_PROBS,MW_FIX_END_TS
         run: |
-          python - <<'PY'
-          import os, json, pathlib
-          OUT = pathlib.Path("models/run_config_on.json")
-          KEYS = ["MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE","MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
-            "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
-            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",
-            "GITHUB_SHA","GITHUB_REF_NAME"]
-          cfg = {k: os.getenv(k,"") for k in KEYS}
-          try:
-              man = json.load(open("models/ml_model_manifest.json"))
-              cfg["manifest_model_type"] = man.get("model_type")
-              cfg["manifest_social_enabled"] = man.get("social_enabled")
-              feats = man.get("features", [])
-              cfg["manifest_has_social_score_feature"] = ("social_score" in feats)
-          except Exception as e:
-              cfg["manifest_error"] = str(e)
-          OUT.parent.mkdir(parents=True, exist_ok=True)
-          OUT.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-          print("Wrote", OUT)
-          PY
+          python scripts/ci/dump_env.py models/run_env_on.json
+
 
 
   
@@ -330,49 +303,56 @@ jobs:
 
 
 
-      - name: Stamp run config (OFF)
+      - name: Capture env/manifest (OFF)
         if: ${{ success() }}
         env:
-          MW_SOCIAL_ENABLED: '0'            # OFF
-          MW_SOCIAL_INCLUDE: ''             # none
-          MW_ML_SYMBOLS: BTC
-          MW_ML_LOOKBACK_DAYS: '180'
-          MW_ML_MODEL: hybrid
-          MW_HORIZON_H: '1'
-          MW_FEES_BPS: '1'
-          MW_SLIPPAGE_BPS: '2'
-          MW_CONF_GRID: '0.45,0.50,0.55,0.60,0.65'
-          MW_DEBOUNCE_GRID_MIN: '2,5,10,15'
-          MW_HORIZON_GRID_H: '2,3'
-          MW_CALIBRATE_PROBS: 'platt'
-          MW_FIX_END_TS: ${{ env.MW_FIX_END_TS }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          GITHUB_SHA: ${{ github.sha }}
+          MW_ENV_SUMMARY_KEYS: >
+            MW_SOCIAL_ENABLED,MW_SOCIAL_INCLUDE,
+            MW_ML_SYMBOLS,MW_ML_LOOKBACK_DAYS,MW_ML_MODEL,MW_HORIZON_H,
+            MW_CONF_GRID,MW_DEBOUNCE_GRID_MIN,MW_HORIZON_GRID_H,
+            MW_FEES_BPS,MW_SLIPPAGE_BPS,MW_CALIBRATE_PROBS,MW_FIX_END_TS
+        run: |
+          python scripts/ci/dump_env.py models/run_env_off.json
+
+
+      - name: Emit Run Configs (A/B) to summary
+        if: ${{ success() }}
         run: |
           python - <<'PY'
-          import os, json, pathlib
-          OUT = pathlib.Path("models/run_config_off.json")
-          KEYS = ["MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE","MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
-            "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
-            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",
-            "GITHUB_SHA","GITHUB_REF_NAME"]
-          cfg = {k: os.getenv(k,"") for k in KEYS}
-          try:
-              man = json.load(open("models/ml_model_manifest.json"))
-              cfg["manifest_model_type"] = man.get("model_type")
-              cfg["manifest_social_enabled"] = man.get("social_enabled")
-              feats = man.get("features", [])
-              cfg["manifest_has_social_score_feature"] = ("social_score" in feats)
-          except Exception as e:
-              cfg["manifest_error"] = str(e)
-          OUT.parent.mkdir(parents=True, exist_ok=True)
-          OUT.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-          print("Wrote", OUT)
+          import json, os
+          on  = json.load(open("models/run_env_on.json"))
+          off = json.load(open("models/run_env_off.json"))
+
+          # prefer ordered keys if MW_ENV_SUMMARY_KEYS was set during capture
+          keys = list(on["env"].keys() or []) or list(sorted(set(on["env"]) | set(off["env"])))
+          lines = []
+          lines.append("### ⚙️ Run Configs (A/B)")
+          lines.append("| Param | ON | OFF |")
+          lines.append("|---|---:|---:|")
+          for k in keys:
+              lines.append(f"| {k} | {on['env'].get(k,'')} | {off['env'].get(k,'')} |")
+
+          # also surface a few manifest fields that tell us what really happened
+          def mf(o, k): 
+              m = o.get("manifest", {})
+              v = m.get(k, "")
+              if isinstance(v, list): v = ",".join(v)
+              if isinstance(v, (list, dict)): v = json.dumps(v)
+              return v
+
+          lines.append("| manifest_model_type | %s | %s |" % (mf(on,"model_type"), mf(off,"model_type")))
+          lines.append("| manifest_social_enabled | %s | %s |" % (mf(on,"social_enabled"), mf(off,"social_enabled")))
+          lines.append("| manifest_social_include | %s | %s |" % (mf(on,"social_include"), mf(off,"social_include")))
+          lines.append("| manifest_has_social_score_feature | %s | %s |" % (
+              "social_score" in (on.get("manifest",{}).get("features") or []),
+              "social_score" in (off.get("manifest",{}).get("features") or []),
+          ))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
           PY
 
 
-
-
+    
       - name: Sanity AFTER CONTROL (should be OFF)
         if: ${{ success() }}
         env:
