@@ -149,7 +149,7 @@ def _reddit_series(reddit_df: pd.DataFrame) -> pd.Series:
 
     # Anti-leak: shift forward by +1 hour so hour T uses info from T-1 and earlier.
     # Turning off for experiment
-    return score.shift
+    return score
 
 
 def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
