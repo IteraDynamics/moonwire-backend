@@ -170,6 +170,8 @@ def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
 
 
 def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
+    # Coerce in case caller passes a str (e.g., ".")
+    repo_root = Path(repo_root)
     """
     Returns a DataFrame indexed hourly with columns:
       ['reddit_score','twitter_score','social_score']
@@ -181,41 +183,35 @@ def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
     if str(os.getenv("MW_SOCIAL_ENABLED", "0")).lower() not in {"1", "true", "yes"}:
         return pd.DataFrame()
 
-    # Coerce in case caller passes a str (e.g., ".")
-    repo_root = Path(repo_root)
-
     logs_dir = repo_root / "logs"
     reddit_df = _load_jsonl(logs_dir / "social_reddit.jsonl")
     tw_df = _load_jsonl(logs_dir / "social_twitter.jsonl")
 
-    rs = _reddit_series(reddit_df).rename("reddit_score")
-    ts = _twitter_series(tw_df).rename("twitter_score")
+    rs = _reddit_series(reddit_df)
+    ts = _twitter_series(tw_df)
 
-    df = pd.concat([rs, ts], axis=1)
-
-    # Ensure datetime, tz-aware, sorted
-    if not df.empty:
-        dt = pd.to_datetime(df.index, utc=True, errors="coerce")
-        mask = ~dt.isna()
-        df = df.loc[mask].copy()
-        df.index = pd.DatetimeIndex(dt[mask])
-        df = df.sort_index()
-
-        # Build full hourly range and reindex
-        start = df.index.min().floor("h")
-        end = df.index.max().floor("h")
-        full = pd.date_range(start=start, end=end, freq="h", tz="UTC")
-        df = df.reindex(full)
-
-    # Ensure both columns exist
-    if "reddit_score" not in df.columns:
+    df = pd.concat([rs, ts], axis=1).sort_index()
+    if "reddit_score" not in df:
         df["reddit_score"] = pd.Series(dtype="float64")
-    if "twitter_score" not in df.columns:
+    if "twitter_score" not in df:
         df["twitter_score"] = pd.Series(dtype="float64")
 
-    # Combine → social_score and fill neutrals
-    df["social_score"] = df[["reddit_score", "twitter_score"]].mean(axis=1)
-    df = df.fillna(0.5)
+    # --- COMBINE: Reddit-only social score (fallback to neutral 0.5) ---
+    # We keep twitter_score column for visibility, but do not average it in.
+    if "reddit_score" in df and not df["reddit_score"].empty:
+        df["social_score"] = df["reddit_score"].fillna(0.5)
+    else:
+        df["social_score"] = 0.5
 
-    # Only keep intended columns
-    return df[["reddit_score", "twitter_score", "social_score"]]
+    # Ensure hourly continuity (helps feature_builder alignment)
+    if not df.empty:
+        # index might be naive or tz-aware; reindex onto UTC hourly span
+        start = df.index.min()
+        end = df.index.max()
+        if start.tz is None:
+            start = start.tz_localize("UTC")
+            end = end.tz_localize("UTC")
+        idx = pd.date_range(start=start, end=end, freq="h", tz="UTC")
+        df = df.reindex(idx).fillna(0.5)
+
+    return df
