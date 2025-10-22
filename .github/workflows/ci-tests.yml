@@ -13,8 +13,8 @@ jobs:
     # Global env that applies to all steps unless overridden
     env:
       PYTHONPATH: ${{ github.workspace }}
-      MW_SOCIAL_ENABLED: '1'            # default; control run overrides to 0
       PYTHONUNBUFFERED: "1"
+      MW_SOCIAL_ENABLED: "1"   # default ON; control step overrides to 0
 
     steps:
       - name: Checkout code
@@ -33,7 +33,6 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install -r requirements-dev.txt
 
-      # Single test run (removed duplicate)
       - name: Run tests (+ optional tuner)
         env:
           MW_WRITE_BT_LOGS: "1"
@@ -44,8 +43,6 @@ jobs:
 
       - name: Smoke emit one signal dual-write default
         if: success() && hashFiles('tools/emit_signal.py') != ''
-        env:
-          PYTHONPATH: ${{ github.workspace }}
         run: |
           python tools/emit_signal.py --symbol BTC --dir long --conf 0.72 --price 60000
           echo "Tail (canonical):"
@@ -120,8 +117,6 @@ jobs:
           if-no-files-found: warn
 
       - name: Which feature_builder is used?
-        env:
-          PYTHONPATH: ${{ github.workspace }}
         run: |
           python - <<'PY'
           import importlib
@@ -130,45 +125,37 @@ jobs:
           PY
 
       # =========================
-      # A) Centralize KNOBS here
+      # Set ML KNOBS once (single source of truth)
       # =========================
-      - name: Define ML knobs (anchor)
-        id: knobs
-        run: echo "Defined knobs via YAML anchors"
-        env: &ML_KNOBS
-          PYTHONPATH: ${{ github.workspace }}
-          # ---- core knobs (edit here only) ----
-          MW_ML_SYMBOLS: BTC
-          MW_ML_LOOKBACK_DAYS: '180'
-          MW_ML_MODEL: hybrid
-          MW_HORIZON_H: '1'
-          # trading costs
-          MW_FEES_BPS: '1'
-          MW_SLIPPAGE_BPS: '2'
-          # tuning grids
-          MW_CONF_GRID: '0.50,0.52,0.55,0.58,0.60'
-          MW_DEBOUNCE_GRID_MIN: '5,10,15'
-          MW_HORIZON_GRID_H: '2,3'
-          TUNER_STRICT: '0'
-          MW_TUNER_DEBUG: "1"
-          # prob calibration
-          MW_CALIBRATE_PROBS: 'platt'
-          # fixed end for determinism (optional; uncomment to freeze)
-          MW_FIX_END_TS: "2025-10-21T20:00:00Z"
-          # guardrails
-          MW_OFFLINE_DEMO: '0'
-          MW_FAIL_ON_DEMO: '0'
-          MW_BRANCH: ${{ github.ref_name }}
-          MW_PROTECTED_PATTERN: '^main$'
+      - name: Set ML knobs env
+        run: |
+          {
+            echo "MW_ML_SYMBOLS=BTC";
+            echo "MW_ML_LOOKBACK_DAYS=180";
+            echo "MW_ML_MODEL=hybrid";
+            echo "MW_HORIZON_H=1";
+            echo "MW_FEES_BPS=1";
+            echo "MW_SLIPPAGE_BPS=2";
+            echo "MW_CONF_GRID=0.50,0.52,0.55,0.58,0.60";
+            echo "MW_DEBOUNCE_GRID_MIN=5,10,15";
+            echo "MW_HORIZON_GRID_H=2,3";
+            echo "TUNER_STRICT=0";
+            echo "MW_TUNER_DEBUG=1";
+            echo "MW_CALIBRATE_PROBS=platt";
+            echo "MW_FIX_END_TS=2025-10-21T20:00:00Z";  # freeze timeline
+            echo "MW_OFFLINE_DEMO=0";
+            echo "MW_FAIL_ON_DEMO=0";
+            echo "MW_BRANCH=${{ github.ref_name }}";
+            echo "MW_PROTECTED_PATTERN=^main$";
+          } >> "$GITHUB_ENV"
 
       # ======================
-      # B) Train: Social = ON
+      # A) Train: Social = ON
       # ======================
       - name: Run ML training/backtest/tuning (ON)
         env:
-          <<: *ML_KNOBS
-          MW_SOCIAL_ENABLED: '1'
-          MW_SOCIAL_INCLUDE: 'BTC'     # per-coin include list; leave blank to include all
+          MW_SOCIAL_ENABLED: "1"
+          MW_SOCIAL_INCLUDE: "BTC"
         run: python -m scripts.ml.train_predict
 
       - name: Sanity social ON + manifest flags
@@ -188,28 +175,25 @@ jobs:
           print("manifest.features has social_score =", "social_score" in man.get("features", []))
           PY
 
-      # Capture ON run config for the summary table
       - name: Capture run config (ON)
         if: ${{ success() }}
         run: |
           python - <<'PY'
           import os, json
-          def grab(keys):
-              return {k: os.getenv(k, "") for k in keys}
           KEYS = [
             "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE","MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
             "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
             "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS"
           ]
-          env_on = grab(KEYS)
+          env_on = {k: os.getenv(k, "") for k in KEYS}
           try:
-              manifest = json.load(open("models/ml_model_manifest.json"))
+              man = json.load(open("models/ml_model_manifest.json"))
           except Exception:
-              manifest = {}
-          env_on["manifest_model_type"] = manifest.get("model_type")
-          env_on["manifest_social_enabled"] = manifest.get("social_enabled")
-          env_on["manifest_social_include"] = manifest.get("social_include")
-          env_on["manifest_has_social_score_feature"] = "social_score" in manifest.get("features", [])
+              man = {}
+          env_on["manifest_model_type"] = man.get("model_type")
+          env_on["manifest_social_enabled"] = man.get("social_enabled")
+          env_on["manifest_social_include"] = man.get("social_include")
+          env_on["manifest_has_social_score_feature"] = "social_score" in man.get("features", [])
           json.dump(env_on, open("models/run_config_on.json","w"), indent=2)
           PY
 
@@ -222,13 +206,12 @@ jobs:
           cp models/ml_model_manifest.json models/ml_model_manifest_on.json
 
       # =======================
-      # C) Train: Social = OFF
+      # B) Train: Social = OFF
       # =======================
       - name: Run ML training/backtest/tuning (OFF / control)
         env:
-          <<: *ML_KNOBS
-          MW_SOCIAL_ENABLED: '0'
-          MW_SOCIAL_INCLUDE: ''        # empty => include none
+          MW_SOCIAL_ENABLED: "0"
+          MW_SOCIAL_INCLUDE: ""
         run: |
           python -m scripts.ml.train_predict
           mv models/backtest_summary.json models/backtest_summary_off.json
@@ -251,33 +234,30 @@ jobs:
           print("manifest.features has social_score =", "social_score" in man.get("features", []))
           PY
 
-      # Capture OFF run config for the summary table
       - name: Capture run config (OFF)
         if: ${{ success() }}
         run: |
           python - <<'PY'
           import os, json
-          def grab(keys):
-              return {k: os.getenv(k, "") for k in keys}
           KEYS = [
             "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE","MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
             "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
             "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS"
           ]
-          env_off = grab(KEYS)
+          env_off = {k: os.getenv(k, "") for k in KEYS}
           try:
-              manifest = json.load(open("models/ml_model_manifest.json"))
+              man = json.load(open("models/ml_model_manifest.json"))
           except Exception:
-              manifest = {}
-          env_off["manifest_model_type"] = manifest.get("model_type")
-          env_off["manifest_social_enabled"] = manifest.get("social_enabled")
-          env_off["manifest_social_include"] = manifest.get("social_include")
-          env_off["manifest_has_social_score_feature"] = "social_score" in manifest.get("features", [])
+              man = {}
+          env_off["manifest_model_type"] = man.get("model_type")
+          env_off["manifest_social_enabled"] = man.get("social_enabled")
+          env_off["manifest_social_include"] = man.get("social_include")
+          env_off["manifest_has_social_score_feature"] = "social_score" in man.get("features", [])
           json.dump(env_off, open("models/run_config_off.json","w"), indent=2)
           PY
 
       # =========================
-      # D) Compare + Summarize
+      # C) Compare + Summarize
       # =========================
       - name: Restore social-ON artifacts (manifest + summary)
         if: ${{ success() }}
@@ -289,7 +269,7 @@ jobs:
         if: ${{ success() }}
         run: |
           python - <<'PY'
-          import json, os, itertools
+          import json, os
           on  = json.load(open("models/run_config_on.json"))
           off = json.load(open("models/run_config_off.json"))
           keys = [
@@ -330,7 +310,7 @@ jobs:
         if: ${{ success() }}
         run: |
           python - <<'PY'
-          import json, os, math
+          import json, os
           on  = json.load(open("models/backtest_summary_on.json"))
           off = json.load(open("models/backtest_summary_off.json"))
           lines = ["### A/B per-symbol (Social ON – OFF)"]
@@ -360,7 +340,7 @@ jobs:
         run: python -m scripts.ci.verify_social_features
 
       # =========================
-      # E) Uploads & extras
+      # Uploads & extras
       # =========================
       - name: Upload ML artifacts (JSON/PNGs/Logs)
         uses: actions/upload-artifact@v4
@@ -380,11 +360,9 @@ jobs:
             artifacts/bt_returns_hist.png
             artifacts/bt_signals_per_day.png
 
-      # --- Train trigger likelihood model(s) ---
       - name: Train trigger likelihood models (logistic)
         if: ${{ success() }}
         env:
-          PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"
         run: |
           python -m src.ml.train_trigger_model --days 14 --interval hour
@@ -411,7 +389,6 @@ jobs:
       - name: Build training data from logs (join)
         if: ${{ success() }}
         env:
-          PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"
           TRAINING_JOIN_WINDOW_MIN: "5"
         run: |
@@ -423,7 +400,6 @@ jobs:
       - name: Retrain from training data (v0.5.1)
         if: ${{ success() }}
         env:
-          PYTHONPATH: ${{ github.workspace }}
           MODEL_VERSION: "v0.5.1"
           TRAIN_LOG_PATH: "models/training_data.jsonl"
           SAVE_MODEL_DIR: "models"
@@ -460,8 +436,6 @@ jobs:
 
       - name: "Smoke: emit one signal (dual-write default)"
         if: ${{ success() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
         run: |
           python tools/emit_signal.py --symbol BTC --dir long --conf 0.72 --price 60000
           echo "Tail (canonical):"
@@ -481,7 +455,6 @@ jobs:
       - name: Build demo summary (read-only)
         if: ${{ success() }}
         env:
-          PYTHONPATH: ${{ github.workspace }}
           DEMO_MODE: "true"
           MW_DEMO: "false"
           MW_CG_API_KEY: ${{ secrets.MW_CG_API_KEY }}
@@ -538,7 +511,6 @@ jobs:
       - name: Social demo ingest (Reddit/Twitter)
         if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
         env:
-          PYTHONPATH: ${{ github.workspace }}
           MW_DEMO: "true"
           MW_REDDIT_MODE: "rss"
           MW_REDDIT_SUBS: "CryptoCurrency,Bitcoin,ethtrader,Solana"
@@ -551,22 +523,6 @@ jobs:
           python -m scripts.social.reddit_lite_ingest
           python -m scripts.social.twitter_lite_ingest
           echo "Reddit/Twitter demo ingest complete."
-
-      - name: Upload social demo artifacts
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: social-demo
-          if-no-files-found: warn
-          path: |
-            logs/social_reddit.jsonl
-            logs/social_twitter.jsonl
-            models/social_reddit_context.json
-            models/social_twitter_context.json
-            artifacts/reddit_activity_*.png
-            artifacts/reddit_bursts_*.png
-            artifacts/twitter_activity.png
-            artifacts/twitter_bursts.png
 
       # -----------------------------
       # Artifact uploads begin here
