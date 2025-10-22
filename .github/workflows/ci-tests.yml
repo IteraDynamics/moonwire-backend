@@ -227,11 +227,15 @@ jobs:
 
 
             # --- A/B: keep the social-ON result from your main run ---
-      - name: Preserve social-ON backtest summary
+
+      - name: Preserve social-ON artifacts (manifest + summary)
         if: ${{ success() }}
         run: |
           test -f models/backtest_summary.json || (echo "backtest_summary.json missing" && exit 1)
+          test -f models/ml_model_manifest.json || (echo "ml_model_manifest.json missing" && exit 1)
           cp models/backtest_summary.json models/backtest_summary_on.json
+          cp models/ml_model_manifest.json models/ml_model_manifest_on.json
+
 
       # --- CONTROL run: social OFF (price-only) with the same knobs ---
       - name: "Train/backtest (CONTROL: social OFF)"
@@ -285,10 +289,12 @@ jobs:
           PY
 
       # --- Restore ON summary so downstream uploads publish the ON result ---
-      - name: Restore social-ON backtest summary
-        if: ${{ success() }}
-        run: cp models/backtest_summary_on.json models/backtest_summary.json
 
+      - name: Restore social-ON artifacts (manifest + summary)
+        if: ${{ success() }}
+        run: |
+          cp models/backtest_summary_on.json models/backtest_summary.json
+          cp models/ml_model_manifest_on.json models/ml_model_manifest.
 
       - name: Compare per-symbol (ON vs OFF)
         if: ${{ success() }}
