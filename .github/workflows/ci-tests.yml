@@ -265,7 +265,6 @@ jobs:
           json.dump(env_off, open("models/run_config_off.json","w"), indent=2)
           PY
 
-
       # =========================
       # C) Compare + Summarize
       # =========================
@@ -274,26 +273,6 @@ jobs:
         run: |
           cp models/backtest_summary_on.json models/backtest_summary.json
           cp models/ml_model_manifest_on.json models/ml_model_manifest.json
-
-      - name: Render Run Configs (A/B)
-        if: ${{ success() }}
-        run: |
-          python - <<'PY'
-          import json, os
-          on  = json.load(open("models/run_config_on.json"))
-          off = json.load(open("models/run_config_off.json"))
-          keys = [
-            "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE","MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
-            "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
-            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",
-            "manifest_model_type","manifest_social_enabled","manifest_social_include","manifest_has_social_score_feature"
-          ]
-          lines = ["### ⚙️ Run Configs (A/B)", "Param\tON\tOFF"]
-          for k in keys:
-              lines.append(f"{k}\t{on.get(k,'')}\t{off.get(k,'')}")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
-              out.write("\n".join(lines) + "\n\n")
-          PY
 
       - name: Compare social ON vs OFF (aggregate)
         if: ${{ success() }}
