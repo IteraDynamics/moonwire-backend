@@ -171,26 +171,25 @@ jobs:
           MW_CALIBRATE_PROBS: 'platt'
         run: python -m scripts.ml.train_predict
 
-      - name: Sanity social flag + head of social series
+      - name: Sanity AFTER MAIN (should be ON)
         if: ${{ success() }}
+        env:
+          MW_SOCIAL_ENABLED: '1'
+          MW_SOCIAL_INCLUDE: 'BTC'   # or whatever you used
         run: |
-         python - <<'PY'
-         import os, pathlib, json
-         from scripts.ml.social_features import compute_social_series
-         print("MW_SOCIAL_ENABLED =", os.getenv("MW_SOCIAL_ENABLED"))
-         print("MW_SOCIAL_INCLUDE =", os.getenv("MW_SOCIAL_INCLUDE"))
-         df = compute_social_series(pathlib.Path("."))
-         print("social_enabled_runtime =", (not df.empty))
-         print(df.head(3))
-         try:
-             man = json.load(open("models/ml_model_manifest.json"))
-             print("manifest.social_enabled =", man.get("social_enabled"))
-             print("manifest.features contains social_score =", "social_score" in man.get("features", []))
-         # ignore if manifest not written yet
-         except Exception as e:
-             print("manifest read skipped:", e)
-         PY
-
+          python - <<'PY'
+          import os, json, pathlib
+          from scripts.ml.social_features import compute_social_series
+          print("MW_SOCIAL_ENABLED =", os.getenv("MW_SOCIAL_ENABLED"))
+          print("MW_SOCIAL_INCLUDE =", os.getenv("MW_SOCIAL_INCLUDE"))
+          df = compute_social_series(pathlib.Path("."))
+          print("social_enabled_runtime =", (not df.empty))
+          print(df.head(3))
+          man = json.load(open("models/ml_model_manifest.json"))
+          print("manifest.social_enabled =", man.get("social_enabled"))
+          print("manifest.social_include =", man.get("social_include"))
+          print("manifest.features has social_score =", "social_score" in man.get("features", []))
+          PY
 
       - name: Debug social series (canonical)
         if: ${{ success() }}
@@ -282,26 +281,26 @@ jobs:
           mv models/backtest_summary.json models/backtest_summary_off.json
 
 
-      - name: Sanity social flag + head of social series
+      - name: Sanity AFTER CONTROL (should be OFF)
         if: ${{ success() }}
+        env:
+          MW_SOCIAL_ENABLED: '0'
+          MW_SOCIAL_INCLUDE: ''       # ignored anyway; OFF gate
         run: |
           python - <<'PY'
-          import os, pathlib, json
+          import os, json, pathlib
           from scripts.ml.social_features import compute_social_series
           print("MW_SOCIAL_ENABLED =", os.getenv("MW_SOCIAL_ENABLED"))
           print("MW_SOCIAL_INCLUDE =", os.getenv("MW_SOCIAL_INCLUDE"))
           df = compute_social_series(pathlib.Path("."))
-          print("social_enabled_runtime =", (not df.empty))
+          print("social_enabled_runtime =", (not df.empty))  # expect False
           print(df.head(3))
-          try:
-              man = json.load(open("models/ml_model_manifest.json"))
-              print("manifest.social_enabled =", man.get("social_enabled"))
-              print("manifest.features contains social_score =", "social_score" in man.get("features", []))
-            # ignore if manifest not written yet
-          except Exception as e:
-              print("manifest read skipped:", e)
+          man = json.load(open("models/ml_model_manifest.json"))
+          print("manifest.social_enabled =", man.get("social_enabled"))  # expect False
+          print("manifest.social_include =", man.get("social_include"))
+          print("manifest.features has social_score =", "social_score" in man.get("features", []))
           PY
-        
+  
 
       # --- Compare results and write deltas to the job summary ---
       - name: Compare social ON vs OFF
@@ -337,6 +336,17 @@ jobs:
         run: |
           cp models/backtest_summary_on.json models/backtest_summary.json
           cp models/ml_model_manifest_on.json models/ml_model_manifest.json
+
+      - name: Sanity AFTER RESTORE (should be ON)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json
+          man = json.load(open("models/ml_model_manifest.json"))
+          print("AFTER RESTORE -> manifest.social_enabled =", man.get("social_enabled"))
+          print("AFTER RESTORE -> manifest.social_include =", man.get("social_include"))
+          PY
+
 
       - name: Compare per-symbol (ON vs OFF)
         if: ${{ success() }}
