@@ -161,9 +161,9 @@ jobs:
           MW_PROTECTED_PATTERN: '^main$'
 
           # tuner controls (these WILL be used)
-          MW_CONF_GRID: '0.45,0.48,0.50,0.52,0.55,0.58,0.60,0.62,0.65'
-          MW_DEBOUNCE_GRID_MIN: '0,3,5,10,15'
-          MW_HORIZON_GRID_H: '1,2,3'
+          MW_CONF_GRID: '0.45,0.50,0.55,0.60,0.65'
+          MW_DEBOUNCE_GRID_MIN: '2,5,10,15'
+          MW_HORIZON_GRID_H: '2,3'
           TUNER_STRICT: '0'
           MW_TUNER_DEBUG: "1"
 
@@ -192,9 +192,9 @@ jobs:
           MW_HORIZON_H: '1'
           MW_FEES_BPS: '1'
           MW_SLIPPAGE_BPS: '2'
-          MW_CONF_GRID: '0.45,0.48,0.50,0.52,0.55,0.58,0.60,0.62,0.65'
-          MW_DEBOUNCE_GRID_MIN: '0,3,5,10,15'
-          MW_HORIZON_GRID_H: '1,2,3'
+          MW_CONF_GRID: '0.45,0.50,0.55,0.60,0.65'
+          MW_DEBOUNCE_GRID_MIN: '2,5,10,15'
+          MW_HORIZON_GRID_H: '2,3'
           TUNER_STRICT: '0'
           MW_TUNER_DEBUG: "1"
           MW_CALIBRATE_PROBS: 'platt'
