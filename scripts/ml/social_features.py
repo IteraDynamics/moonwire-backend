@@ -155,7 +155,7 @@ def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
 
 def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
     # Coerce in case caller passes a str (e.g., ".")
-    repo_root = Path(repo_root
+    repo_root = Path(repo_root)
     """
     Returns a DataFrame indexed hourly with columns:
       ['reddit_score','twitter_score','social_score']
