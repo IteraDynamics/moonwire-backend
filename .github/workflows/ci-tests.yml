@@ -171,6 +171,26 @@ jobs:
           MW_CALIBRATE_PROBS: 'platt'
         run: python -m scripts.ml.train_predict
 
+      - name: Sanity social flag + head of social series
+        if: ${{ success() }}
+        run: |
+         python - <<'PY'
+         import os, pathlib, json
+         from scripts.ml.social_features import compute_social_series
+         print("MW_SOCIAL_ENABLED =", os.getenv("MW_SOCIAL_ENABLED"))
+         print("MW_SOCIAL_INCLUDE =", os.getenv("MW_SOCIAL_INCLUDE"))
+         df = compute_social_series(pathlib.Path("."))
+         print("social_enabled_runtime =", (not df.empty))
+         print(df.head(3))
+         try:
+             man = json.load(open("models/ml_model_manifest.json"))
+             print("manifest.social_enabled =", man.get("social_enabled"))
+             print("manifest.features contains social_score =", "social_score" in man.get("features", []))
+         # ignore if manifest not written yet
+         except Exception as e:
+             print("manifest read skipped:", e)
+         PY
+
 
       - name: Debug social series (canonical)
         if: ${{ success() }}
@@ -260,6 +280,28 @@ jobs:
         run: |
           python -m scripts.ml.train_predict
           mv models/backtest_summary.json models/backtest_summary_off.json
+
+
+      - name: Sanity social flag + head of social series
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, json
+          from scripts.ml.social_features import compute_social_series
+          print("MW_SOCIAL_ENABLED =", os.getenv("MW_SOCIAL_ENABLED"))
+          print("MW_SOCIAL_INCLUDE =", os.getenv("MW_SOCIAL_INCLUDE"))
+          df = compute_social_series(pathlib.Path("."))
+          print("social_enabled_runtime =", (not df.empty))
+          print(df.head(3))
+          try:
+              man = json.load(open("models/ml_model_manifest.json"))
+              print("manifest.social_enabled =", man.get("social_enabled"))
+              print("manifest.features contains social_score =", "social_score" in man.get("features", []))
+      # ignore if manifest not written yet
+         except Exception as e:
+             print("manifest read skipped:", e)
+         PY
+          
 
       # --- Compare results and write deltas to the job summary ---
       - name: Compare social ON vs OFF
