@@ -234,6 +234,51 @@ def generate_signals():
 
     return valid_signals
 
+def _append_shadow(rec: dict) -> None:
+    """Append one JSONL record to the shadow log."""
+    logs = Path("logs")
+    logs.mkdir(exist_ok=True)
+    p = logs / "signal_inference_shadow.jsonl"
+    with p.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def _load_governance_params(symbol: str) -> dict:
+    """Best-effort governance params loader; defaults if file/symbol missing."""
+    default = {"conf_min": 0.60, "debounce_min": 15}
+    try:
+        p = Path("models/governance_params.json")
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data.get(symbol, default)
+    except Exception:
+        pass
+    return default
+
+
+def shadow_probe(symbols=("BTC", "ETH", "SOL")) -> None:
+    """
+    CI probe: writes one 'ci_probe' shadow line per symbol.
+    This lets the workflow verify the shadow log plumbing end-to-end.
+    """
+    ts = datetime.utcnow().isoformat()
+    wrote = 0
+    for sym in symbols:
+        rec = {
+            "symbol": sym,
+            "reason": "ci_probe",
+            "ml_ok": False,          # no live ML in the probe
+            "ml_dir": None,
+            "ml_conf": None,
+            "gov": _load_governance_params(sym),
+            "ts": ts,
+        }
+        _append_shadow(rec)
+        wrote += 1
+    print(f"[shadow_probe] wrote {wrote} ci_probe record(s) to logs/signal_inference_shadow.jsonl")
+
+
 # --- tiny CLI hook for CI probes (optional) --------------------------------
 if __name__ == "__main__":
     # Allow a cheap probe run: write at least one line even if cache is empty
