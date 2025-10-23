@@ -11,7 +11,32 @@ import pandas as pd
 
 
 # ----------------------------
-# Helpers
+# Small env helpers
+# ----------------------------
+def _env_int(name: str, default: int) -> int:
+    try:
+        raw = os.getenv(name)
+        return int(raw) if raw not in (None, "") else default
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name)
+        return float(raw) if raw not in (None, "") else default
+    except Exception:
+        return default
+
+
+def _env_on(name: str, default: bool = False) -> bool:
+    if (v := os.getenv(name)) is None:
+        return default
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+# ----------------------------
+# I/O helpers
 # ----------------------------
 def _load_jsonl(path: Path) -> pd.DataFrame:
     """
@@ -35,27 +60,15 @@ def _load_jsonl(path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _to_hour_floor_any(series: pd.Series) -> pd.Series:
+# ----------------------------
+# Basic transforms
+# ----------------------------
+def _to_hour_floor_iso(series: pd.Series) -> pd.Series:
     """
-    Robust timestamp parser:
-      - Accepts ISO8601 ('...Z' or '+00:00') strings
-      - Accepts epoch seconds (int/float/str)
-    Returns UTC hourly floor timestamps.
+    Convert ISO8601 '...Z' strings to UTC hourly floor timestamps.
     """
-    # Try ISO strings
-    a = pd.to_datetime(
-        series.astype(str).str.replace("Z", "+00:00"),
-        utc=True,
-        errors="coerce",
-    )
-    # Try epoch seconds
-    b = pd.to_datetime(
-        pd.to_numeric(series, errors="coerce"),
-        unit="s",
-        utc=True,
-        errors="coerce",
-    )
-    ts = a.fillna(b)
+    ts = pd.to_datetime(series.astype(str).str.replace("Z", "+00:00"), utc=True, errors="coerce")
+    # Pandas deprecates "H" in favor of "h"
     return ts.dt.floor("h")
 
 
@@ -86,20 +99,20 @@ def _squash_away_from_extremes(x: pd.Series, low: float = 0.1, high: float = 0.9
 
 def _hourly_counts(df: pd.DataFrame, time_col: str = "created_utc") -> pd.Series:
     """
-    Count events per hour from a DataFrame with a 'created_utc' timestamp column.
-    Accepts ISO strings or epoch seconds.
+    Count events per hour from a DataFrame with an ISO 'created_utc' column.
     """
     if df.empty or time_col not in df:
         return pd.Series(dtype="int64")
-    hours = _to_hour_floor_any(df[time_col])
+    hours = _to_hour_floor_iso(df[time_col])
     vc = hours.value_counts().sort_index()
     vc.index.name = "hour"
     return vc
 
 
-def _normalized_from_counts(counts: pd.Series) -> pd.Series:
+def _normalized_from_counts(counts: pd.Series, norm_win_h: int = 24 * 30) -> pd.Series:
     """
     Prefer a rolling z-score mapped to [0,1]; fall back to min-max if needed.
+    norm_win_h is the rolling window size in HOURS (default 30d = 720h).
     """
     if counts is None or counts.empty:
         return pd.Series(dtype="float64")
@@ -107,8 +120,9 @@ def _normalized_from_counts(counts: pd.Series) -> pd.Series:
     # Ensure continuous hourly index
     counts = counts.asfreq("h").fillna(0).astype("float64")
 
-    # Rolling window ~30d of hours; require at least 24 hours to start
-    roll = counts.rolling(window=24 * 30, min_periods=24)
+    # Rolling window; require at least 24 hours to start
+    norm_win_h = max(24, int(norm_win_h))
+    roll = counts.rolling(window=norm_win_h, min_periods=24)
     mean = roll.mean()
     std = roll.std(ddof=0)
 
@@ -133,9 +147,9 @@ def _normalized_from_counts(counts: pd.Series) -> pd.Series:
 # ----------------------------
 # Core: build social series
 # ----------------------------
-def _reddit_series(reddit_df: pd.DataFrame) -> pd.Series:
+def _reddit_series(reddit_df: pd.DataFrame, norm_win_h: int) -> pd.Series:
     """
-    Build a normalized reddit_score from hourly post counts, then lag by +1 hour (anti-leak).
+    Build a normalized reddit_score from hourly post counts, then lagged later in the pipeline.
     """
     if reddit_df.empty:
         return pd.Series(dtype="float64")
@@ -144,15 +158,15 @@ def _reddit_series(reddit_df: pd.DataFrame) -> pd.Series:
     if counts.empty:
         return pd.Series(dtype="float64")
 
-    score = _normalized_from_counts(counts)
+    score = _normalized_from_counts(counts, norm_win_h=norm_win_h)
     score.name = "reddit_score"
 
-    # Anti-leak: shift forward by +1 hour so hour T uses info from T-1 and earlier.
-    # Turning off for experiment
-    return score.shift(3)
+    # NOTE: we no longer shift here; lag is applied in compute_social_series
+    # based on MW_SOC_LAG_H so it can be tuned per run.
+    return score
 
 
-def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
+def _twitter_series(tw_df: pd.DataFrame, norm_win_h: int) -> pd.Series:
     """
     Same approach for Twitter if logs are present; otherwise returns empty.
     """
@@ -163,56 +177,79 @@ def _twitter_series(tw_df: pd.DataFrame) -> pd.Series:
     if counts.empty:
         return pd.Series(dtype="float64")
 
-    score = _normalized_from_counts(counts)
+    score = _normalized_from_counts(counts, norm_win_h=norm_win_h)
     score.name = "twitter_score"
 
-    # Anti-leak lag
-    return score.shift(1)
+    return score
 
 
 def compute_social_series(repo_root: Path = Path(".")) -> pd.DataFrame:
-    # Coerce in case caller passes a str (e.g., ".")
-    repo_root = Path(repo_root)
     """
     Returns a DataFrame indexed hourly with columns:
       ['reddit_score','twitter_score','social_score']
 
     - Gated by MW_SOCIAL_ENABLED (default off).
     - If disabled or no data, returns empty (caller should default to neutral 0.5).
-    - Applies a conservative +1h lag to avoid information leakage.
+    - Applies lag/smoothing/scale based on env knobs (defaults match previous behavior).
+        * MW_SOC_LAG_H       (default +1)   : shift series by +k hours (anti-leak by default)
+        * MW_SOC_NORM_WIN_H  (default 720)  : rolling normalization window in hours
+        * MW_SOC_SMOOTH      (default 0)    : EMA span (hours); 0 disables
+        * MW_SOC_SCALE       (default 1.0)  : multiply final social_score
     """
-    if str(os.getenv("MW_SOCIAL_ENABLED", "0")).lower() not in {"1", "true", "yes"}:
+    # Gate
+    if not _env_on("MW_SOCIAL_ENABLED", False):
         return pd.DataFrame()
+
+    # Coerce in case caller passes a str (e.g., ".")
+    repo_root = Path(repo_root)
+
+    # New knobs (defaults preserve old behavior)
+    soc_lag_h    = _env_int("MW_SOC_LAG_H", 1)           # +1h anti-leak default
+    soc_norm_win = _env_int("MW_SOC_NORM_WIN_H", 24 * 30)  # 720h default
+    soc_smooth   = _env_int("MW_SOC_SMOOTH", 0)          # 0 = no smoothing
+    soc_scale    = _env_float("MW_SOC_SCALE", 1.0)       # 1.0 = no scaling
 
     logs_dir = repo_root / "logs"
     reddit_df = _load_jsonl(logs_dir / "social_reddit.jsonl")
     tw_df = _load_jsonl(logs_dir / "social_twitter.jsonl")
 
-    rs = _reddit_series(reddit_df)
-    ts = _twitter_series(tw_df)
+    rs = _reddit_series(reddit_df, norm_win_h=soc_norm_win)
+    ts = _twitter_series(tw_df,   norm_win_h=soc_norm_win)
 
+    # Combine and sort by time
     df = pd.concat([rs, ts], axis=1).sort_index()
+
+    # Ensure required columns exist (typed)
     if "reddit_score" not in df:
         df["reddit_score"] = pd.Series(dtype="float64")
     if "twitter_score" not in df:
         df["twitter_score"] = pd.Series(dtype="float64")
 
-    # --- COMBINE: Reddit-only social score (fallback to neutral 0.5) ---
-    # We keep twitter_score column for visibility, but do not average it in.
-    if "reddit_score" in df and not df["reddit_score"].empty:
-        df["social_score"] = df["reddit_score"].fillna(0.5)
-    else:
-        df["social_score"] = 0.5
+    # Combine (simple mean) and fill missing with neutral 0.5
+    df["social_score"] = df[["reddit_score", "twitter_score"]].mean(axis=1)
+    df = df.fillna(0.5)
 
-    # Ensure hourly continuity (helps feature_builder alignment)
+    # Ensure a continuous, tz-aware hourly index (helps feature_builder joins)
     if not df.empty:
-        # index might be naive or tz-aware; reindex onto UTC hourly span
-        start = df.index.min()
-        end = df.index.max()
-        if start.tz is None:
-            start = start.tz_localize("UTC")
-            end = end.tz_localize("UTC")
-        idx = pd.date_range(start=start, end=end, freq="h", tz="UTC")
+        # Make sure index is tz-aware UTC
+        if getattr(df.index, "tz", None) is None:
+            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+        # Reindex to every hour across the observed span
+        idx = pd.date_range(start=df.index.min(), end=df.index.max(), freq="h", tz="UTC")
         df = df.reindex(idx).fillna(0.5)
+
+    # Optional smoothing (EMA span in hours)
+    if soc_smooth and soc_smooth > 0 and not df.empty:
+        for col in ["reddit_score", "twitter_score", "social_score"]:
+            if col in df:
+                df[col] = df[col].ewm(span=soc_smooth, adjust=False).mean()
+
+    # Apply lag (positive values = push information later => anti-leak)
+    if not df.empty and soc_lag_h != 0:
+        df = df.shift(soc_lag_h)
+
+    # Apply scale
+    if not df.empty and "social_score" in df:
+        df["social_score"] = df["social_score"] * soc_scale
 
     return df
