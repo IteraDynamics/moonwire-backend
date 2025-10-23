@@ -60,6 +60,14 @@ jobs:
           print("shadow probe wrote at least one line for BTC")
           PY
 
+      - name: Upload inference shadow log
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-shadow
+          path: logs/signal_inference_shadow.jsonl
+          if-no-files-found: warn
+
 
       - name: Summarize inference shadow (tail)
         if: ${{ success() }}
