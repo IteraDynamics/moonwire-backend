@@ -44,6 +44,18 @@ def generate_signals():
                 "timestamp": datetime.utcnow()
             }
 
+            # --- ML Inference Bridge (shadow mode) ----------------------------
+            # Logs a model-driven "what would we have predicted?" record
+            # to logs/signal_inference_shadow.jsonl when MW_INFERENCE_BRIDGE is
+            # set to 'shadow' or 'on'. No behavior change to current flow.
+            try:
+                from src.inference.bridge_adapter import run_bridge_shadow
+                run_bridge_shadow(asset)  # safe no-op if disabled or unavailable
+            except Exception:
+                # Never allow shadow logging to impact production flow
+                pass
+            # ------------------------------------------------------------------
+
             if is_signal_valid(signal):
                 dispatch_alerts(asset, signal, cache)
                 valid_signals.append(signal)
