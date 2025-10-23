@@ -1,4 +1,4 @@
-# src/ml/feature_builder.py
+# scripts/ml/feature_builder.py
 from __future__ import annotations
 
 import os
@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import pandas as pd
 import numpy as np
@@ -62,6 +62,25 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if v is None:
         return default
     return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+def _parse_include_set(env_name: str = "MW_SOCIAL_INCLUDE") -> Optional[Set[str]]:
+    """
+    Parse a comma/semicolon separated allow-list of symbols (e.g., 'BTC,ETH').
+    Returns:
+      - None  => include ALL (no gating by list)
+      - set() => include NONE (empty list explicitly)
+      - set({'BTC','SOL'}) => include only those
+    """
+    raw = os.getenv(env_name)
+    if raw is None:
+        # not set => include ALL (subject to MW_SOCIAL_ENABLED)
+        return None
+    raw = raw.strip()
+    if raw == "":
+        # explicitly empty => include NONE
+        return set()
+    toks = [t.strip().upper() for t in re.split(r"[,\s;]+", raw) if t.strip()]
+    return set(toks)
 
 
 # ----------------------------
@@ -184,14 +203,33 @@ def build_features(df_prices: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame
     If MW_SOCIAL_ENABLED=1 and social logs exist, attach aligned hourly social_score
     from the canonical lagged social series.
 
+    Per-coin inclusion:
+      - MW_SOCIAL_INCLUDE unset  -> include social for ALL symbols (subject to MW_SOCIAL_ENABLED)
+      - MW_SOCIAL_INCLUDE=''     -> include for NONE (force neutral 0.5 everywhere)
+      - MW_SOCIAL_INCLUDE='BTC,SOL' -> include ONLY for BTC and SOL (ETH gets neutral 0.5)
+
     Returns: dict[symbol] -> DataFrame
     """
+    # Global toggle and allow-list
+    social_enabled = _env_bool("MW_SOCIAL_ENABLED", False)
+    include_set = _parse_include_set("MW_SOCIAL_INCLUDE")  # None = include all; set() = include none
+
     # Load shared social time-series once
-    social_df = _load_social_hourly(Path("."))
+    social_df_all = _load_social_hourly(Path(".")) if social_enabled else pd.DataFrame()
 
     out: Dict[str, pd.DataFrame] = {}
     for sym, df in df_prices.items():
-        out[sym] = _features_for_symbol(df, sym, social_df)
+        sym_u = str(sym).upper()
+
+        # Determine if this symbol should receive social
+        # - include_set is None => allow all
+        # - include_set is a set => allow only if sym_u in set
+        use_social = social_enabled and (include_set is None or sym_u in include_set)
+
+        # Select which social df to pass (empty => _attach_social_score yields neutral 0.5)
+        social_df_for_sym = social_df_all if use_social else pd.DataFrame()
+
+        out[sym_u] = _features_for_symbol(df, sym_u, social_df_for_sym)
 
     # Write features list for CI verification (non-blocking)
     _write_feature_manifest(out)
