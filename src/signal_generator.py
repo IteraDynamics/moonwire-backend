@@ -6,6 +6,37 @@ from src.cache_instance import cache
 from src.sentiment_blended import blend_sentiment_scores
 from src.dispatcher import dispatch_alerts
 
+# --- shadow logging helpers (CI-safe) ---------------------------------------
+from pathlib import Path
+import json
+from datetime import datetime, timezone
+
+def _shadow_write(payload: dict):
+    """Append a single JSONL line to logs/signal_inference_shadow.jsonl (always)."""
+    logs = Path("logs")
+    logs.mkdir(parents=True, exist_ok=True)
+    path = logs / "signal_inference_shadow.jsonl"
+    # make payload serializable and add a timestamp if missing
+    if "ts" not in payload:
+        payload["ts"] = datetime.now(timezone.utc).isoformat()
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, default=str) + "\n")
+
+def shadow_probe(symbols=("BTC",), note="ci_probe"):
+    """
+    Guaranteed shadow lines for CI even if no signals are generated.
+    Writes one line per symbol with a reason field so artifacts are never empty.
+    """
+    for sym in symbols:
+        _shadow_write({
+            "symbol": sym,
+            "reason": note,
+            "conf": None,
+            "dir": None,
+            "governance": None,
+        })
+
+
 def generate_signals():
     print(f"[{datetime.utcnow()}] Running signal generation...")
 
