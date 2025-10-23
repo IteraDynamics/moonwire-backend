@@ -1,39 +1,32 @@
 # scripts/perf/replay_shadow_to_paper.py
 from __future__ import annotations
-import json, time
+
 from pathlib import Path
-from scripts.perf.paper_trader import PaperTrader  # adjust import if path differs
+import json
+import sys
 
-LOG = Path("logs/signal_inference_shadow.jsonl")
-
-def iter_shadow():
-    if not LOG.exists():
-        return
-    for line in LOG.read_text(encoding="utf-8").splitlines():
-        try:
-            row = json.loads(line)
-        except Exception:
-            continue
-        if not row.get("ml_ok"):
-            continue
-        yield {
-            "ts": row.get("ts"),
-            "symbol": row.get("symbol"),
-            "dir": row.get("ml_dir"),
-            "conf": row.get("ml_conf"),
-        }
+# Robust import path: prefer local scripts, fallback to src if you move it later
+try:
+    from scripts.perf.paper_trader import PaperTrader
+except Exception:
+    try:
+        from src.perf.paper_trader import PaperTrader  # if you relocate later
+    except Exception as e:
+        print(f"[FATAL] Could not import PaperTrader: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def main():
-    pt = PaperTrader(
-        fees_bps=1, slippage_bps=2,
-        conf_min_by_symbol=None,   # or load models/governance_params.json
-    )
-    for s in iter_shadow():
-        pt.on_signal(s["symbol"], s["dir"], s["conf"], s["ts"])
-    # persist PnL/equity to artifacts
-    Path("artifacts").mkdir(exist_ok=True)
-    pt.write_reports("artifacts/paper_")
-    print("Paper trader replay complete.")
+    shadow = Path("logs/signal_inference_shadow.jsonl")
+    trades_out = Path("logs/paper_trades.jsonl")
+    summary_out = Path("models/paper_summary.json")
+
+    # For now: accept 'shadow' + 'shadow_only_live_ml_candidate' as trade-like,
+    # require at least some confidence (tune this later / read from governance if desired).
+    trader = PaperTrader(accept_reasons={"shadow", "shadow_only_live_ml_candidate", "live_ml_executed"},
+                         min_conf=0.50)
+
+    summary = trader.replay_shadow(shadow, trades_out, summary_out)
+    print("[paper] summary:", json.dumps(summary, indent=2))
 
 if __name__ == "__main__":
     main()
