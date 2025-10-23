@@ -277,16 +277,10 @@ jobs:
         if: ${{ success() }}
         run: |
           python - <<'PY'
-          import json, os
+          import json, os, html
 
-          def load(path):
-              try:
-                  return json.load(open(path,"r",encoding="utf-8"))
-              except Exception:
-                  return {}
-
-          on  = load("models/run_config_on.json")
-          off = load("models/run_config_off.json")
+          on  = json.load(open("models/run_config_on.json"))
+          off = json.load(open("models/run_config_off.json"))
 
           keys = [
             "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE","MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
@@ -295,21 +289,33 @@ jobs:
             "manifest_model_type","manifest_social_enabled","manifest_social_include","manifest_has_social_score_feature"
           ]
 
-          def esc(v):
-              s = "" if v is None else str(v)
-              return s.replace("|","\\|").replace("\n","<br>")
+          def g(d,k): 
+              v = d.get(k, "")
+              # stringify lists/tuples just in case
+              if isinstance(v, (list, tuple)): v = ",".join(map(str, v))
+              return "" if v is None else str(v)
 
-          lines = []
-          lines.append("### ⚙️ Run Configs (A/B)")
-          lines.append("")
-          lines.append("| Param | ON | OFF |")
-          lines.append("|:--|:--|:--|")
+          # 1) Pretty Markdown table
+          md = []
+          md.append("### ⚙️ Run Configs (A/B)")
+          md.append("| Param | ON | OFF |")
+          md.append("|---|---|---|")
           for k in keys:
-              lines.append(f"| {k} | {esc(on.get(k,''))} | {esc(off.get(k,''))} |")
+              md.append(f"| {k} | {g(on,k)} | {g(off,k)} |")
+
+          # 2) Copy-paste TSV block
+          tsv = []
+          tsv.append("Param\tON\tOFF")
+          for k in keys:
+              tsv.append(f"{k}\t{g(on,k)}\t{g(off,k)}")
 
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
-              out.write("\n".join(lines) + "\n\n")
+              out.write("\n".join(md) + "\n\n")
+              out.write("<details><summary>Copy-paste (TSV)</summary>\n\n")
+              out.write("```\n" + "\n".join(tsv) + "\n```\n")
+              out.write("</details>\n\n")
           PY
+
 
           
 
