@@ -50,6 +50,16 @@ jobs:
           tail -n 1 logs/signal_history.jsonl || true
           echo "Tail (legacy):"
           tail -n 1 logs/signals.jsonl || true
+      
+      - name: Write shadow inference probe (BTC)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          from src.signal_generator import shadow_probe
+          shadow_probe(["BTC"])
+          print("shadow probe wrote at least one line for BTC")
+          PY
+
 
       - name: Summarize inference shadow (tail)
         if: ${{ success() }}
