@@ -51,6 +51,27 @@ jobs:
           echo "Tail (legacy):"
           tail -n 1 logs/signals.jsonl || true
 
+      - name: Summarize inference shadow (tail)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json, os, itertools
+          p = "logs/signal_inference_shadow.jsonl"
+          if not os.path.exists(p):
+              print("no shadow log")
+          else:
+              tail = list(itertools.islice(open(p,"r",encoding="utf-8"), 1000000))[-5:]
+              print("### Inference Shadow (last 5)")
+              for ln in tail:
+                  try:
+                      j = json.loads(ln)
+                      print(f"- {j['symbol']}  p_long={j.get('p_long'):.3f}  y_pred={j.get('y_pred')}  mode={j.get('mode')}")
+                  except:
+                      print("-", ln.strip()[:120])
+          PY
+
+
+
       - name: Seed demo trades (CI only)
         if: ${{ success() }}
         run: |
