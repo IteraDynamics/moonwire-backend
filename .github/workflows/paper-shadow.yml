@@ -20,6 +20,11 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+      - name: Install plotting dependency (matplotlib)
+        run: python -m pip install --upgrade pip && python -m pip install matplotlib
+      - name: Set headless Matplotlib
+        run: echo "MPLBACKEND=Agg" >> $GITHUB_ENV
+      
       - run: python -m scripts.perf.replay_shadow_to_paper
       - uses: actions/upload-artifact@v4
         with:
