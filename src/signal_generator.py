@@ -5,7 +5,7 @@ import os
 import json
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from src.signal_filter import is_signal_valid
 from src.cache_instance import cache
@@ -84,7 +84,7 @@ def _infer_ml(asset: str) -> Dict[str, Any]:
         return {"ok": False, "dir": None, "conf": None, "reason": "ml_unavailable"}
 
     try:
-        out = _ML_INFER_FN(asset)  # expected to return {"direction": "...", "confidence": 0.xx, ...}
+        out = _ML_INFER_FN(asset)  # expected: {"direction": "...", "confidence": 0.xx, ...}
         if not isinstance(out, dict):
             return {"ok": False, "dir": None, "conf": None, "reason": "ml_bad_return_type"}
 
@@ -127,7 +127,7 @@ def generate_signals():
     print(f"[{datetime.utcnow()}] Running signal generation...")
 
     stablecoins = {"USDC", "USDT", "DAI", "TUSD", "BUSD"}
-    valid_signals = []
+    valid_signals: list[dict] = []
 
     # feature-flag: shadow only? (never dispatch anything) -> useful in CI
     shadow_only = str(os.getenv("MW_INFER_SHADOW_ONLY", "0")).lower() in {"1", "true", "yes"}
@@ -173,10 +173,15 @@ def generate_signals():
             # --- choose live path
             if live_ml and ml.get("ok"):
                 # live ML path: direction/conf from model, gate by governance conf_min
-                direction = ml["ml_dir"]
-                confidence = float(ml["ml_conf"] or 0.0)
+                direction = ml["dir"]
+                confidence = float(ml["conf"] or 0.0)
                 if confidence < float(gov["conf_min"]):
-                    _shadow_write({"symbol": asset, "reason": "live_ml_below_conf_min", "conf": confidence, "conf_min": gov["conf_min"]})
+                    _shadow_write({
+                        "symbol": asset,
+                        "reason": "live_ml_below_conf_min",
+                        "conf": confidence,
+                        "conf_min": gov["conf_min"]
+                    })
                     continue
 
                 signal = {
@@ -234,50 +239,41 @@ def generate_signals():
 
     return valid_signals
 
-def _append_shadow(rec: dict) -> None:
-    """Append one JSONL record to the shadow log."""
-    logs = Path("logs")
-    logs.mkdir(exist_ok=True)
-    p = logs / "signal_inference_shadow.jsonl"
-    with p.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
-
-
-def _load_governance_params(symbol: str) -> dict:
-    """Best-effort governance params loader; defaults if file/symbol missing."""
-    default = {"conf_min": 0.60, "debounce_min": 15}
-    try:
-        p = Path("models/governance_params.json")
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data.get(symbol, default)
-    except Exception:
-        pass
-    return default
-
-
-def shadow_probe(symbols=("BTC", "ETH", "SOL")) -> None:
+# --- CI/cron probe ----------------------------------------------------------
+def shadow_probe(symbols: Optional[Iterable[str]] = None, reason: str = "ci_probe") -> None:
     """
-    CI probe: writes one 'ci_probe' shadow line per symbol.
-    This lets the workflow verify the shadow log plumbing end-to-end.
+    CI/cron probe: writes one shadow line per symbol.
+    - `symbols` can be an iterable of strings or a single comma-separated string.
+      If None, falls back to env MW_SHADOW_SYMBOLS (default "BTC").
+    - `reason` is stored into the log (e.g., "shadow-cron").
     """
-    ts = datetime.utcnow().isoformat()
+    if symbols is None:
+        raw = os.getenv("MW_SHADOW_SYMBOLS", "BTC")
+        # allow comma-separated string or single token
+        if isinstance(raw, str):
+            symbols = [s.strip() for s in raw.split(",") if s.strip()]
+        else:
+            symbols = ["BTC"]
+
+    # If someone passed a single string directly, normalize to list
+    if isinstance(symbols, str):
+        symbols = [symbols]
+
+    ts = _utcnow_iso()
     wrote = 0
     for sym in symbols:
-        rec = {
+        gov = load_governance_params(sym)
+        _shadow_write({
             "symbol": sym,
-            "reason": "ci_probe",
-            "ml_ok": False,          # no live ML in the probe
+            "reason": reason,
+            "ml_ok": False,      # probe isn't running ML; just proving plumbing
             "ml_dir": None,
             "ml_conf": None,
-            "gov": _load_governance_params(sym),
+            "gov": gov,
             "ts": ts,
-        }
-        _append_shadow(rec)
+        })
         wrote += 1
-    print(f"[shadow_probe] wrote {wrote} ci_probe record(s) to logs/signal_inference_shadow.jsonl")
-
+    print(f"[shadow_probe] wrote {wrote} record(s) to {SHADOW_LOG}")
 
 # --- tiny CLI hook for CI probes (optional) --------------------------------
 if __name__ == "__main__":
