@@ -1,0 +1,69 @@
+name: Shadow Inference
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch: {}
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      # FEATURE FLAGS — hard off for anything live:
+      MW_INFERENCE_LIVE: "0"           # 👈 stays OFF (shadow only)
+      MW_NO_TRADE: "1"                 # hard kill switch for any trading side-effects
+      MW_SOCIAL_ENABLED: "1"
+      MW_SOCIAL_INCLUDE: "BTC,ETH,SOL" # tweak as needed
+      MW_SHADOW_SYMBOLS: "BTC,ETH,SOL" # probe set
+      # Optional: freeze end for reproducibility windows during testing
+      # MW_FIX_END_TS: "2025-10-21T20:00:00Z"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Run a quick shadow probe for each symbol (no side-effects)
+      - name: Probe symbols (shadow)
+        run: |
+          python - <<'PY'
+          import os
+          from src.signal_generator import shadow_probe
+          syms = [s.strip() for s in os.getenv("MW_SHADOW_SYMBOLS","BTC").split(",") if s.strip()]
+          for s in syms:
+              row = shadow_probe(s, reason="shadow-cron")
+              print("shadow:", row)
+          PY
+
+      # Append a tiny tail to the job summary
+      - name: Append last shadow rows to Summary
+        run: |
+          python - <<'PY'
+          import os, json
+          from pathlib import Path
+          p = Path("logs/signal_inference_shadow.jsonl")
+          lines = ["### 🕵️ Shadow Inference (tail)"]
+          if p.exists():
+              tail = p.read_text(encoding="utf-8").strip().splitlines()[-10:]
+              for t in tail:
+                  lines.append(f"- {t}")
+          else:
+              lines.append("- (no shadow log yet)")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Upload inference shadow log
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-shadow
+          path: logs/signal_inference_shadow.jsonl
+          if-no-files-found: warn
