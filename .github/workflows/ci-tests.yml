@@ -257,8 +257,7 @@ jobs:
           KEYS = [
             "MW_SOCIAL_ENABLED","MW_SOCIAL_INCLUDE","MW_ML_SYMBOLS","MW_ML_LOOKBACK_DAYS","MW_ML_MODEL",
             "MW_HORIZON_H","MW_CONF_GRID","MW_DEBOUNCE_GRID_MIN","MW_HORIZON_GRID_H",
-            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS",<<<
-            "MW_SOC_LAG_H","MW_SOC_NORM_WIN_H","MW_SOC_SMOOTH","MW_SOC_SCALE","MW_SOC_INTERACT",
+            "MW_FEES_BPS","MW_SLIPPAGE_BPS","MW_CALIBRATE_PROBS","MW_FIX_END_TS","MW_SOC_LAG_H","MW_SOC_NORM_WIN_H","MW_SOC_SMOOTH","MW_SOC_SCALE","MW_SOC_INTERACT",
             "manifest_model_type","manifest_social_enabled","manifest_social_include","manifest_has_social_score_feature"
           ]
           env_off = {k: os.getenv(k, "") for k in KEYS}
