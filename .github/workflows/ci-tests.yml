@@ -15,6 +15,7 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
       PYTHONUNBUFFERED: "1"
       MW_SOCIAL_ENABLED: "1"   # default ON; control step overrides to 0
+      MW_INFERENCE_BRIDGE: 'shadow'
 
     steps:
       - name: Checkout code
