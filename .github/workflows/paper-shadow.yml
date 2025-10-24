@@ -7,22 +7,26 @@ on:
         description: "Comma-separated symbols to probe"
         required: false
         default: "BTC,ETH,SOL"
+      lookback_h:
+        description: "Lookback hours for converting signals → shadow (optional)"
+        required: false
+        default: "72"
 
 jobs:
   paper:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
-      # Headless plotting for matplotlib
       MPLBACKEND: Agg
-      # Paper trader knobs (tweak as you like)
+      # Paper trader knobs
       MW_PERF_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
       MW_PERF_LOOKBACK_H: "72"
       MW_PERF_HORIZON_MIN: "60"
       MW_PERF_SLIPPAGE_BPS: "2"
       MW_PERF_FEES_BPS: "1"
       MW_PERF_CAPITAL: "100000"
-      MW_PERF_FORCE_DEMO: "false"   # set "true" if you want demo signals regardless
+      MW_PERF_FORCE_DEMO: "false"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,39 +39,92 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Your repo’s reqs (most deps come from here)
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
-          # Ensure matplotlib is present for plots (paper_trader)
+          # plotting for paper_trader
           python -m pip install matplotlib
 
-      # --- Make this workflow self-contained: write a fresh shadow log locally ---
-      - name: Generate local shadow rows (probe)
+      # ---------- Ensure we have an inference bundle (reuse if present) ----------
+      - name: Ensure inference bundle (reuse or build)
+        env:
+          MW_ML_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
+          MW_ML_LOOKBACK_DAYS: "180"
+          MW_ML_MODEL: "hybrid"
+          MW_HORIZON_H: "1"
+          MW_SOCIAL_ENABLED: "1"
+          MW_SOCIAL_INCLUDE: ""
+          MW_FAIL_ON_DEMO: "0"
+          MW_BRANCH: ${{ github.ref_name }}
+          MW_PROTECTED_PATTERN: "^main$"
+        run: |
+          set -e
+          echo "Checking models/current…"
+          if [ -f models/current/model.joblib ] && [ -f models/current/manifest.json ] && [ -f models/current/features.json ]; then
+            echo "✅ Found existing bundle:"
+            ls -lah models/current
+          else
+            echo "ℹ️ No bundle found — building a minimal one via train_predict…"
+            python -m scripts.ml.train_predict
+            echo "Bundle after build:"
+            ls -lah models/current || true
+          fi
+
+      # ---------- Write ML shadow rows (uses the bundle) ----------
+      - name: Generate ML shadow rows (probe with model)
         env:
           MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
         run: |
           python - <<'PY'
-          import os
-          from src.signal_generator import shadow_probe
+          import os, json
+          from pathlib import Path
+          from src.ml.infer import infer_asset_signal
+          log = Path("logs/signal_inference_shadow.jsonl")
+          log.parent.mkdir(parents=True, exist_ok=True)
           syms = [s.strip().upper() for s in os.getenv("MW_SHADOW_SYMBOLS","BTC,ETH,SOL").split(",") if s.strip()]
-          shadow_probe(tuple(syms))
-          print("shadow_probe wrote lines to logs/signal_inference_shadow.jsonl")
+          wrote = 0
+          for s in syms:
+            try:
+              out = infer_asset_signal(s)  # uses models/current/**
+              rec = {
+                "symbol": s,
+                "reason": "paper-shadow",
+                "ml_ok": True,
+                "ml_dir": out.get("direction"),
+                "ml_conf": float(out.get("confidence", 0.0) or 0.0),
+              }
+            except Exception as e:
+              rec = {
+                "symbol": s,
+                "reason": f"ml_exception:{type(e).__name__}",
+                "ml_ok": False, "ml_dir": None, "ml_conf": None,
+              }
+            with log.open("a", encoding="utf-8") as f:
+              f.write(json.dumps(rec) + "\n")
+            wrote += 1
+          print(f"[shadow] wrote {wrote} ML shadow row(s) → {log}")
+          print("Tail:")
+          try:
+            print("\n".join(Path('logs/signal_inference_shadow.jsonl').read_text(encoding='utf-8').splitlines()[-5:]))
+          except Exception:
+            pass
           PY
-          echo "Preview (tail):"
-          tail -n 5 logs/signal_inference_shadow.jsonl || true
 
-      - name: Build shadow from real signal history
+      # ---------- (Optional) convert existing signals → shadow (no-op if none) ----------
+      - name: Build shadow from real signal history (optional)
         env:
           MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
           MW_SHADOW_LOOKBACK_H: ${{ github.event.inputs.lookback_h || '72' }}
-          PYTHONPATH: ${{ github.workspace }}
         run: |
-          python -m scripts.perf.convert_signals_to_shadow
+          if [ -s logs/signal_history.jsonl ] || [ -s logs/signals.jsonl ]; then
+            echo "Converting existing signal history → shadow rows…"
+            python -m scripts.perf.convert_signals_to_shadow || true
+          else
+            echo "No signal history found; skipping convert_signals_to_shadow."
+          fi
           echo "Shadow tail:"
           tail -n 10 logs/signal_inference_shadow.jsonl || true
 
-
-      # --- Replay shadow into the paper trader ---
+      # ---------- Replay shadow → paper trading ----------
       - name: Replay shadow → paper trading
         run: |
           python -m scripts.perf.replay_shadow_to_paper
@@ -76,7 +133,7 @@ jobs:
           echo "Performance summary:"
           test -f models/performance_metrics.json && cat models/performance_metrics.json || echo "no performance_metrics.json"
 
-      # --- Surface a tiny summary in the job summary ---
+      # ---------- Summary ----------
       - name: Write summary
         run: |
           echo "### 🕵️ Paper from Shadow" >> "$GITHUB_STEP_SUMMARY"
@@ -100,7 +157,7 @@ jobs:
             echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # --- Upload artifacts so you can download/inspect locally ---
+      # ---------- Artifacts ----------
       - name: Upload paper artifacts
         uses: actions/upload-artifact@v4
         with:
