@@ -328,3 +328,107 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
         "overall": {"precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn},
         "per_origin": per_origin[:3],
     }
+
+# ==== MoonWire asset inference bridge (models/current) ======================
+# This section is additive and safe to append to the existing file.
+
+from pathlib import Path as _Path
+import json as _json
+import joblib as _joblib
+import numpy as _np
+
+def _load_current_bundle(models_dir: _Path | None = None):
+    """
+    Load the minimal inference bundle produced by scripts/ml/train_predict.py:
+      models/current/{manifest.json, features.json, model.joblib}
+    Returns (model, feature_order, manifest_dict)
+    """
+    root = _Path("models/current") if models_dir is None else _Path(models_dir)
+    man_p = root / "manifest.json"
+    feats_p = root / "features.json"
+    model_p = root / "model.joblib"
+
+    if not (man_p.exists() and (feats_p.exists() or man_p.exists()) and model_p.exists()):
+        raise FileNotFoundError(f"inference bundle incomplete in {root}")
+
+    manifest = _json.loads(man_p.read_text(encoding="utf-8"))
+    # prefer explicit features.json; fallback to feature list in manifest
+    if feats_p.exists():
+        feats = _json.loads(feats_p.read_text(encoding="utf-8"))
+    else:
+        feats = manifest.get("feature_order") or manifest.get("features") or []
+
+    if not isinstance(feats, list) or not feats:
+        raise RuntimeError("feature list missing in bundle")
+
+    model = _joblib.load(model_p)
+    return model, [str(f) for f in feats], manifest
+
+
+def _build_latest_features(symbol: str, manifest: dict) -> dict:
+    """
+    Recompute the latest feature row for `symbol` using the training pipeline’s
+    helpers so inference matches training. Uses lookback from manifest.
+    """
+    from scripts.ml.data_loader import load_prices
+    from scripts.ml.feature_builder import build_features
+
+    lookback = int(manifest.get("lookback_days", 180) or 180)
+    prices = load_prices([symbol], lookback_days=lookback)
+    feats_map = build_features(prices)
+    df = feats_map[symbol]
+    if df is None or len(df) == 0:
+        raise RuntimeError("no features built for symbol")
+    # take the last fully-formed row
+    row = df.iloc[-1].to_dict()
+    return row
+
+
+def infer_asset_signal(symbol: str, *, models_dir: _Path | None = None) -> dict:
+    """
+    Public entry used by signal_generator. Returns:
+      {
+        "symbol": "BTC",
+        "y_pred": 0|1,
+        "direction": "long"|"short",
+        "confidence": float,         # probability of long
+        "p_long": float,
+        "feature_order": [...],
+        "model_type": "...",
+    }
+    """
+    model, feat_order, manifest = _load_current_bundle(models_dir)
+    row = _build_latest_features(symbol, manifest)
+
+    # vectorize in the same order as training
+    x = _np.array([[float(row.get(k, 0.0) or 0.0) for k in feat_order]], dtype=float)
+
+    # Expect sklearn-like estimator with predict_proba
+    if hasattr(model, "predict_proba"):
+        p_long = float(model.predict_proba(x)[0, 1])
+    else:
+        # fallback: decision_function → sigmoid
+        if hasattr(model, "decision_function"):
+            z = float(model.decision_function(x)[0])
+            p_long = 1.0 / (1.0 + _np.exp(-z))
+        else:
+            raise RuntimeError("model has neither predict_proba nor decision_function")
+
+    y_pred = 1 if p_long >= 0.5 else 0
+    return {
+        "symbol": symbol,
+        "y_pred": y_pred,
+        "direction": "long" if y_pred == 1 else "short",
+        "confidence": p_long,
+        "p_long": p_long,
+        "feature_order": feat_order,
+        "model_type": manifest.get("model_type", "unknown"),
+    }
+
+# expose in module API (add if __all__ already exists, otherwise create)
+try:
+    __all__.append("infer_asset_signal")  # type: ignore
+except Exception:
+    __all__ = [*globals().get("__all__", []), "infer_asset_signal"]
+# ===========================================================================
+
