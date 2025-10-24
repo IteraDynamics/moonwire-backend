@@ -390,7 +390,6 @@ jobs:
         run: |
           python - <<'PY'
           import json, pathlib, os
-          from pprint import pprint
 
           root = pathlib.Path(".")
           cur_manifest = root / "models/current/manifest.json"
@@ -405,39 +404,39 @@ jobs:
 
           # 1) Prefer bundle in models/current/
           if cur_manifest.exists():
-            try:
-              m = json.loads(cur_manifest.read_text(encoding="utf-8"))
-              model_type = m.get("model_type") or m.get("type")
-              fo = m.get("feature_order") or m.get("features")
-              if isinstance(fo, list) and fo:
-                features = fo
-              if cur_model.exists():
-                model_path = str(cur_model)
-            except Exception:
-              pass
+              try:
+                  m = json.loads(cur_manifest.read_text(encoding="utf-8"))
+                  model_type = m.get("model_type") or m.get("type")
+                  fo = m.get("feature_order") or m.get("features")
+                  if isinstance(fo, list) and fo:
+                      features = fo
+                  if cur_model.exists():
+                      model_path = str(cur_model)
+              except Exception:
+                  pass
+
           if features is None and cur_feats.exists():
-            try:
-              fj = json.loads(cur_feats.read_text(encoding="utf-8"))
-              if isinstance(fj, list) and fj:
-                features = fj
-              elif isinstance(fj, dict) and "feature_order" in fj:
-                features = fj["feature_order"]
-            except Exception:
-              pass
+              try:
+                  fj = json.loads(cur_feats.read_text(encoding="utf-8"))
+                  if isinstance(fj, list) and fj:
+                      features = fj
+                  elif isinstance(fj, dict) and "feature_order" in fj:
+                      features = fj["feature_order"]
+              except Exception:
+                  pass
 
           # 2) Fallback to legacy manifest
-          if model_path is None and legacy_manifest.exists():
-            try:
-              m = json.loads(legacy_manifest.read_text(encoding="utf-8"))
-              model_type = model_type or m.get("model_type")
-              fo = m.get("feature_list") or m.get("features")
-              if features is None and isinstance(fo, list) and fo:
-                features = fo
-            # we don't know the exact path of a legacy model, so leave model_path None
-          except Exception:
-              pass
+          if (model_path is None or features is None) and legacy_manifest.exists():
+              try:
+                  m = json.loads(legacy_manifest.read_text(encoding="utf-8"))
+                  if model_type is None:
+                      model_type = m.get("model_type")
+                  fo = m.get("feature_list") or m.get("features")
+                  if features is None and isinstance(fo, list) and fo:
+                      features = fo
+              except Exception:
+                  pass
 
-          # Pretty print to Job Summary
           head = (features or [])[:8]
           print("### 🧪 Model & Feature Snapshot")
           print(f"model_type: {model_type or 'unknown'}")
@@ -446,18 +445,16 @@ jobs:
           print(f"model_path: {model_path or 'NOT FOUND'}")
           print(f"symbol: {symbol}")
 
-          # If we can, also preview the last row’s feature values for the first symbol
+          # Optional: preview last-row features if your earlier step saved it
           try:
-            import json, pandas as pd
-            # Try to read per-symbol features produced earlier in the run
-            feats_path = root / f"artifacts/features_preview_{symbol}.json"
-            if feats_path.exists():
-              row = json.loads(feats_path.read_text(encoding='utf-8'))
-              print("\nTop 12 feature values (last row):")
-              for k,v in list(row.items())[:12]:
-                print(f"- {k}: {v}")
+              feats_path = root / f"artifacts/features_preview_{symbol}.json"
+              if feats_path.exists():
+                  row = json.loads(feats_path.read_text(encoding="utf-8"))
+                  print("\nTop 12 feature values (last row):")
+                  for k, v in list(row.items())[:12]:
+                      print(f"- {k}: {v}")
           except Exception:
-            pass
+              pass
           PY
 
 
