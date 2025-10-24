@@ -164,6 +164,7 @@ def generate_signals():
                 "ml_ok": ml.get("ok", False),
                 "ml_dir": ml.get("dir"),
                 "ml_conf": ml.get("conf"),
+                "ml_reason": ml.get("reason"),
                 "gov": gov,
                 "heuristic_sentiment": sentiment,
                 "heuristic_price_change_24h": price_change,
