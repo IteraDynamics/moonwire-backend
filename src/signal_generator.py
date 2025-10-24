@@ -17,7 +17,7 @@ _ML_INFER_FN = None
 try:
     # If you already have a helper in src/ml/infer.py, expose a simple function:
     # def infer_asset_signal(asset: str) -> Dict[str, Any]: {"direction": "long"/"short", "confidence": 0.73, ...}
-    from src.ml.infer import infer_asset_signal as _ML_INFER_FN  # type: ignore
+    from src.ml.infer_asset import infer_asset_signal as _ML_INFER_FN  # type: ignore
 except Exception:
     _ML_INFER_FN = None
 
