@@ -329,8 +329,9 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
         "per_origin": per_origin[:3],
     }
 
+
 # ==== MoonWire asset inference bridge (models/current) ======================
-# This section is additive and safe to append to the existing file.
+# Robust loader + feature rebuild, used by signal_generator.py
 
 from pathlib import Path as _Path
 import json as _json
@@ -339,36 +340,70 @@ import numpy as _np
 
 def _load_current_bundle(models_dir: _Path | None = None):
     """
-    Load the minimal inference bundle produced by scripts/ml/train_predict.py:
-      models/current/{manifest.json, features.json, model.joblib}
-    Returns (model, feature_order, manifest_dict)
+    Load active inference bundle (model + feature list + manifest) from models/current.
+    Tolerates multiple shapes and falls back to training FEATURES if needed.
+    Returns (model, feature_order, manifest_dict).
     """
-    root = _Path("models/current") if models_dir is None else _Path(models_dir)
-    man_p = root / "manifest.json"
-    feats_p = root / "features.json"
-    model_p = root / "model.joblib"
+    base = (_Path(models_dir) if models_dir else _Path("models")) / "current"
+    mpath = base / "model.joblib"
+    fpath = base / "features.json"
+    jpath = base / "manifest.json"
 
-    if not (man_p.exists() and (feats_p.exists() or man_p.exists()) and model_p.exists()):
-        raise FileNotFoundError(f"inference bundle incomplete in {root}")
+    if not mpath.exists():
+        raise FileNotFoundError(f"missing model.joblib at {mpath}")
 
-    manifest = _json.loads(man_p.read_text(encoding="utf-8"))
-    # prefer explicit features.json; fallback to feature list in manifest
-    if feats_p.exists():
-        feats = _json.loads(feats_p.read_text(encoding="utf-8"))
-    else:
-        feats = manifest.get("feature_order") or manifest.get("features") or []
+    model = _joblib.load(mpath)
 
-    if not isinstance(feats, list) or not feats:
+    feat_order: List[str] | None = None
+    manifest: Dict[str, Any] = {}
+
+    # 1) features.json (list OR dict with feature_order/features)
+    if fpath.exists():
+        try:
+            fj = _json.loads(fpath.read_text(encoding="utf-8"))
+            if isinstance(fj, list):
+                feat_order = [str(x) for x in fj]
+            elif isinstance(fj, dict):
+                if isinstance(fj.get("feature_order"), list):
+                    feat_order = [str(x) for x in fj["feature_order"]]
+                elif isinstance(fj.get("features"), list):
+                    feat_order = [str(x) for x in fj["features"]]
+        except Exception:
+            pass
+
+    # 2) manifest.json fallbacks
+    if jpath.exists():
+        try:
+            manifest = _json.loads(jpath.read_text(encoding="utf-8"))
+            if feat_order is None:
+                if isinstance(manifest.get("feature_order"), list):
+                    feat_order = [str(x) for x in manifest["feature_order"]]
+                elif isinstance(manifest.get("features"), list):
+                    feat_order = [str(x) for x in manifest["features"]]
+                elif isinstance(manifest.get("feature_list"), list):
+                    feat_order = [str(x) for x in manifest["feature_list"]]
+        except Exception:
+            pass
+
+    # 3) Last resort: import training FEATURES from train_predict
+    if feat_order is None:
+        try:
+            from scripts.ml.train_predict import FEATURES as TRAIN_FEATURES  # type: ignore
+            if isinstance(TRAIN_FEATURES, list) and TRAIN_FEATURES:
+                feat_order = [str(x) for x in TRAIN_FEATURES]
+        except Exception:
+            pass
+
+    if not feat_order:
         raise RuntimeError("feature list missing in bundle")
 
-    model = _joblib.load(model_p)
-    return model, [str(f) for f in feats], manifest
+    return model, feat_order, manifest
 
 
 def _build_latest_features(symbol: str, manifest: dict) -> dict:
     """
-    Recompute the latest feature row for `symbol` using the training pipeline’s
-    helpers so inference matches training. Uses lookback from manifest.
+    Recompute the latest feature row for `symbol` using the training pipeline,
+    so inference matches training transform exactly.
     """
     from scripts.ml.data_loader import load_prices
     from scripts.ml.feature_builder import build_features
@@ -379,9 +414,7 @@ def _build_latest_features(symbol: str, manifest: dict) -> dict:
     df = feats_map[symbol]
     if df is None or len(df) == 0:
         raise RuntimeError("no features built for symbol")
-    # take the last fully-formed row
-    row = df.iloc[-1].to_dict()
-    return row
+    return df.iloc[-1].to_dict()  # last complete row
 
 
 def infer_asset_signal(symbol: str, *, models_dir: _Path | None = None) -> dict:
@@ -391,28 +424,24 @@ def infer_asset_signal(symbol: str, *, models_dir: _Path | None = None) -> dict:
         "symbol": "BTC",
         "y_pred": 0|1,
         "direction": "long"|"short",
-        "confidence": float,         # probability of long
+        "confidence": float,   # probability of long
         "p_long": float,
         "feature_order": [...],
         "model_type": "...",
-    }
+      }
     """
     model, feat_order, manifest = _load_current_bundle(models_dir)
     row = _build_latest_features(symbol, manifest)
 
-    # vectorize in the same order as training
     x = _np.array([[float(row.get(k, 0.0) or 0.0) for k in feat_order]], dtype=float)
 
-    # Expect sklearn-like estimator with predict_proba
     if hasattr(model, "predict_proba"):
         p_long = float(model.predict_proba(x)[0, 1])
+    elif hasattr(model, "decision_function"):
+        z = float(model.decision_function(x)[0])
+        p_long = 1.0 / (1.0 + _np.exp(-z))
     else:
-        # fallback: decision_function → sigmoid
-        if hasattr(model, "decision_function"):
-            z = float(model.decision_function(x)[0])
-            p_long = 1.0 / (1.0 + _np.exp(-z))
-        else:
-            raise RuntimeError("model has neither predict_proba nor decision_function")
+        raise RuntimeError("model has neither predict_proba nor decision_function")
 
     y_pred = 1 if p_long >= 0.5 else 0
     return {
@@ -425,10 +454,9 @@ def infer_asset_signal(symbol: str, *, models_dir: _Path | None = None) -> dict:
         "model_type": manifest.get("model_type", "unknown"),
     }
 
-# expose in module API (add if __all__ already exists, otherwise create)
+# expose in module API
 try:
     __all__.append("infer_asset_signal")  # type: ignore
 except Exception:
     __all__ = [*globals().get("__all__", []), "infer_asset_signal"]
 # ===========================================================================
-
