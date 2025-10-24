@@ -1,5 +1,10 @@
 name: Governance Apply
 
+permissions:
+  contents: read
+  actions: read
+
+
 on:
   schedule:
     - cron: "20 3 * * *"   # daily 03:20 UTC
