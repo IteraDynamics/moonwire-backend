@@ -1,9 +1,9 @@
 # scripts/ml/train_predict.py
 from __future__ import annotations
-import os, json, pathlib, re
+import os, json, pathlib, re, shutil
 import numpy as np
 import pandas as pd
-from typing import Dict, List
+from typing import Dict, List, Optional
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -14,7 +14,6 @@ from .feature_builder import build_features
 from .labeler import label_next_horizon
 from .splitter import walk_forward_splits
 from .model_runner import train_model, predict_proba
-from .tuner import tune_thresholds
 
 ROOT = pathlib.Path(".").resolve()
 
@@ -154,9 +153,13 @@ def main():
         "horizon_h": horizon_h,
         "fold_metrics": [],
     }
-    manifest["social_include"] = os.getenv("MW_SOCIAL_INCLUDE")  # e.g. 'BTC' or None (means ALL)
+    manifest["social_include"] = os.getenv("MW_SOCIAL_INCLUDE")  # e.g., 'BTC' or None (means ALL)
     manifest["fix_end_ts"] = os.getenv("MW_FIX_END_TS")          # helpful provenance
-    
+
+    # Choose a primary symbol for the online bundle (first symbol by default)
+    primary_symbol: Optional[str] = symbols[0] if symbols else None
+    export_model = None
+
     for sym in symbols:
         df = label_next_horizon(feats[sym], horizon_h=horizon_h)
         X, y, feature_cols = _feature_matrix(df)
@@ -181,14 +184,65 @@ def main():
 
         pred_dfs[sym] = pd.DataFrame({"ts": df["ts"], "p_long": preds})
 
+        # Train a full-data estimator for the primary symbol (for online inference bundle)
+        if primary_symbol and sym == primary_symbol:
+            try:
+                export_model = train_model(X, y, model_type=model_type)
+                print(f"[bundle] trained full-data model for primary symbol: {sym} (rows={len(y)})")
+            except Exception as e:
+                print(f"[bundle] WARN: failed to train export model for {sym}: {e}")
+
     # --- tune thresholds (unchanged) ---
-    best = tune_thresholds(pred_dfs, prices)
-    save_json("models/backtest_summary.json", {"aggregate": best["agg"], "per_symbol": best["per_symbol"]})
+    best = {}
+    try:
+        from .tuner import tune_thresholds
+        best = tune_thresholds(pred_dfs, prices)
+    except Exception as e:
+        print(f"[tuner] WARN: tune_thresholds failed: {e}")
+        # write a minimal shape so downstream steps don't explode
+        best = {"agg": {}, "per_symbol": {}}
+
+    save_json("models/backtest_summary.json", {"aggregate": best.get("agg", {}), "per_symbol": best.get("per_symbol", {})})
     save_json("models/ml_model_manifest.json", manifest)
 
     # --- placeholder plots ---
     _plots_roc_pr_placeholder()
     _plot_equity_placeholder()
+
+    # ----------------------------------------------------------------------
+    # Export a lightweight inference bundle for online/shadow inference
+    # ----------------------------------------------------------------------
+    try:
+        BUNDLE = ROOT / "models" / "current"
+        BUNDLE.mkdir(parents=True, exist_ok=True)
+
+        # 1) copy the manifest so online inference can inspect it
+        src_manifest = ROOT / "models" / "ml_model_manifest.json"
+        dst_manifest = BUNDLE / "manifest.json"
+        if src_manifest.exists():
+            shutil.copy(src_manifest, dst_manifest)
+
+        # 2) persist the trained estimator for the primary symbol
+        model_path = None
+        if export_model is not None:
+            try:
+                import joblib
+                joblib.dump(export_model, BUNDLE / "model.joblib")
+                model_path = str((BUNDLE / "model.joblib").resolve())
+            except Exception as e:
+                print(f"[bundle] WARN: failed to dump model.joblib: {e}")
+
+        # 3) write feature order for vectorization
+        with (BUNDLE / "features.json").open("w", encoding="utf-8") as f:
+            json.dump({"feature_order": FEATURES, "primary_symbol": primary_symbol}, f, indent=2)
+
+        print("[bundle] wrote models/current with:", {
+            "manifest": str(dst_manifest.resolve()) if dst_manifest.exists() else None,
+            "model": model_path,
+            "features": str((BUNDLE / "features.json").resolve())
+        })
+    except Exception as e:
+        print(f"[bundle] WARN: failed to export inference bundle: {e}")
 
 
 if __name__ == "__main__":
