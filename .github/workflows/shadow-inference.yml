@@ -60,6 +60,20 @@ jobs:
           echo "models/current contents:"
           ls -lah models/current || true
 
+      - name: Sanity: load bundle & score BTC
+        run: |
+          python - <<'PY'
+          import json, joblib, pathlib
+          p = pathlib.Path("models/current")
+          print("bundle files:", [x.name for x in p.iterdir()] if p.exists() else "missing")
+          man = json.loads((p/"manifest.json").read_text())
+          print("manifest.model_type:", man.get("model_type"))
+          from src.ml.infer import infer_asset_signal
+          res = infer_asset_signal("BTC", models_dir=p)
+          print("infer_asset_signal:", res)
+          PY
+
+
       # ---------- run the shadow probe ----------
       - name: Run shadow probe
         run: |
