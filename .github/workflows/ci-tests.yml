@@ -220,88 +220,6 @@ jobs:
                   print("manifest:", man.read_text()[:300], "...")
           PY
 
-      - name: Inspect model + feature snapshot
-        if: ${{ success() }}
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: |
-          python - <<'PY'
-          import os, json
-          from pathlib import Path
-
-          # reuse your training pipeline bits
-          from scripts.ml.data_loader import load_prices
-          from scripts.ml.feature_builder import build_features
-
-          man_path = Path("models/ml_model_manifest.json")
-          lines = ["### 🧪 Model & Feature Snapshot"]
-
-          if not man_path.exists():
-              lines.append("manifest: MISSING")
-          else:
-              man = json.loads(man_path.read_text(encoding="utf-8"))
-              feats = man.get("features") or man.get("feature_list") or []
-              lines += [
-                  f"model_type: {man.get('model_type')}",
-                  f"feature_count: {len(feats)}",
-                  "features_head: " + (", ".join(map(str, feats[:8])) + ("…" if len(feats) > 8 else "")),
-              ]
-
-              # resolve model path from common keys
-              mpath = None
-              for k in ("model_path", "model_file", "model_joblib"):
-                  v = man.get(k)
-                  if v:
-                      p = Path(v)
-                      if not p.is_absolute():
-                          p = Path("models") / v
-                      if p.exists():
-                          mpath = p
-                          break
-              lines.append(f"model_path: {mpath if mpath else 'NOT FOUND'}")
-
-              # Pick a symbol to snapshot (prefers MW_SHADOW_SYMBOLS, falls back to MW_ML_SYMBOLS)
-              syms_env = os.getenv("MW_SHADOW_SYMBOLS") or os.getenv("MW_ML_SYMBOLS", "BTC,ETH,SOL")
-              syms = [s.strip().upper() for s in syms_env.split(",") if s.strip()]
-              sym = syms[0] if syms else "BTC"
-
-              try:
-                  prices = load_prices([sym], lookback_days=int(os.getenv("MW_ML_LOOKBACK_DAYS","180")))
-                  feats_map = build_features(prices)
-                  df = feats_map.get(sym)
-
-                  if df is not None and len(df) > 0:
-                      # ensure all model features exist and order them
-                      for c in feats:
-                          if c not in df.columns:
-                              df[c] = 0.0
-                      if "ts" in df.columns:
-                          df = df.sort_values("ts")
-                      row = df[feats].tail(1).T  # last aligned row, transposed (feature -> value)
-
-                      lines.append(f"symbol: {sym}")
-                      lines.append("")
-                      lines.append("Top 12 feature values (last row):")
-                      try:
-                          import numpy as np
-                          vals = row.iloc[:,0].astype(float)
-                          top = vals.reindex(vals.abs().sort_values(ascending=False).index)[:12]
-                      except Exception:
-                          top = row.iloc[:,0][:12]
-                      for k, v in top.items():
-                          try:
-                              lines.append(f"- {k}: {float(v):.4f}")
-                          except Exception:
-                              lines.append(f"- {k}: {v}")
-                  else:
-                      lines.append(f"symbol: {sym} -> no rows from feature_builder")
-              except Exception as e:
-                  lines.append(f"feature_snapshot_error: {type(e).__name__}: {e}")
-
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
-              out.write("\n".join(lines) + "\n")
-          PY
-
       - name: Sanity social ON + manifest flags
         if: ${{ success() }}
         run: |
@@ -466,6 +384,82 @@ jobs:
         run: |
           cp models/backtest_summary_on.json models/backtest_summary.json
           cp models/ml_model_manifest_on.json models/ml_model_manifest.json
+
+      - name: Model & Feature Snapshot (robust)
+        if: ${{ success() }}
+        run: |
+          python - <<'PY'
+          import json, pathlib, os
+          from pprint import pprint
+
+          root = pathlib.Path(".")
+          cur_manifest = root / "models/current/manifest.json"
+          cur_model    = root / "models/current/model.joblib"
+          cur_feats    = root / "models/current/features.json"
+          legacy_manifest = root / "models/ml_model_manifest.json"
+
+          model_path = None
+          features = None
+          model_type = None
+          symbol = (os.getenv("MW_ML_SYMBOLS") or "BTC").split(",")[0].strip()
+
+          # 1) Prefer bundle in models/current/
+          if cur_manifest.exists():
+            try:
+              m = json.loads(cur_manifest.read_text(encoding="utf-8"))
+              model_type = m.get("model_type") or m.get("type")
+              fo = m.get("feature_order") or m.get("features")
+              if isinstance(fo, list) and fo:
+                features = fo
+              if cur_model.exists():
+                model_path = str(cur_model)
+            except Exception:
+              pass
+          if features is None and cur_feats.exists():
+            try:
+              fj = json.loads(cur_feats.read_text(encoding="utf-8"))
+              if isinstance(fj, list) and fj:
+                features = fj
+              elif isinstance(fj, dict) and "feature_order" in fj:
+                features = fj["feature_order"]
+            except Exception:
+              pass
+
+          # 2) Fallback to legacy manifest
+          if model_path is None and legacy_manifest.exists():
+            try:
+              m = json.loads(legacy_manifest.read_text(encoding="utf-8"))
+              model_type = model_type or m.get("model_type")
+              fo = m.get("feature_list") or m.get("features")
+              if features is None and isinstance(fo, list) and fo:
+                features = fo
+            # we don't know the exact path of a legacy model, so leave model_path None
+          except Exception:
+              pass
+
+          # Pretty print to Job Summary
+          head = (features or [])[:8]
+          print("### 🧪 Model & Feature Snapshot")
+          print(f"model_type: {model_type or 'unknown'}")
+          print(f"feature_count: {len(features or [])}")
+          print(f"features_head: {', '.join(head) if head else '(none)'}")
+          print(f"model_path: {model_path or 'NOT FOUND'}")
+          print(f"symbol: {symbol}")
+
+          # If we can, also preview the last row’s feature values for the first symbol
+          try:
+            import json, pandas as pd
+            # Try to read per-symbol features produced earlier in the run
+            feats_path = root / f"artifacts/features_preview_{symbol}.json"
+            if feats_path.exists():
+              row = json.loads(feats_path.read_text(encoding='utf-8'))
+              print("\nTop 12 feature values (last row):")
+              for k,v in list(row.items())[:12]:
+                print(f"- {k}: {v}")
+          except Exception:
+            pass
+          PY
+
 
       - name: Compare social ON vs OFF (aggregate)
         if: ${{ success() }}
