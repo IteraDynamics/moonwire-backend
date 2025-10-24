@@ -129,6 +129,14 @@ jobs:
           echo "Shadow tail:"
           tail -n 10 logs/signal_inference_shadow.jsonl || true
 
+      - name: Download latest shadow log
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: shadow-log
+          path: logs
+          if_no_artifact_found: warn
+
+
       # ---------- Replay shadow → paper trading ----------
       - name: Replay shadow → paper trading
         run: |
