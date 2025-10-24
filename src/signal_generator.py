@@ -5,7 +5,7 @@ import os
 import json
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, List
 
 from src.signal_filter import is_signal_valid
 from src.cache_instance import cache
@@ -15,9 +15,8 @@ from src.dispatcher import dispatch_alerts
 # --- optional ML inference (soft dependency) -------------------------------
 _ML_INFER_FN = None
 try:
-    # If you already have a helper in src/ml/infer.py, expose a simple function:
-    # def infer_asset_signal(asset: str) -> Dict[str, Any]: {"direction": "long"/"short", "confidence": 0.73, ...}
-    from src.ml.infer_asset import infer_asset_signal as _ML_INFER_FN  # type: ignore
+    # Expects: def infer_asset_signal(symbol: str, *, models_dir: Path | None = None) -> Dict[str, Any]
+    from src.ml.infer import infer_asset_signal as _ML_INFER_FN  # type: ignore
 except Exception:
     _ML_INFER_FN = None
 
@@ -84,9 +83,8 @@ def _infer_ml(asset: str) -> Dict[str, Any]:
         return {"ok": False, "dir": None, "conf": None, "reason": "ml_unavailable"}
 
     try:
-        out = _ML_INFER_FN(asset, models_dir=Path("models/current"))  # expected: {"direction": "...", "confidence": 0.xx, ...}
-        if _ML_INFER_FN is None:
-            return {"ok": False, "dir": None, "conf": None, "reason": "ml_unavailable_no_infer_fn"}
+        # Let the infer module use its default bundle location (models/current)
+        out = _ML_INFER_FN(asset)  # expected: {"direction": "...", "confidence": 0.xx, ...}
         if not isinstance(out, dict):
             return {"ok": False, "dir": None, "conf": None, "reason": "ml_bad_return_type"}
         if out.get("error"):
@@ -131,7 +129,7 @@ def generate_signals():
     print(f"[{datetime.utcnow()}] Running signal generation...")
 
     stablecoins = {"USDC", "USDT", "DAI", "TUSD", "BUSD"}
-    valid_signals: list[dict] = []
+    valid_signals: List[dict] = []
 
     # feature-flag: shadow only? (never dispatch anything) -> useful in CI
     shadow_only = str(os.getenv("MW_INFER_SHADOW_ONLY", "0")).lower() in {"1", "true", "yes"}
@@ -244,12 +242,15 @@ def generate_signals():
 
     return valid_signals
 
-# --- CI/cron probe ----------------------------------------------------------
-def shadow_probe(symbols=("BTC", "ETH", "SOL"), reason: str = "ci_probe") -> None:
+# --- CI/cron probe (REAL inference) ----------------------------------------
+def shadow_probe(symbols: Iterable[str] | str = ("BTC", "ETH", "SOL"), reason: str = "shadow-cron") -> None:
     """
-    CI/ops probe: append one shadow line per symbol so we can
-    verify the shadow log + governance loader end-to-end.
+    Probe that **actually runs ML inference** per symbol and appends one JSONL record.
+    Keeps your workflow call signature compatible: shadow_probe([...], reason="...").
     """
+    # Normalize symbols to a list
+    if isinstance(symbols, str):
+        symbols = [symbols]
     try:
         ts = datetime.now(timezone.utc).isoformat()
     except Exception:
@@ -257,19 +258,19 @@ def shadow_probe(symbols=("BTC", "ETH", "SOL"), reason: str = "ci_probe") -> Non
 
     wrote = 0
     for sym in symbols:
-        try:
-            gov = load_governance_params(sym)
-        except Exception:
-            gov = {"conf_min": 0.60, "debounce_min": 15}
-        _shadow_write({
+        gov = load_governance_params(sym)
+        # Run ML; if disabled/unavailable, _infer_ml reports the reason
+        ml = _infer_ml(sym)
+        rec = {
             "symbol": sym,
-            "reason": reason,
-            "ml_ok": False,
-            "ml_dir": None,
-            "ml_conf": None,
+            "reason": reason if ml.get("ok") else ml.get("reason", reason),
+            "ml_ok": bool(ml.get("ok")),
+            "ml_dir": ml.get("dir"),
+            "ml_conf": ml.get("conf"),
             "gov": gov,
             "ts": ts,
-        })
+        }
+        _shadow_write(rec)
         wrote += 1
     print(f"[shadow_probe] wrote {wrote} record(s) to {SHADOW_LOG}")
 
