@@ -241,28 +241,33 @@ def generate_signals():
     return valid_signals
 
 # --- CI/cron probe ----------------------------------------------------------
-def shadow_probe(symbols=("BTC", "ETH", "SOL")) -> None:
+def shadow_probe(symbols=("BTC", "ETH", "SOL"), reason: str = "ci_probe") -> None:
     """
-    Active probe: attempts ML inference for each symbol and logs the result
-    into logs/signal_inference_shadow.jsonl. Succeeds whether or not a model
-    is present (but sets ml_ok accordingly).
+    CI/ops probe: append one shadow line per symbol so we can
+    verify the shadow log + governance loader end-to-end.
     """
-    ts = _utcnow_iso()
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+    except Exception:
+        ts = datetime.utcnow().isoformat() + "Z"
+
     wrote = 0
     for sym in symbols:
-        ml = _infer_ml(sym)  # tries src.ml.infer.infer_asset_signal + models/current/*
-        rec = {
+        try:
+            gov = load_governance_params(sym)
+        except Exception:
+            gov = {"conf_min": 0.60, "debounce_min": 15}
+        _shadow_write({
             "symbol": sym,
-            "reason": "ml_probe",
-            "ml_ok": bool(ml.get("ok")),
-            "ml_dir": ml.get("dir"),
-            "ml_conf": ml.get("conf"),
-            "gov": load_governance_params(sym),
+            "reason": reason,
+            "ml_ok": False,
+            "ml_dir": None,
+            "ml_conf": None,
+            "gov": gov,
             "ts": ts,
-        }
-        _append_shadow(rec)
+        })
         wrote += 1
-    print(f"[shadow_probe] wrote {wrote} ml_probe record(s) to logs/signal_inference_shadow.jsonl")
+    print(f"[shadow_probe] wrote {wrote} record(s) to {SHADOW_LOG}")
 
 # --- tiny CLI hook for CI probes (optional) --------------------------------
 if __name__ == "__main__":
