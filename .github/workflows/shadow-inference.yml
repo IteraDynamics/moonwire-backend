@@ -31,6 +31,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Download inference bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: inference-bundle-current
+          path: models/current
+
+      - name: List bundle files (debug)
+        run: |
+          echo "models/current contents:"
+          ls -lah models/current || true
+          echo "manifest:"
+          test -f models/current/manifest.json && cat models/current/manifest.json || echo "no manifest"
+
+
       # Run a quick shadow probe for each symbol (no side-effects)
       - name: Probe symbols (shadow)
         run: |
