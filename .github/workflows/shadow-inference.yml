@@ -105,3 +105,10 @@ jobs:
           name: inference-shadow
           path: logs/signal_inference_shadow.jsonl
           if-no-files-found: warn
+
+      - name: Upload shadow log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadow-log
+          path: logs/signal_inference_shadow.jsonl
+          if-no-files-found: warn
