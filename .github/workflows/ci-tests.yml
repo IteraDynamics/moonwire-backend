@@ -203,6 +203,88 @@ jobs:
           MW_SOCIAL_INCLUDE: "BTC"
         run: python -m scripts.ml.train_predict
 
+      - name: Inspect model + feature snapshot
+        if: ${{ success() }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python - <<'PY'
+          import os, json
+          from pathlib import Path
+
+          # reuse your training pipeline bits
+          from scripts.ml.data_loader import load_prices
+          from scripts.ml.feature_builder import build_features
+
+          man_path = Path("models/ml_model_manifest.json")
+          lines = ["### 🧪 Model & Feature Snapshot"]
+
+          if not man_path.exists():
+              lines.append("manifest: MISSING")
+          else:
+              man = json.loads(man_path.read_text(encoding="utf-8"))
+              feats = man.get("features") or man.get("feature_list") or []
+              lines += [
+                  f"model_type: {man.get('model_type')}",
+                  f"feature_count: {len(feats)}",
+                  "features_head: " + (", ".join(map(str, feats[:8])) + ("…" if len(feats) > 8 else "")),
+              ]
+
+              # resolve model path from common keys
+              mpath = None
+              for k in ("model_path", "model_file", "model_joblib"):
+                  v = man.get(k)
+                  if v:
+                      p = Path(v)
+                      if not p.is_absolute():
+                          p = Path("models") / v
+                      if p.exists():
+                          mpath = p
+                          break
+              lines.append(f"model_path: {mpath if mpath else 'NOT FOUND'}")
+
+              # Pick a symbol to snapshot (prefers MW_SHADOW_SYMBOLS, falls back to MW_ML_SYMBOLS)
+              syms_env = os.getenv("MW_SHADOW_SYMBOLS") or os.getenv("MW_ML_SYMBOLS", "BTC,ETH,SOL")
+              syms = [s.strip().upper() for s in syms_env.split(",") if s.strip()]
+              sym = syms[0] if syms else "BTC"
+
+              try:
+                  prices = load_prices([sym], lookback_days=int(os.getenv("MW_ML_LOOKBACK_DAYS","180")))
+                  feats_map = build_features(prices)
+                  df = feats_map.get(sym)
+
+                  if df is not None and len(df) > 0:
+                      # ensure all model features exist and order them
+                      for c in feats:
+                          if c not in df.columns:
+                              df[c] = 0.0
+                      if "ts" in df.columns:
+                          df = df.sort_values("ts")
+                      row = df[feats].tail(1).T  # last aligned row, transposed (feature -> value)
+
+                      lines.append(f"symbol: {sym}")
+                      lines.append("")
+                      lines.append("Top 12 feature values (last row):")
+                      try:
+                          import numpy as np
+                          vals = row.iloc[:,0].astype(float)
+                          top = vals.reindex(vals.abs().sort_values(ascending=False).index)[:12]
+                      except Exception:
+                          top = row.iloc[:,0][:12]
+                      for k, v in top.items():
+                          try:
+                              lines.append(f"- {k}: {float(v):.4f}")
+                          except Exception:
+                              lines.append(f"- {k}: {v}")
+                  else:
+                      lines.append(f"symbol: {sym} -> no rows from feature_builder")
+              except Exception as e:
+                  lines.append(f"feature_snapshot_error: {type(e).__name__}: {e}")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(lines) + "\n")
+          PY
+
       - name: Sanity social ON + manifest flags
         if: ${{ success() }}
         run: |
