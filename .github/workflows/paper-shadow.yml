@@ -1,33 +1,102 @@
-# .github/workflows/paper-shadow.yml
 name: Paper from Shadow
 
 on:
-  schedule:
-    - cron: "0 * * * *"   # hourly
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated symbols to probe"
+        required: false
+        default: "BTC,ETH,SOL"
 
 jobs:
   paper:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
-
+      # Headless plotting for matplotlib
+      MPLBACKEND: Agg
+      # Paper trader knobs (tweak as you like)
+      MW_PERF_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
+      MW_PERF_LOOKBACK_H: "72"
+      MW_PERF_HORIZON_MIN: "60"
+      MW_PERF_SLIPPAGE_BPS: "2"
+      MW_PERF_FEES_BPS: "1"
+      MW_PERF_CAPITAL: "100000"
+      MW_PERF_FORCE_DEMO: "false"   # set "true" if you want demo signals regardless
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: |
+
+      - name: Install dependencies
+        run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-      - name: Install plotting dependency (matplotlib)
-        run: python -m pip install --upgrade pip && python -m pip install matplotlib
-      - name: Set headless Matplotlib
-        run: echo "MPLBACKEND=Agg" >> $GITHUB_ENV
-      
-      - run: python -m scripts.perf.replay_shadow_to_paper
-      - uses: actions/upload-artifact@v4
+          # Your repo’s reqs (most deps come from here)
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+          # Ensure matplotlib is present for plots (paper_trader)
+          python -m pip install matplotlib
+
+      # --- Make this workflow self-contained: write a fresh shadow log locally ---
+      - name: Generate local shadow rows (probe)
+        env:
+          MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
+        run: |
+          python - <<'PY'
+          import os
+          from src.signal_generator import shadow_probe
+          syms = [s.strip().upper() for s in os.getenv("MW_SHADOW_SYMBOLS","BTC,ETH,SOL").split(",") if s.strip()]
+          shadow_probe(tuple(syms))
+          print("shadow_probe wrote lines to logs/signal_inference_shadow.jsonl")
+          PY
+          echo "Preview (tail):"
+          tail -n 5 logs/signal_inference_shadow.jsonl || true
+
+      # --- Replay shadow into the paper trader ---
+      - name: Replay shadow → paper trading
+        run: |
+          python -m scripts.perf.replay_shadow_to_paper
+          echo "Trades (tail):"
+          tail -n 5 logs/paper_trades.jsonl || true
+          echo "Performance summary:"
+          test -f models/performance_metrics.json && cat models/performance_metrics.json || echo "no performance_metrics.json"
+
+      # --- Surface a tiny summary in the job summary ---
+      - name: Write summary
+        run: |
+          echo "### 🕵️ Paper from Shadow" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Symbols:** \`${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Shadow tail:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+          tail -n 5 logs/signal_inference_shadow.jsonl >> "$GITHUB_STEP_SUMMARY" || true
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Paper trades tail:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+          tail -n 5 logs/paper_trades.jsonl >> "$GITHUB_STEP_SUMMARY" || true
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f models/performance_metrics.json ]; then
+            echo "**Performance metrics:**" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+            cat models/performance_metrics.json >> "$GITHUB_STEP_SUMMARY"
+            echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # --- Upload artifacts so you can download/inspect locally ---
+      - name: Upload paper artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: paper-from-shadow
-          path: artifacts/paper_*
+          name: paper-artifacts
           if-no-files-found: warn
+          path: |
+            logs/signal_inference_shadow.jsonl
+            logs/paper_trades.jsonl
+            models/performance_metrics.json
+            artifacts/perf_*.png
