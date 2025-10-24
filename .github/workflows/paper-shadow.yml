@@ -56,6 +56,17 @@ jobs:
           echo "Preview (tail):"
           tail -n 5 logs/signal_inference_shadow.jsonl || true
 
+      - name: Build shadow from real signal history
+        env:
+          MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
+          MW_SHADOW_LOOKBACK_H: ${{ github.event.inputs.lookback_h || '72' }}
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          python -m scripts.perf.convert_signals_to_shadow
+          echo "Shadow tail:"
+          tail -n 10 logs/signal_inference_shadow.jsonl || true
+
+
       # --- Replay shadow into the paper trader ---
       - name: Replay shadow → paper trading
         run: |
