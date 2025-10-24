@@ -1,49 +1,29 @@
+# .github/workflows/shadow-inference.yml
 name: Shadow Inference
 
 on:
-  # ✅ makes the "Run workflow" button appear
   workflow_dispatch:
     inputs:
-      branch:
-        description: "Repo branch to checkout (default: this workflow's ref)"
-        required: false
-        default: ""
       ci_run_id:
-        description: "CI run id to pull inference-bundle-current from (optional)"
+        description: "CI run id that produced 'inference-bundle-current'"
         required: false
-        default: ""
       symbols:
-        description: "Comma-separated symbols for the probe"
+        description: "Comma-separated symbols to probe"
         required: false
         default: "BTC,ETH,SOL"
-
-  # Optional hourly auto-run (safe to keep or remove)
-  schedule:
-    - cron: "17 * * * *"
-
-permissions:
-  contents: read
-  actions: read
 
 jobs:
   shadow:
     runs-on: ubuntu-latest
-
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: ${{ github.workspace }}
-      MW_INFER_LIVE: "0"            # shadow only
-      MW_INFER_SHADOW_ONLY: "1"
-      MW_SOCIAL_ENABLED: "1"
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # allow running against a chosen branch from the UI
-          ref: ${{ inputs.branch != '' && inputs.branch || github.ref }}
 
-      - name: Set up Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -52,39 +32,54 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt || true
-          python -m pip install -r requirements-dev.txt || true
 
-      # ---------- OPTIONAL: pull trained bundle from a CI run ----------
-      - name: Try download inference bundle (if run-id provided)
+      # ---------- pull inference bundle from ANOTHER run ----------
+      - name: Download inference bundle from CI run
         if: ${{ inputs.ci_run_id != '' }}
-        uses: actions/download-artifact@v4
+        uses: dawidd6/action-download-artifact@v3
         with:
-          run-id: ${{ inputs.ci_run_id }}
+          run_id: ${{ inputs.ci_run_id }}
+          repo: ${{ github.repository }}
           name: inference-bundle-current
-          path: models/current
+          path: _dl_bundle
+          if_no_artifact_found: fail
 
-      - name: Verify bundle (optional)
+      - name: Materialize bundle into models/current
+        if: ${{ inputs.ci_run_id != '' }}
         run: |
-          echo "Listing models/current (if any):"
-          ls -lah models/current || echo "models/current missing (shadow will still write probe lines)"
+          set -eux
+          mkdir -p models/current
+          # The artifact may contain files at root or under models/current/
+          if [ -d _dl_bundle/models/current ]; then
+            shopt -s dotglob
+            cp -R _dl_bundle/models/current/* models/current/ || true
+          else
+            shopt -s dotglob
+            cp -R _dl_bundle/* models/current/ || true
+          fi
+          echo "models/current contents:"
+          ls -lah models/current || true
 
-      # ---------- Shadow probe ----------
-      - name: Shadow probe (write JSONL)
+      # ---------- run the shadow probe ----------
+      - name: Run shadow probe
         run: |
           python - <<'PY'
           import os
           from src.signal_generator import shadow_probe
           syms = [s.strip().upper() for s in (os.getenv("SYMS","BTC,ETH,SOL")).split(",") if s.strip()]
-          shadow_probe(syms)   # note: no 'reason' kwarg in signature
-          print("shadow_probe wrote records for:", ",".join(syms))
+          shadow_probe(syms)
           PY
         env:
           SYMS: ${{ inputs.symbols }}
 
       - name: Tail shadow log
         run: |
-          echo "### Shadow tail"
-          test -f logs/signal_inference_shadow.jsonl && tail -n 5 logs/signal_inference_shadow.jsonl || echo "no shadow log"
+          echo "### Inference Shadow (tail)"
+          if test -s logs/signal_inference_shadow.jsonl; then
+            tail -n 5 logs/signal_inference_shadow.jsonl
+          else
+            echo "no shadow log"
+          fi
 
       - name: Upload inference shadow
         uses: actions/upload-artifact@v4
