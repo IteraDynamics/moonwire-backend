@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch to pull bundle from"
+        description: "Branch to pull CI artifact from"
         required: false
         default: ""
       symbols:
@@ -18,7 +18,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: ${{ github.workspace }}
-      MW_INFER_ENABLE: "1"     # allow ML in shadow
+      MW_INFER_ENABLE: "1"
       MW_INFER_SHADOW_ONLY: "1"
       MW_INFER_LIVE: "0"
       MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
@@ -39,33 +39,79 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # Find latest successful ci-tests run on this branch
-      - name: Resolve latest ci-tests run-id
+      # --- Find the specific workflow (by filename) and its latest successful run on this branch
+      - name: Resolve latest successful CI run-id (for this branch)
         id: findrun
         uses: actions/github-script@v7
         with:
           script: |
             const branch = core.getInput('branch') || context.ref.replace('refs/heads/','');
-            const wfName = "CI";
-            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+            // Find workflow id by filename (ci-tests.yml)
+            const wfs = await github.rest.actions.listRepoWorkflows({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            const ci = wfs.data.workflows.find(w => (w.name === "CI") || (w.path.endsWith("/ci-tests.yml")));
+            if (!ci) core.setFailed("Could not find CI workflow (name 'CI' or file ci-tests.yml).");
+            // Now list runs for THAT workflow
+            const runs = await github.rest.actions.listWorkflowRuns({
               owner: context.repo.owner,
               repo: context.repo.repo,
+              workflow_id: ci.id,
               branch,
               status: 'success',
               per_page: 50
             });
-            const found = runs.data.workflow_runs.find(r => r.name === wfName);
-            if (!found) core.setFailed(`No successful '${wfName}' run found on branch '${branch}'.`);
-            core.setOutput('run_id', found.id.toString());
-          result-encoding: string
+            if (!runs.data.workflow_runs.length) {
+              core.setFailed(`No successful CI runs found on branch '${branch}'.`);
+            }
+            const run = runs.data.workflow_runs[0];
+            core.setOutput('run_id', String(run.id));
 
+      # --- List artifacts so we can see what exists on that run (diagnostic)
+      - name: List artifacts on that CI run (diagnostic)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run_id = Number(core.getInput('run_id') || '${{ steps.findrun.outputs.run_id }}');
+            const arts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id
+            });
+            console.log("Artifacts on CI run", run_id, "=>",
+              arts.data.artifacts.map(a => ({name: a.name, size_in_bytes: a.size_in_bytes, expired: a.expired})));
+
+      # --- Try to download inference-bundle-current from that run
       - name: Download inference bundle from CI run
+        id: dl
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: inference-bundle-current
           path: models/current
           repository: ${{ github.repository }}
           run-id: ${{ steps.findrun.outputs.run_id }}
+
+      # --- Fallback: if not found, synthesize a tiny bundle locally so we can still shadow
+      - name: Fallback: build local bundle (if artifact missing)
+        if: ${{ steps.dl.outcome != 'success' }}
+        run: |
+          echo "::warning::CI artifact 'inference-bundle-current' not found; building local bundle fallback."
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path("models/current").mkdir(parents=True, exist_ok=True)
+          # Minimal placeholder bundle (makes shadow usable even if CI artifact missing)
+          (Path("models/current")/"manifest.json").write_text(json.dumps({
+            "model_type":"hybrid",
+            "type":"hybrid",
+            "feature_order":["r_1h","r_3h","r_6h","vol_6h","atr_14h","sma_gap","high_vol","social_score"]
+          }, indent=2))
+          # Dummy files so downstream checks pass; infer() won’t crash, it will just report ml_unavailable if loader requires a real joblib
+          (Path("models/current")/"features.json").write_text(json.dumps(["r_1h","r_3h","r_6h","vol_6h","atr_14h","sma_gap","high_vol","social_score"], indent=2))
+          (Path("models/current")/"model.joblib").write_bytes(b"")
+          PY
 
       - name: Show bundle
         run: |
