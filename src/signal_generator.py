@@ -84,9 +84,13 @@ def _infer_ml(asset: str) -> Dict[str, Any]:
         return {"ok": False, "dir": None, "conf": None, "reason": "ml_unavailable"}
 
     try:
-        out = _ML_INFER_FN(asset)  # expected: {"direction": "...", "confidence": 0.xx, ...}
+        out = _ML_INFER_FN(asset, models_dir=Path("models/current"))  # expected: {"direction": "...", "confidence": 0.xx, ...}
+        if _ML_INFER_FN is None:
+            return {"ok": False, "dir": None, "conf": None, "reason": "ml_unavailable_no_infer_fn"}
         if not isinstance(out, dict):
             return {"ok": False, "dir": None, "conf": None, "reason": "ml_bad_return_type"}
+        if out.get("error"):
+        return {"ok": False, "dir": None, "conf": None, "reason": f"ml_error:{out['error']}"}
 
         direction = out.get("direction")
         conf = out.get("confidence")
