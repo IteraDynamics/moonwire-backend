@@ -90,7 +90,7 @@ def _infer_ml(asset: str) -> Dict[str, Any]:
         if not isinstance(out, dict):
             return {"ok": False, "dir": None, "conf": None, "reason": "ml_bad_return_type"}
         if out.get("error"):
-        return {"ok": False, "dir": None, "conf": None, "reason": f"ml_error:{out['error']}"}
+            return {"ok": False, "dir": None, "conf": None, "reason": f"ml_error:{out['error']}"}
 
         direction = out.get("direction")
         conf = out.get("confidence")
