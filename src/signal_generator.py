@@ -241,40 +241,28 @@ def generate_signals():
     return valid_signals
 
 # --- CI/cron probe ----------------------------------------------------------
-def shadow_probe(symbols: Optional[Iterable[str]] = None, reason: str = "ci_probe") -> None:
+def shadow_probe(symbols=("BTC", "ETH", "SOL")) -> None:
     """
-    CI/cron probe: writes one shadow line per symbol.
-    - `symbols` can be an iterable of strings or a single comma-separated string.
-      If None, falls back to env MW_SHADOW_SYMBOLS (default "BTC").
-    - `reason` is stored into the log (e.g., "shadow-cron").
+    Active probe: attempts ML inference for each symbol and logs the result
+    into logs/signal_inference_shadow.jsonl. Succeeds whether or not a model
+    is present (but sets ml_ok accordingly).
     """
-    if symbols is None:
-        raw = os.getenv("MW_SHADOW_SYMBOLS", "BTC")
-        # allow comma-separated string or single token
-        if isinstance(raw, str):
-            symbols = [s.strip() for s in raw.split(",") if s.strip()]
-        else:
-            symbols = ["BTC"]
-
-    # If someone passed a single string directly, normalize to list
-    if isinstance(symbols, str):
-        symbols = [symbols]
-
     ts = _utcnow_iso()
     wrote = 0
     for sym in symbols:
-        gov = load_governance_params(sym)
-        _shadow_write({
+        ml = _infer_ml(sym)  # tries src.ml.infer.infer_asset_signal + models/current/*
+        rec = {
             "symbol": sym,
-            "reason": reason,
-            "ml_ok": False,      # probe isn't running ML; just proving plumbing
-            "ml_dir": None,
-            "ml_conf": None,
-            "gov": gov,
+            "reason": "ml_probe",
+            "ml_ok": bool(ml.get("ok")),
+            "ml_dir": ml.get("dir"),
+            "ml_conf": ml.get("conf"),
+            "gov": load_governance_params(sym),
             "ts": ts,
-        })
+        }
+        _append_shadow(rec)
         wrote += 1
-    print(f"[shadow_probe] wrote {wrote} record(s) to {SHADOW_LOG}")
+    print(f"[shadow_probe] wrote {wrote} ml_probe record(s) to logs/signal_inference_shadow.jsonl")
 
 # --- tiny CLI hook for CI probes (optional) --------------------------------
 if __name__ == "__main__":
