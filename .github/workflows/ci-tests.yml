@@ -285,6 +285,15 @@ jobs:
           mv models/backtest_summary.json models/backtest_summary_off.json
           cp models/ml_model_manifest.json models/ml_model_manifest_off.json
 
+      - name: Upload inference bundle (models/current)
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-bundle-current
+          path: models/current/**
+          if-no-files-found: error
+
+
       - name: Sanity social OFF + manifest flags
         if: ${{ success() }}
         run: |
