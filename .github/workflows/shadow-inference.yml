@@ -60,7 +60,7 @@ jobs:
           echo "models/current contents:"
           ls -lah models/current || true
 
-      - name: Sanity: load bundle & score BTC
+      - name: Sanity load bundle & score BTC
         run: |
           python - <<'PY'
           import json, joblib, pathlib
