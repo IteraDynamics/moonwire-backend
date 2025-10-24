@@ -203,6 +203,23 @@ jobs:
           MW_SOCIAL_INCLUDE: "BTC"
         run: python -m scripts.ml.train_predict
 
+      - name: Check inference bundle
+        if: ${{ success() }}
+        run: |
+          echo "Listing models/current:"
+          ls -lah models/current || echo "models/current missing"
+          python - <<'PY'
+          import pathlib, json
+          p = pathlib.Path("models/current")
+          print("exists:", p.exists())
+          if p.exists():
+              print("files:", [x.name for x in p.iterdir()])
+              man = p/"manifest.json"
+              print("has manifest?", man.exists())
+              if man.exists():
+                  print("manifest:", man.read_text()[:300], "...")
+          PY
+
       - name: Inspect model + feature snapshot
         if: ${{ success() }}
         env:
