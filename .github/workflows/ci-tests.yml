@@ -203,14 +203,16 @@ jobs:
           MW_SOCIAL_INCLUDE: "BTC"
         run: python -m scripts.ml.train_predict
 
-      - name: Upload inference bundle (models/current)
+      - name: Upload inference bundle (current)
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: inference-bundle-current
-          path: models/current/**
+          path: |
+            models/current/manifest.json
+            models/current/model.joblib
+            models/current/features.json
           if-no-files-found: error
-
 
       - name: Check inference bundle
         if: ${{ success() }}
