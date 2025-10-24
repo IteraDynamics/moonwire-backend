@@ -170,15 +170,15 @@ jobs:
       - name: Set ML knobs env
         run: |
           {
-            echo "MW_ML_SYMBOLS=BTC";
+            echo "MW_ML_SYMBOLS=BTC,ETH,SOL";
             echo "MW_ML_LOOKBACK_DAYS=180";
             echo "MW_ML_MODEL=hybrid";
             echo "MW_HORIZON_H=1";
             echo "MW_FEES_BPS=1";
             echo "MW_SLIPPAGE_BPS=2";
-            echo "MW_CONF_GRID=0.50,0.52,0.55,0.58,0.60";
-            echo "MW_DEBOUNCE_GRID_MIN=5,10,15";
-            echo "MW_HORIZON_GRID_H=2,3";
+            echo "MW_CONF_GRID=0.48,0.50,0.52,0.55,0.55,0.58,0.60,0.62";
+            echo "MW_DEBOUNCE_GRID_MIN=5,10,15,30";
+            echo "MW_HORIZON_GRID_H=1,2,3,6";
             echo "TUNER_STRICT=0";
             echo "MW_TUNER_DEBUG=1";
             echo "MW_CALIBRATE_PROBS=platt";
