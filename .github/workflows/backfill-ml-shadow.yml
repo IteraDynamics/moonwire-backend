@@ -1,3 +1,4 @@
+
 name: Backfill ML Shadow
 
 on:
@@ -49,27 +50,90 @@ jobs:
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
 
-      # Download the latest successful CI bundle artifact (produced by ci-tests.yml)
-      - name: Download inference bundle from CI
+      # -------------------------------
+      # Ensure an inference bundle exists
+      # -------------------------------
+
+      # Try to download the bundle produced by CI (won't fail the job if absent)
+      - name: Try download inference bundle from CI
         uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
         with:
-          workflow: .github/workflows/ci-tests.yml   # path to your CI workflow file
+          # Use the workflow's *name* as it appears in GitHub ("CI"), not the path.
+          workflow: CI
           workflow_conclusion: success
-          name: inference-bundle-current             # must match the upload name in CI
+          name: inference-bundle-current
           path: _dl_bundle
 
-      - name: Install bundle into models/current
+      - name: Install downloaded bundle (if any)
         run: |
           mkdir -p models/current
-          cp -v _dl_bundle/* models/current/ || true
-          echo "Bundle contents:"
+          if ls _dl_bundle 1>/dev/null 2>&1; then
+            echo "Found downloaded bundle files:"
+            ls -lah _dl_bundle || true
+            # Copy flat or nested contents into models/current
+            cp -rv _dl_bundle/* models/current/ 2>/dev/null || true
+          else
+            echo "No downloaded bundle present."
+          fi
+          echo "Current models/current contents (after copy):"
           ls -lah models/current || true
+
+      # Fallback: build a fresh (per-symbol aware) bundle if none present
+      - name: Build bundle locally if missing
+        env:
+          MW_ML_SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
+          MW_ML_LOOKBACK_DAYS: ${{ inputs.days || '180' }}
+          MW_ML_MODEL: "hybrid"
+          MW_HORIZON_H: "1"
+          MW_SOCIAL_ENABLED: "1"
+          MW_SOCIAL_INCLUDE: ""
+          MW_PER_SYMBOL_MODELS: "1"
+          MW_FAIL_ON_DEMO: "0"
+          MW_BRANCH: ${{ github.ref_name }}
+          MW_PROTECTED_PATTERN: "^main$"
+        run: |
+          set -e
+          echo "Checking for any model.joblib under models/current/** ..."
+          shopt -s globstar || true
+          found_any=""
+          for f in models/current/**/model.joblib models/current/model.joblib; do
+            if [ -f "$f" ]; then found_any="yes"; break; fi
+          done
+
+          if [ -z "$found_any" ]; then
+            echo "No bundle found; building locally via scripts.ml.train_predict ..."
+            python -m scripts.ml.train_predict
+          else
+            echo "Bundle already present; skipping local build."
+          fi
+
+          echo "Bundle after ensure/build:"
+          ls -lah models/current || true
+          # List nested per-symbol dirs if present
+          if [ -d models/current ]; then
+            find models/current -maxdepth 2 -type f -name "model.joblib" -print || true
+          fi
 
       - name: Assert bundle exists
         run: |
-          test -f models/current/model.joblib || (echo "models/current/model.joblib missing" && exit 1)
-          test -f models/current/manifest.json || (echo "models/current/manifest.json missing" && exit 1)
+          shopt -s globstar || true
+          cnt=$(ls models/current/**/model.joblib models/current/model.joblib 2>/dev/null | wc -l | tr -d ' ')
+          echo "Found model files: $cnt"
+          if [ "$cnt" -eq 0 ]; then
+            echo "ERROR: No model.joblib found under models/current/**"
+            exit 1
+          fi
+          # also ensure there is at least one manifest.json nearby
+          mcnt=$(ls models/current/**/manifest.json models/current/manifest.json 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$mcnt" -eq 0 ]; then
+            echo "ERROR: No manifest.json found under models/current/**"
+            exit 1
+          fi
 
+      # -------------------------------
+      # Backfill & Upload
+      # -------------------------------
       - name: Run ML shadow backfill
         run: python -m scripts.perf.backfill_ml_shadow
 
@@ -78,9 +142,9 @@ jobs:
           echo "=== tail logs/signal_inference_shadow.jsonl ==="
           tail -n 50 logs/signal_inference_shadow.jsonl || true
 
-      - name: Upload shadow log
+      - name: Upload shadow log (ml-shadow-backfill)
         uses: actions/upload-artifact@v4
         with:
-          name: shadow-log
+          name: ml-shadow-backfill
           path: logs/signal_inference_shadow.jsonl
           if-no-files-found: error
