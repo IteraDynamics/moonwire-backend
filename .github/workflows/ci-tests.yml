@@ -204,7 +204,7 @@ jobs:
           echo "BURST_SHORT_H=6" >> "$GITHUB_ENV"
           echo "BURST_LONG_H=48" >> "$GITHUB_ENV"
           # (optional) social smoothing already in your env as MW_SOC_SMOOTH
-          } >> "$GITHUB_ENV"
+          
 
       # ======================
       # A) Train: Social = ON
