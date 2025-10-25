@@ -33,7 +33,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
-      MPLBACKEND: Agg
       MW_BUNDLE_DIR: models/current
       MW_BACKFILL_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
       MW_BACKFILL_DAYS: ${{ github.event.inputs.days || '180' }}
@@ -54,7 +53,6 @@ jobs:
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
 
-      # --- Ensure we have an inference bundle in models/current ---
       - name: Detect local bundle
         id: have_bundle
         run: |
@@ -64,18 +62,22 @@ jobs:
             echo "found=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Download bundle from latest successful CI (fallback)
+      # If no local bundle AND no explicit run_id, pull latest successful artifact from the CI workflow file path.
+      - name: Download bundle from latest successful CI (by file path)
         if: steps.have_bundle.outputs.found == 'false' && (github.event.inputs.ci_run_id == '' || github.event.inputs.ci_run_id == null)
         uses: dawidd6/action-download-artifact@v3
         with:
-          workflow: CI
+          # IMPORTANT: set this to your CI workflow FILE NAME or PATH
+          # Replace if yours isn’t exactly this:
+          workflow: .github/workflows/ci-tests.yml
           name: inference-bundle-current
           path: _dl_bundle
           workflow_conclusion: success
-          # optionally restrict to main if you like:
+          # Optionally pin branch:
           # branch: main
 
-      - name: Download bundle from a specific CI run (fallback)
+      # If a run_id is provided, fetch from that specific run.
+      - name: Download bundle for specific run_id
         if: steps.have_bundle.outputs.found == 'false' && github.event.inputs.ci_run_id != ''
         uses: dawidd6/action-download-artifact@v3
         with:
@@ -88,22 +90,16 @@ jobs:
         run: |
           mkdir -p models/current
           shopt -s nullglob
-          # Copy any of: model.joblib, manifest.json, features.json
-          for f in _dl_bundle/*; do
-            base=$(basename "$f")
-            cp "$f" "models/current/$base" || true
-          done
-          echo "models/current contents:"
-          ls -lah models/current || true
+          for f in _dl_bundle/*; do cp "$f" "models/current/$(basename "$f")"; done
+          echo "models/current contents:"; ls -lah models/current || true
 
-      - name: Sanity show bundle state
+      - name: Sanity: bundle state
         run: |
-          ls -lah models/current || true
           test -f models/current/model.joblib || (echo "ERROR: model.joblib missing" && exit 1)
           test -f models/current/manifest.json || (echo "ERROR: manifest.json missing" && exit 1)
-          # features.json is optional (we fall back to manifest features)
+          ls -lah models/current
 
-      - name: Run backfill (write historical shadow rows)
+      - name: Run backfill
         run: python -m scripts.perf.backfill_ml_shadow
 
       - name: Show shadow tail
