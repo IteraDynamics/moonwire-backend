@@ -35,6 +35,7 @@ jobs:
       MW_PERF_CAPITAL: "100000"
       MW_PERF_FORCE_DEMO: "false"
       MW_PERF_DEADBAND: "0.06"
+      MW_PERF_MIN_FLIP_MIN: "180"
 
     steps:
       - name: Checkout
