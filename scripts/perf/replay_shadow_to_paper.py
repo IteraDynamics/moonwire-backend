@@ -120,6 +120,9 @@ def replay() -> Dict[str, Any]:
     if abs(ml_conf - 0.5) < deadband:
         continue
 
+    min_flip_min = int(os.getenv("MW_PERF_MIN_FLIP_MIN", "120"))
+    # per symbol, track last trade ts and direction; if new signal is opposite
+    # and (now - last_trade_ts) < min_flip_min: continue
 
     # 3) run the paper trader over these signals
     ctx = PTX()
