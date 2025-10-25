@@ -1,172 +1,171 @@
 # scripts/perf/replay_shadow_to_paper.py
 from __future__ import annotations
-
-import json
-import os
+import json, os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from scripts.perf.paper_trader import Ctx as PTX, run_paper_trader
 
-# ---- Inputs / knobs ----
 SHADOW_PATH = Path(os.getenv("SHADOW_LOG", "logs/signal_inference_shadow.jsonl"))
-OUT_TRADES  = Path(os.getenv("PAPER_TRADES_LOG", "logs/paper_trades.jsonl"))
+OUT_DIR     = Path("logs")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_CONF_MIN = float(os.getenv("REPLAY_CONF_MIN", "0.60"))
-LOOKBACK_H       = int(os.getenv("REPLAY_LOOKBACK_H", os.getenv("MW_PERF_LOOKBACK_H", "72")))
-ALLOWED          = {s.strip().upper() for s in os.getenv("MW_PERF_SYMBOLS", "BTC,ETH,SOL").split(",") if s.strip()}
+# Global fallbacks (used if coin override missing)
+GLOBAL_LOOKBACK_H   = int(os.getenv("MW_PERF_LOOKBACK_H", "72"))
+GLOBAL_HORIZON_MIN  = int(os.getenv("MW_PERF_HORIZON_MIN", "240"))
+GLOBAL_FEES_BPS     = float(os.getenv("MW_PERF_FEES_BPS", "1"))
+GLOBAL_SLIPPAGE_BPS = float(os.getenv("MW_PERF_SLIPPAGE_BPS", "2"))
+GLOBAL_DEADBAND     = float(os.getenv("MW_PERF_DEADBAND", "0.00"))  # |p-0.5| < deadband → drop
+GLOBAL_CONF_MIN     = float(os.getenv("REPLAY_CONF_MIN", "0.60"))
+GLOBAL_MIN_FLIP_MIN = int(os.getenv("MW_PERF_MIN_FLIP_MIN", "0"))
 
-# Optional extra gates (disabled by default unless you set them)
-DEADBAND         = float(os.getenv("MW_PERF_DEADBAND", "0.00"))    # skip if |p-0.5| < deadband (e.g., 0.05)
-MIN_FLIP_MIN     = int(os.getenv("MW_PERF_MIN_FLIP_MIN", "0"))     # ignore rapid long<->short flips within N minutes
+ALLOWED   = {s.strip().upper() for s in os.getenv("MW_PERF_SYMBOLS", "BTC,ETH,SOL").split(",") if s.strip()}
+GOV_FILE  = Path("models/governance_params.json")
 
-# ---- Helpers ----
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc).replace(microsecond=0)
+def _now() -> datetime: return datetime.now(timezone.utc).replace(microsecond=0)
 
 def _parse_ts(v) -> Optional[datetime]:
     try:
         s = str(v)
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
+        if s.endswith("Z"): s = s[:-1] + "+00:00"
         return datetime.fromisoformat(s).astimezone(timezone.utc)
     except Exception:
         return None
 
 def _read_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except Exception:
-                continue
+    if not path.exists(): return []
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln: continue
+        try:
+            yield json.loads(ln)
+        except Exception:
+            continue
 
-def _conf_min_from_row(row: Dict[str, Any]) -> float:
-    gov = row.get("gov") or {}
+def _load_gov() -> Dict[str, Dict[str, Any]]:
     try:
-        return float(gov.get("conf_min", DEFAULT_CONF_MIN))
+        if GOV_FILE.exists():
+            return json.loads(GOV_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return DEFAULT_CONF_MIN
+        pass
+    return {}
 
-def _baseline_qualifies(row: Dict[str, Any], win_start: datetime) -> Tuple[bool, Optional[datetime], Optional[str], Optional[float]]:
-    """
-    Baseline filter: window, allowed symbol, ml_ok, confidence >= conf_min.
-    Returns (ok, ts, dir, conf) for re-use by later gates.
-    """
-    sym = str(row.get("symbol", "")).upper()
-    if sym not in ALLOWED:
-        return False, None, None, None
+def _coin_knob(gov: Dict[str, Any], key: str, default: Any) -> Any:
+    try:
+        v = gov.get(key, default)
+        return type(default)(v) if v is not None else default
+    except Exception:
+        return default
 
-    ts = _parse_ts(row.get("ts")) or _now_utc()
-    if ts < win_start:
-        return False, None, None, None
+def _filter_shadow_for_coin(rows: List[Dict[str,Any]], coin: str, win_start: datetime, gov: Dict[str,Any]) -> List[Dict[str,Any]]:
+    """Apply window, conf_min, deadband, min_flip to coin rows."""
+    conf_min    = _coin_knob(gov, "conf_min", GLOBAL_CONF_MIN)
+    deadband    = _coin_knob(gov, "deadband", GLOBAL_DEADBAND)
+    min_flip    = _coin_knob(gov, "min_flip_min", GLOBAL_MIN_FLIP_MIN)
 
-    if not bool(row.get("ml_ok", False)):
-        return False, None, None, None
+    selected: List[Dict[str,Any]] = []
+    last_dir: Optional[str] = None
+    last_ts: Optional[datetime] = None
 
-    conf_v = row.get("ml_conf")
-    if not isinstance(conf_v, (int, float)):
-        return False, None, None, None
-    conf = float(conf_v)
+    for j in rows:
+        if str(j.get("symbol","")).upper() != coin: continue
+        ts = _parse_ts(j.get("ts"))
+        if not ts or ts < win_start: continue
+        if not j.get("ml_ok", False): continue
+        conf = j.get("ml_conf")
+        if not isinstance(conf, (int,float)): continue
+        if conf < conf_min: continue
+        if abs(float(conf) - 0.5) < float(deadband): continue
 
-    # respect per-row governance conf_min if present
-    if conf < _conf_min_from_row(row):
-        return False, None, None, None
+        d = str(j.get("ml_dir","")).lower()
+        if d not in {"long","short"}: continue
 
-    dir_ = str(row.get("ml_dir", "")).lower()
-    if dir_ not in {"long", "short"}:
-        return False, None, None, None
-
-    return True, ts, dir_, conf
-
-def _to_signal(symbol: str, ts: datetime, direction: str, conf: float) -> Dict[str, Any]:
-    """
-    Convert to canonical signal line paper_trader expects.
-    """
-    ts_iso = ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    return {
-        "id": f"shadow_{ts_iso}_{symbol}_{direction}",
-        "ts": ts_iso,
-        "symbol": symbol,
-        "direction": direction,               # "long" | "short"
-        "confidence": float(conf),
-        "price": None,                        # price not needed; paper_trader uses price book
-        "source": "shadow",
-        "model_version": "bundle/current",
-        "outcome": None,
-    }
-
-# ---- Main ----
-def replay() -> Dict[str, Any]:
-    win_start = _now_utc() - timedelta(hours=LOOKBACK_H)
-
-    # 1) read rows and sort by timestamp (oldest -> newest)
-    raw_rows = list(_read_jsonl(SHADOW_PATH))
-    def _safe_ts(r): 
-        t = _parse_ts(r.get("ts"))
-        return t or _now_utc()
-    raw_rows.sort(key=_safe_ts)
-
-    considered_in_window = 0
-    selected: List[Dict[str, Any]] = []
-
-    # state for flip-cooldown
-    last_kept: Dict[str, Tuple[datetime, str]] = {}  # symbol -> (ts, dir)
-
-    for r in raw_rows:
-        ok, ts, direction, conf = _baseline_qualifies(r, win_start)
-        if not ok:
-            continue
-
-        considered_in_window += 1
-        sym = str(r.get("symbol", "")).upper()
-
-        # (A) deadband: skip indecisive probs near 0.5
-        if DEADBAND > 0.0 and abs(conf - 0.5) < DEADBAND:
-            continue
-
-        # (B) flip cooldown: if direction flips too soon after previous kept trade for same symbol, skip
-        if MIN_FLIP_MIN > 0 and sym in last_kept:
-            last_ts, last_dir = last_kept[sym]
-            if direction != last_dir and (ts - last_ts).total_seconds() < MIN_FLIP_MIN * 60:
+        # min-flip guard
+        if last_dir is not None and last_ts is not None:
+            if d != last_dir and (ts - last_ts).total_seconds() < min_flip * 60:
                 continue
 
-        selected.append(_to_signal(sym, ts, direction, conf))
-        last_kept[sym] = (ts, direction)
+        selected.append({
+            "id": f"shadow_{ts.isoformat()}_{coin}_{d}",
+            "ts": ts.isoformat().replace("+00:00","Z"),
+            "symbol": coin,
+            "direction": d,
+            "confidence": float(conf),
+            "price": None,
+            "source": "shadow",
+            "model_version": "bundle/current",
+            "outcome": None,
+        })
+        last_dir, last_ts = d, ts
 
-    # 2) write canonical signals file for paper_trader
-    sig_path = Path("logs") / "signal_history.jsonl"
-    sig_path.parent.mkdir(parents=True, exist_ok=True)
+    return selected
+
+def _run_one_coin(coin: str, signals: List[Dict[str,Any]], gov: Dict[str,Any]) -> Tuple[str, Dict[str,Any]]:
+    # Write coin-specific signal_history the trader expects
+    sig_path = OUT_DIR / f"signal_history_{coin}.jsonl"
     with sig_path.open("w", encoding="utf-8") as f:
-        for r in selected:
-            f.write(json.dumps(r) + "\n")
+        for r in signals: f.write(json.dumps(r) + "\n")
 
-    # 3) run paper trader on these signals
+    # Build a ctx with per-coin overrides
     ctx = PTX()
-    ctx.symbols = list(ALLOWED)
-    ctx.lookback_h = LOOKBACK_H
-    ctx.force_demo = False
-    ctx.demo_mode = False
+    ctx.symbols        = [coin]
+    ctx.lookback_h     = GLOBAL_LOOKBACK_H  # window for price data fetch
+    ctx.horizon_min    = _coin_knob(gov, "horizon_min", GLOBAL_HORIZON_MIN)
+    ctx.fees_bps       = _coin_knob(gov, "fees_bps", GLOBAL_FEES_BPS)
+    ctx.slippage_bps   = _coin_knob(gov, "slippage_bps", GLOBAL_SLIPPAGE_BPS)
+    ctx.force_demo     = False
+    ctx.demo_mode      = False
+    # Let paper_trader read the coin file (most versions read logs/signal_history.jsonl).
+    # We swap the expected path via env to avoid changing the trader internals.
+    os.environ["SIGNAL_HISTORY_PATH"] = str(sig_path)
 
-    out = run_paper_trader(ctx, mode="replay-shadow")
+    res = run_paper_trader(ctx, mode="replay-shadow")
+    return coin, res
 
-    # 4) summary
-    summary = {
-        "shadow_path": str(SHADOW_PATH),
-        "trades_out": str(OUT_TRADES),
-        "total_rows": len(raw_rows),
-        "considered_rows": considered_in_window,
-        "written_trades": out.get("aggregate", {}).get("trades", 0),
-        "per_symbol": {k: v.get("trades", 0) for k, v in out.get("by_symbol", {}).items()},
+def replay() -> Dict[str, Any]:
+    rows = list(_read_jsonl(SHADOW_PATH))
+    if not rows:
+        print("[replay] no shadow rows present at", SHADOW_PATH)
+        return {"aggregate": {"trades": 0}, "by_symbol": {}, "demo": False}
+
+    gov_all = _load_gov()
+    now = _now()
+    t0  = now - timedelta(hours=GLOBAL_LOOKBACK_H)
+
+    # Per-coin runs
+    per: Dict[str, Dict[str,Any]] = {}
+    for coin in sorted(ALLOWED):
+        gov = gov_all.get(coin, {})
+        sigs = _filter_shadow_for_coin(rows, coin, t0, gov)
+        if not sigs:
+            per[coin] = {"trades": 0}
+            continue
+        coin_key, res = _run_one_coin(coin, sigs, gov)
+        per[coin_key] = res.get("by_symbol", {}).get(coin_key, {"trades": 0})
+
+    # Aggregate (simple roll-up of key stats)
+    agg_trades = sum(v.get("trades",0) for v in per.values())
+    aggregate = {
+        "trades": agg_trades,
+        # You can compute more blended stats here if needed
     }
-    print("[replay_shadow_to_paper]", json.dumps(summary, indent=2))
-    return summary
+
+    out = {
+        "generated_at": now.replace(microsecond=0).isoformat().replace("+00:00","Z"),
+        "mode": "replay-shadow",
+        "window_hours": GLOBAL_LOOKBACK_H,
+        "capital": float(os.getenv("MW_PERF_CAPITAL","100000")),
+        "by_symbol": per,
+        "aggregate": aggregate,
+        "demo": False,
+    }
+    # Persist standard summary for your workflow summary step
+    Path("models").mkdir(parents=True, exist_ok=True)
+    (Path("models")/"performance_metrics.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
+    print("[replay_shadow_to_paper]", json.dumps(out, indent=2))
+    return out
 
 if __name__ == "__main__":
     replay()
