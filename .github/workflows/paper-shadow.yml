@@ -82,13 +82,21 @@ jobs:
         env:
           MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
         run: |
+                - name: Generate ML shadow rows (probe with model)
+        env:
+          MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
+        run: |
           python - <<'PY'
           import os, json
           from pathlib import Path
+          from datetime import datetime, timezone
           from src.ml.infer import infer_asset_signal
+          from src.signal_generator import load_governance_params
+
           log = Path("logs/signal_inference_shadow.jsonl")
           log.parent.mkdir(parents=True, exist_ok=True)
           syms = [s.strip().upper() for s in os.getenv("MW_SHADOW_SYMBOLS","BTC,ETH,SOL").split(",") if s.strip()]
+
           wrote = 0
           for s in syms:
             try:
@@ -99,23 +107,31 @@ jobs:
                 "ml_ok": True,
                 "ml_dir": out.get("direction"),
                 "ml_conf": float(out.get("confidence", 0.0) or 0.0),
+                # ✅ critical for replay:
+                "ts": datetime.now(timezone.utc).isoformat(),
+                # optional but helpful:
+                "gov": load_governance_params(s),
               }
             except Exception as e:
               rec = {
                 "symbol": s,
                 "reason": f"ml_exception:{type(e).__name__}",
                 "ml_ok": False, "ml_dir": None, "ml_conf": None,
+                "ts": datetime.now(timezone.utc).isoformat(),
               }
             with log.open("a", encoding="utf-8") as f:
               f.write(json.dumps(rec) + "\n")
             wrote += 1
+
           print(f"[shadow] wrote {wrote} ML shadow row(s) → {log}")
           print("Tail:")
           try:
-            print("\n".join(Path('logs/signal_inference_shadow.jsonl').read_text(encoding='utf-8').splitlines()[-5:]))
+            print("\n".join(log.read_text(encoding='utf-8').splitlines()[-5:]))
           except Exception:
             pass
           PY
+          
+
 
       # ---------- (Optional) convert existing signals → shadow (no-op if none) ----------
       - name: Build shadow from real signal history (optional)
