@@ -81,6 +81,6 @@ jobs:
       - name: Upload shadow log
         uses: actions/upload-artifact@v4
         with:
-          name: ml-shadow-backfill
+          name: shadow-log
           path: logs/signal_inference_shadow.jsonl
           if-no-files-found: error
