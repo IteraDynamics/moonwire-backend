@@ -1,14 +1,14 @@
-#  scripts/ml/train_predict.py
+# scripts/ml/train_predict.py
 from __future__ import annotations
 import os, json, pathlib, re, shutil
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from .utils import ensure_dirs, env_str, env_int, env_float, to_list, save_json
+from .utils import ensure_dirs, env_str, env_int, to_list, save_json
 from .data_loader import load_prices
 from .feature_builder import build_features
 from .labeler import label_next_horizon
@@ -23,19 +23,43 @@ try:
 except Exception:
     detect_provenance = None
 
-# canonical feature list used throughout
+# =========================
+# Feature list (now includes bursts)
+# =========================
 FEATURES = [
     "r_1h","r_3h","r_6h",
     "vol_6h","atr_14h","sma_gap","high_vol",
     "social_score",
+    "price_burst",      # NEW
+    "social_burst",     # NEW
 ]
 
+# =========================
+# Per-coin model overrides
+# =========================
+def _parse_model_map(s: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in (s or "").split(","):
+        part = part.strip()
+        if not part: 
+            continue
+        if ":" in part:
+            k, v = part.split(":", 1)
+            out[k.strip().upper()] = v.strip()
+        else:
+            # allow single token to mean DEFAULT:<token>
+            out["DEFAULT"] = part
+    return out
+
+MODEL_MAP = _parse_model_map(os.getenv("MW_ML_MODEL_MAP", ""))
+
+def model_type_for(sym: str, fallback: str) -> str:
+    return MODEL_MAP.get(sym.upper(), MODEL_MAP.get("DEFAULT", fallback))
+
+PER_SYMBOL_MODELS = str(os.getenv("MW_PER_SYMBOL_MODELS", "1")).lower() in {"1","true","yes"}
+
+# ---------- provenance ----------
 def _write_provenance(prices_map, symbols, lookback_days):
-    """
-    Always write artifacts/data_provenance.json.
-    - If detect_provenance exists, try (prices_map, symbols) first, then kwargs.
-    - On any error, write a minimal payload with the error string so CI still uploads.
-    """
     out = ROOT / "artifacts" / "data_provenance.json"
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -72,12 +96,11 @@ def _write_provenance(prices_map, symbols, lookback_days):
         json.dump(to_write, f, indent=2, sort_keys=True, default=str)
     print(f"[provenance] wrote {out}")
 
-
-def _feature_matrix(df: pd.DataFrame):
+# ---------- helpers ----------
+def _feature_matrix(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     X = df[FEATURES].values.astype(float)
     y = df["y_long"].values.astype(int)
     return X, y, FEATURES
-
 
 def _plots_roc_pr_placeholder():
     (ROOT / "artifacts").mkdir(parents=True, exist_ok=True)
@@ -87,7 +110,6 @@ def _plots_roc_pr_placeholder():
     plt.savefig(ROOT/"artifacts/ml_roc_pr_curve.png")
     plt.close()
 
-
 def _plot_equity_placeholder():
     (ROOT / "artifacts").mkdir(parents=True, exist_ok=True)
     plt.figure()
@@ -96,55 +118,50 @@ def _plot_equity_placeholder():
     plt.savefig(ROOT/"artifacts/bt_equity_curve.png")
     plt.close()
 
-
 def _maybe_fail_on_demo(prov: dict):
-    """
-    Optional guard. OFF by default.
-    Enable by setting:
-      MW_FAIL_ON_DEMO=1
-      MW_BRANCH=<current branch name> (CI: ${{ github.ref_name }})
-      MW_PROTECTED_PATTERN='^main$'   (regex; defaults to ^main$)
-    If provenance indicates demo + branch matches protected pattern -> raise.
-    """
     if not prov or not isinstance(prov, dict):
         return
     if str(os.getenv("MW_FAIL_ON_DEMO", "0")).strip() not in {"1", "true", "TRUE"}:
         return
-
     branch = os.getenv("MW_BRANCH", "")
     pattern = os.getenv("MW_PROTECTED_PATTERN", r"^main$")
     is_protected = bool(re.search(pattern, branch or ""))
-
     is_demo = bool(prov.get("demo", False)) or str(prov.get("source", "")).lower().startswith("demo")
-
     if is_protected and is_demo:
         raise RuntimeError(
             f"Provenance indicates demo data on protected branch '{branch}'. "
             f"Set MW_FAIL_ON_DEMO=0 to bypass, or switch to real data."
         )
 
+def _write_bundle(dirpath: pathlib.Path, model_obj, feature_list, manifest_dict):
+    import joblib
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / "manifest.json").write_text(json.dumps(manifest_dict, indent=2), encoding="utf-8")
+    (dirpath / "features.json").write_text(json.dumps({"feature_order": feature_list}, indent=2), encoding="utf-8")
+    joblib.dump(model_obj, dirpath / "model.joblib")
 
+# ---------- main ----------
 def main():
     ensure_dirs()
 
     symbols = to_list(env_str("MW_ML_SYMBOLS", "BTC,ETH,SOL"))
     lookback_days = env_int("MW_ML_LOOKBACK_DAYS", 180)
-    model_type = env_str("MW_ML_MODEL", "logreg")
+    model_type_global = env_str("MW_ML_MODEL", "hybrid")
     train_days = env_int("MW_TRAIN_DAYS", 60)
     test_days = env_int("MW_TEST_DAYS", 30)
     horizon_h = env_int("MW_HORIZON_H", 1)
 
-    # --- Load + build features ---
+    # Load + build features
     prices = load_prices(symbols, lookback_days=lookback_days)
     feats = build_features(prices)
     _write_provenance(prices, symbols, lookback_days)
 
     pred_dfs: Dict[str, pd.DataFrame] = {}
-    manifest = {
-        "model_type": model_type,
+    per_symbol_models: Dict[str, object] = {}
+
+    manifest_base = {
         "symbols": symbols,
         "lookback_days": lookback_days,
-        # Write BOTH keys for compatibility
         "features": FEATURES,
         "feature_list": FEATURES,
         "social_enabled": str(os.getenv("MW_SOCIAL_ENABLED","0")).lower() in {"1","true","yes"},
@@ -152,11 +169,12 @@ def main():
         "test_days": test_days,
         "horizon_h": horizon_h,
         "fold_metrics": [],
+        "model_type": model_type_global,  # global fallback
     }
-    manifest["social_include"] = os.getenv("MW_SOCIAL_INCLUDE")  # e.g., 'BTC' or None (means ALL)
-    manifest["fix_end_ts"] = os.getenv("MW_FIX_END_TS")          # helpful provenance
+    manifest_base["social_include"] = os.getenv("MW_SOCIAL_INCLUDE")
+    manifest_base["fix_end_ts"] = os.getenv("MW_FIX_END_TS")
 
-    # Choose a primary symbol for the online bundle (first symbol by default)
+    # Choose a primary symbol for legacy single-bundle compatibility
     primary_symbol: Optional[str] = symbols[0] if symbols else None
     export_model = None
 
@@ -164,17 +182,20 @@ def main():
         df = label_next_horizon(feats[sym], horizon_h=horizon_h)
         X, y, feature_cols = _feature_matrix(df)
 
+        sym_model_type = model_type_for(sym, model_type_global)
+
         # walk-forward; keep last fold predictions
         preds = np.zeros(len(df))
         fold_ix = 0
         for tr_ix, te_ix in walk_forward_splits(df, n_splits=3, train_days=train_days, test_days=test_days):
             if len(tr_ix) < 10 or len(te_ix) < 5:
                 continue
-            m = train_model(X[tr_ix], y[tr_ix], model_type=model_type)
+            m = train_model(X[tr_ix], y[tr_ix], model_type=sym_model_type)
             p = predict_proba(m, X[te_ix])
             preds[te_ix] = p
-            manifest["fold_metrics"].append({
+            manifest_base["fold_metrics"].append({
                 "symbol": sym,
+                "model_type": sym_model_type,
                 "fold": fold_ix,
                 "train_len": int(len(tr_ix)),
                 "test_len": int(len(te_ix)),
@@ -184,66 +205,63 @@ def main():
 
         pred_dfs[sym] = pd.DataFrame({"ts": df["ts"], "p_long": preds})
 
-        # Train a full-data estimator for the primary symbol (for online inference bundle)
-        if primary_symbol and sym == primary_symbol:
-            try:
-                export_model = train_model(X, y, model_type=model_type)
-                print(f"[bundle] trained full-data model for primary symbol: {sym} (rows={len(y)})")
-            except Exception as e:
-                print(f"[bundle] WARN: failed to train export model for {sym}: {e}")
+        # full-data export per symbol
+        try:
+            full_model = train_model(X, y, model_type=sym_model_type)
+            per_symbol_models[sym] = full_model
+            print(f"[bundle] trained full-data model for {sym} with {sym_model_type} (rows={len(y)})")
+            if export_model is None and sym == primary_symbol:
+                export_model = full_model
+            # write a tiny per-symbol feature preview for CI summary
+            preview = df[FEATURES].iloc[-1].to_dict()
+            (ROOT / "artifacts").mkdir(parents=True, exist_ok=True)
+            (ROOT / "artifacts" / f"features_preview_{sym}.json").write_text(json.dumps(preview, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"[bundle] WARN: failed export model for {sym}: {e}")
 
-    # --- tune thresholds (unchanged) ---
-    best = {}
+    # tune thresholds (optional)
     try:
         from .tuner import tune_thresholds
         best = tune_thresholds(pred_dfs, prices)
+        save_json("models/backtest_summary.json", {"aggregate": best.get("agg", {}), "per_symbol": best.get("per_symbol", {})})
     except Exception as e:
         print(f"[tuner] WARN: tune_thresholds failed: {e}")
-        # write a minimal shape so downstream steps don't explode
-        best = {"agg": {}, "per_symbol": {}}
+        save_json("models/backtest_summary.json", {"aggregate": {}, "per_symbol": {}})
 
-    save_json("models/backtest_summary.json", {"aggregate": best.get("agg", {}), "per_symbol": best.get("per_symbol", {})})
-    save_json("models/ml_model_manifest.json", manifest)
+    save_json("models/ml_model_manifest.json", manifest_base)
 
-    # --- placeholder plots ---
+    # placeholder plots
     _plots_roc_pr_placeholder()
     _plot_equity_placeholder()
 
-    # ----------------------------------------------------------------------
-    # Export a lightweight inference bundle for online/shadow inference
-    # ----------------------------------------------------------------------
+    # Export bundles
     try:
-        BUNDLE = ROOT / "models" / "current"
-        BUNDLE.mkdir(parents=True, exist_ok=True)
+        BUNDLE_ROOT = ROOT / "models" / "current"
+        BUNDLE_ROOT.mkdir(parents=True, exist_ok=True)
 
-        # 1) copy the manifest so online inference can inspect it
-        src_manifest = ROOT / "models" / "ml_model_manifest.json"
-        dst_manifest = BUNDLE / "manifest.json"
-        if src_manifest.exists():
-            shutil.copy(src_manifest, dst_manifest)
+        if PER_SYMBOL_MODELS and per_symbol_models:
+            index = {"symbols": [], "default": None}
+            for s, m in per_symbol_models.items():
+                d = BUNDLE_ROOT / s
+                man = {**manifest_base, "symbol": s, "model_type": model_type_for(s, model_type_global)}
+                _write_bundle(d, m, FEATURES, man)
+                index["symbols"].append(s)
+            # optional default fallback
+            if export_model is not None:
+                _write_bundle(BUNDLE_ROOT / "default", export_model, FEATURES, {**manifest_base, "symbol": None})
+                index["default"] = "default"
+            (BUNDLE_ROOT / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+            print("[bundle] wrote per-symbol bundles:", index)
+        else:
+            # legacy flat single bundle
+            target_model = export_model or (list(per_symbol_models.values())[0] if per_symbol_models else None)
+            if target_model is None:
+                raise RuntimeError("no trained model available to export")
+            _write_bundle(BUNDLE_ROOT, target_model, FEATURES, manifest_base)
+            print("[bundle] wrote single bundle at models/current")
 
-        # 2) persist the trained estimator for the primary symbol
-        model_path = None
-        if export_model is not None:
-            try:
-                import joblib
-                joblib.dump(export_model, BUNDLE / "model.joblib")
-                model_path = str((BUNDLE / "model.joblib").resolve())
-            except Exception as e:
-                print(f"[bundle] WARN: failed to dump model.joblib: {e}")
-
-        # 3) write feature order for vectorization
-        with (BUNDLE / "features.json").open("w", encoding="utf-8") as f:
-            json.dump({"feature_order": FEATURES, "primary_symbol": primary_symbol}, f, indent=2)
-
-        print("[bundle] wrote models/current with:", {
-            "manifest": str(dst_manifest.resolve()) if dst_manifest.exists() else None,
-            "model": model_path,
-            "features": str((BUNDLE / "features.json").resolve())
-        })
     except Exception as e:
         print(f"[bundle] WARN: failed to export inference bundle: {e}")
-
 
 if __name__ == "__main__":
     main()
