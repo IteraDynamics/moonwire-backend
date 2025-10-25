@@ -1,237 +1,198 @@
 # scripts/ml/feature_builder.py
 from __future__ import annotations
 
-import os
-import json
-import re
+import os, json
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
-
-import pandas as pd
+from typing import Dict, Tuple
 import numpy as np
+import pandas as pd
 
-# Use the canonical social series builder from scripts (already anti-leak lagged).
-# PYTHONPATH in CI includes repo root, so this import is valid.
-try:
-    from scripts.ml.social_features import compute_social_series
-except Exception:
-    compute_social_series = None  # handled gracefully below
+# =========================
+# Core helpers
+# =========================
+def _returns(df: pd.DataFrame, col="close") -> pd.Series:
+    return df[col].pct_change().fillna(0.0)
 
-
-# ----------------------------
-# Helpers (timestamps & parsing)
-# ----------------------------
-_RE_BTC = re.compile(r"\b(bitcoin|btc)\b", re.I)
-_RE_ETH = re.compile(r"\b(ethereum|eth)\b", re.I)
-_RE_SOL = re.compile(r"\b(solana|sol)\b", re.I)
-
-def _to_utc(dt_str: str) -> datetime:
-    """Parse tolerant ISO string ('Z' or '+00:00') → aware UTC datetime."""
-    return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(timezone.utc)
-
-def _to_utc_ts(x) -> pd.Timestamp:
-    """
-    Convert a variety of inputs (datetime, pd.Timestamp, str) into a UTC-aware
-    pandas.Timestamp. If naive → localize UTC; if tz-aware → convert to UTC.
-    """
-    t = pd.Timestamp(x)
-    if t.tzinfo is None:
-        t = t.tz_localize("UTC")
+def _atr(df: pd.DataFrame, n=14) -> pd.Series:
+    # If high/low not present (common in hourly aggregates), approximate
+    if not {"high","low","close"}.issubset(df.columns):
+        # synthesize high/low around close using a tiny band of realized volatility
+        c = df["close"].astype(float)
+        r = c.pct_change().abs().fillna(0.0)
+        h = c * (1 + r)
+        l = c * (1 - r)
     else:
-        t = t.tz_convert("UTC")
-    return t
+        h, l, c = df["high"].astype(float), df["low"].astype(float), df["close"].astype(float)
+    prev_c = c.shift(1)
+    tr = pd.concat([(h - l).abs(),
+                    (h - prev_c).abs(),
+                    (l - prev_c).abs()], axis=1).max(axis=1)
+    return tr.rolling(n, min_periods=n).mean().fillna(method="bfill").fillna(0.0)
 
-def _as_hour_series(df: pd.DataFrame) -> Optional[pd.Series]:
-    """
-    Return a UTC hourly bucket series aligned to df rows.
-    Prefers 'ts' column; falls back to datetime-like index.
-    """
-    if "ts" in df.columns:
-        ts = pd.to_datetime(df["ts"], utc=True, errors="coerce")
-    else:
-        idx = pd.to_datetime(df.index, utc=True, errors="coerce")
-        ts = pd.Series(idx, index=df.index)
-    if ts.isna().all():
-        return None
-    # use lowercase 'h' to avoid FutureWarning
-    return ts.dt.floor("h")
+def _sma_gap(df: pd.DataFrame, col="close", win=24) -> pd.Series:
+    sma = df[col].rolling(win, min_periods=max(2, win//2)).mean()
+    return ((df[col] - sma) / (sma.replace(0, np.nan))).fillna(0.0)
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+def _zscore(s: pd.Series) -> pd.Series:
+    m, sd = s.mean(), s.std(ddof=1)
+    if pd.isna(sd) or sd == 0:
+        return pd.Series(0.0, index=s.index)
+    return (s - m) / sd
 
-def _parse_include_set(env_name: str = "MW_SOCIAL_INCLUDE") -> Optional[Set[str]]:
-    """
-    Parse a comma/semicolon separated allow-list of symbols (e.g., 'BTC,ETH').
-    Returns:
-      - None  => include ALL (no gating by list)
-      - set() => include NONE (empty list explicitly)
-      - set({'BTC','SOL'}) => include only those
-    """
-    raw = os.getenv(env_name)
-    if raw is None:
-        # not set => include ALL (subject to MW_SOCIAL_ENABLED)
-        return None
-    raw = raw.strip()
-    if raw == "":
-        # explicitly empty => include NONE
-        return set()
-    toks = [t.strip().upper() for t in re.split(r"[,\s;]+", raw) if t.strip()]
-    return set(toks)
+def _vol(df: pd.DataFrame, ret_col: str, win: int) -> pd.Series:
+    r = df[ret_col].astype(float)
+    return r.rolling(win, min_periods=max(3, win//3)).std(ddof=1).fillna(0.0)
 
-
-# ----------------------------
-# Social merge (canonical path)
-# ----------------------------
-def _load_social_hourly(repo_root: Path = Path(".")) -> pd.DataFrame:
+# =========================
+# Social (reddit) helpers
+# =========================
+def _load_social_hourly(root: Path) -> pd.DataFrame:
     """
-    Load the canonical hourly social series:
-      index (UTC hourly), columns ['reddit_score','twitter_score','social_score'].
-    Returns empty df if disabled or unavailable.
+    Reads logs/social_reddit.jsonl into hourly counts.
+    Expected row keys: {ts|timestamp|time}, subreddit
     """
-    if not _env_bool("MW_SOCIAL_ENABLED", False):
+    p = root / "logs" / "social_reddit.jsonl"
+    if not p.exists():
         return pd.DataFrame()
-    if compute_social_series is None:
+    rows = []
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            j = json.loads(ln)
+            ts = j.get("ts") or j.get("timestamp") or j.get("time")
+            if not ts:
+                continue
+            s = str(ts)
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            t = pd.to_datetime(s, utc=True).floor("H")
+            rows.append(t)
+        except Exception:
+            continue
+    if not rows:
         return pd.DataFrame()
-    try:
-        df = compute_social_series(repo_root)
-        # Ensure hourly tz-aware index for robust joins
-        if df is not None and not df.empty:
-            if df.index.tz is None:
-                df.index = df.index.tz_localize("UTC")
-            df = df.asfreq("h").fillna(0.5)
-        return df
-    except Exception:
-        return pd.DataFrame()
+    df = pd.DataFrame({"ts": rows, "n": 1.0})
+    return df.groupby("ts", as_index=True)["n"].sum().to_frame()
 
+def _social_score_series(root: Path, smooth_h: int = 6) -> pd.DataFrame:
+    """ Simple normalized activity proxy, smoothed. """
+    df = _load_social_hourly(root)
+    if df.empty:
+        return pd.DataFrame({"social_score": []})
+    rate = df["n"].asfreq("H").fillna(0.0)
+    sm = rate.rolling(smooth_h, min_periods=1).mean()
+    # normalize to [0,1] via zscore → sigmoid
+    z = _zscore(sm).clip(-5, 5)
+    score = 1.0 / (1.0 + np.exp(-z))
+    return pd.DataFrame({"social_score": score})
 
-def _attach_social_score(df: pd.DataFrame, social_df: pd.DataFrame) -> pd.DataFrame:
+def _social_burst_series(root: Path, z_thresh=2.0, smooth_h=3) -> pd.DataFrame:
+    df = _load_social_hourly(root)
+    if df.empty:
+        return pd.DataFrame({"social_burst": []})
+    rate = df["n"].asfreq("H").fillna(0.0)
+    sm = rate.rolling(smooth_h, min_periods=1).mean()
+    z  = _zscore(sm).fillna(0.0)
+    return pd.DataFrame({"social_burst": (z > z_thresh).astype(float)})
+
+# =========================
+# Price burst helper
+# =========================
+def _price_burst(F: pd.DataFrame, ret_col="r_1h",
+                 short_h=6, long_h=48, z_thresh=2.0) -> pd.Series:
+    r = F[ret_col].fillna(0.0)
+    short = r.rolling(short_h, min_periods=short_h).mean()
+    long  = r.rolling(long_h,  min_periods=long_h).mean()
+    spread = (short - long).fillna(0.0)
+    z = _zscore(spread).fillna(0.0)
+    return (z > z_thresh).astype(float)
+
+# =========================
+# Public: build_features
+# =========================
+def build_features(prices_map: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     """
-    Attach 'social_score' to the per-row frame by hourly key. If disabled or missing,
-    default to neutral 0.5. No leakage: the canonical series is already lagged +1h.
+    Input:
+      prices_map[symbol] → DataFrame with at least:
+        ts (datetime-like, tz-aware preferred), close (float)
+        optional: high, low
+    Output:
+      dict[symbol] → feature DataFrame with 'ts' and the feature columns.
     """
-    df = df.copy()
-    hours = _as_hour_series(df)
-    df["social_score"] = 0.5
-
-    if hours is None or social_df is None or social_df.empty:
-        return df
-
-    s = social_df.get("social_score")
-    if s is None or s.empty:
-        return df
-
-    # Build the exact hours we need, reindex social, and map row-wise.
-    need_idx = pd.to_datetime(pd.Series(hours), utc=True, errors="coerce")
-    uniq_hours = sorted(need_idx.dropna().unique())
-    if len(uniq_hours) == 0:
-        return df
-
-    s_re = s.astype(float).reindex(uniq_hours).fillna(0.5)
-    mapper = dict(zip(uniq_hours, s_re.values.tolist()))
-    df["social_score"] = [float(mapper.get(h, 0.5)) for h in hours]
-
-    return df
-
-
-# ----------------------------
-# Price-derived features
-# ----------------------------
-def _features_for_symbol(df: pd.DataFrame, sym: str, social_df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    # basic returns
-    df["ret_1h"] = df["close"].pct_change(1)
-    df["r_1h"] = df["ret_1h"]
-    df["r_3h"] = df["close"].pct_change(3)
-    df["r_6h"] = df["close"].pct_change(6)
-
-    # volatility
-    df["vol_6h"] = df["ret_1h"].rolling(6).std()
-
-    # ATR approx over 14h (true range on OHLC)
-    tr = (df["high"] - df["low"]).abs()
-    tr_prev_close = (df["high"] - df["close"].shift(1)).abs().combine(
-        (df["low"] - df["close"].shift(1)).abs(), max
-    )
-    df["atr_14h"] = pd.concat([tr, tr_prev_close], axis=1).max(axis=1).rolling(14).mean()
-
-    # momentum
-    df["sma_6h"] = df["close"].rolling(6).mean()
-    df["sma_24h"] = df["close"].rolling(24).mean()
-    df["sma_gap"] = df["sma_6h"] / df["sma_24h"] - 1.0
-
-    # regime flag
-    thresh = df["vol_6h"].quantile(0.75)
-    df["high_vol"] = (df["vol_6h"] > thresh).astype(int)
-
-    # social (neutral by default; overwrite if gate enabled & logs exist)
-    df = _attach_social_score(df, social_df)
-
-    # clean
-    df = df.dropna().reset_index(drop=True)
-    return df
-
-
-def _write_feature_manifest(frames: Dict[str, pd.DataFrame], out_path: Path = Path("models/ml_model_manifest.json")) -> None:
-    """
-    Non-destructively update the model manifest with the union of feature columns
-    actually produced by the builder (for CI verification).
-    """
-    feats: List[str] = sorted(set().union(*[set(df.columns.tolist()) for df in frames.values() if not df.empty]))
-    try:
-        if out_path.exists():
-            j = json.loads(out_path.read_text(encoding="utf-8"))
-        else:
-            j = {}
-        j["features"] = feats
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(j, indent=2), encoding="utf-8")
-    except Exception:
-        # best-effort only; don't break training
-        pass
-
-
-def build_features(df_prices: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
-    """
-    Build per-symbol feature frames.
-
-    Price-only by default.
-    If MW_SOCIAL_ENABLED=1 and social logs exist, attach aligned hourly social_score
-    from the canonical lagged social series.
-
-    Per-coin inclusion:
-      - MW_SOCIAL_INCLUDE unset  -> include social for ALL symbols (subject to MW_SOCIAL_ENABLED)
-      - MW_SOCIAL_INCLUDE=''     -> include for NONE (force neutral 0.5 everywhere)
-      - MW_SOCIAL_INCLUDE='BTC,SOL' -> include ONLY for BTC and SOL (ETH gets neutral 0.5)
-
-    Returns: dict[symbol] -> DataFrame
-    """
-    # Global toggle and allow-list
-    social_enabled = _env_bool("MW_SOCIAL_ENABLED", False)
-    include_set = _parse_include_set("MW_SOCIAL_INCLUDE")  # None = include all; set() = include none
-
-    # Load shared social time-series once
-    social_df_all = _load_social_hourly(Path(".")) if social_enabled else pd.DataFrame()
-
+    root = Path(".").resolve()
     out: Dict[str, pd.DataFrame] = {}
-    for sym, df in df_prices.items():
-        sym_u = str(sym).upper()
 
-        # Determine if this symbol should receive social
-        # - include_set is None => allow all
-        # - include_set is a set => allow only if sym_u in set
-        use_social = social_enabled and (include_set is None or sym_u in include_set)
+    # Precompute social series once
+    social_score_df = _social_score_series(root)
+    social_burst_df = _social_burst_series(
+        root,
+        z_thresh=float(os.getenv("BURST_Z", "2.0")),
+        smooth_h=int(os.getenv("MW_SOC_SMOOTH", "3") or "3")
+    )
 
-        # Select which social df to pass (empty => _attach_social_score yields neutral 0.5)
-        social_df_for_sym = social_df_all if use_social else pd.DataFrame()
+    burst_short = int(os.getenv("BURST_SHORT_H", "6"))
+    burst_long  = int(os.getenv("BURST_LONG_H", "48"))
 
-        out[sym_u] = _features_for_symbol(df, sym_u, social_df_for_sym)
+    for sym, df in prices_map.items():
+        df = df.copy()
+        # ensure ts indexed and hourly
+        if "ts" in df.columns:
+            df["ts"] = pd.to_datetime(df["ts"], utc=True)
+            df = df.sort_values("ts").set_index("ts")
+        else:
+            # assume index is already time-like
+            df = df.sort_index()
+            if not isinstance(df.index, pd.DatetimeIndex):
+                raise ValueError("prices_map DataFrame must have 'ts' column or DatetimeIndex")
 
-    # Write features list for CI verification (non-blocking)
-    _write_feature_manifest(out)
+        # Core returns
+        df["r_1h"] = _returns(df, "close")
+        df["r_3h"] = df["close"].pct_change(3).fillna(0.0)
+        df["r_6h"] = df["close"].pct_change(6).fillna(0.0)
+
+        # Volatility & ATR
+        df["vol_6h"] = _vol(df, "r_1h", 6)
+        df["atr_14h"] = _atr(df, 14)
+
+        # SMA gap (normalized)
+        df["sma_gap"] = _sma_gap(df, "close", 24)
+
+        # High-vol flag (top decile of vol_6h)
+        try:
+            q90 = float(df["vol_6h"].quantile(0.90))
+            df["high_vol"] = (df["vol_6h"] >= q90).astype(float)
+        except Exception:
+            df["high_vol"] = 0.0
+
+        # Join social_score + social_burst (outer left join on index)
+        F = df.copy()
+        if not social_score_df.empty:
+            F = F.join(social_score_df, how="left")
+        if not social_burst_df.empty:
+            F = F.join(social_burst_df, how="left")
+        F["social_score"] = F.get("social_score", 0.0).fillna(0.0)
+        F["social_burst"] = F.get("social_burst", 0.0).fillna(0.0)
+
+        # Price burst
+        try:
+            F["price_burst"] = _price_burst(F, "r_1h", burst_short, burst_long, float(os.getenv("BURST_Z","2.0")))
+        except Exception:
+            F["price_burst"] = 0.0
+
+        # Safety: ensure all expected features present
+        expected = [
+            "r_1h","r_3h","r_6h",
+            "vol_6h","atr_14h","sma_gap","high_vol",
+            "social_score","price_burst","social_burst",
+        ]
+        for c in expected:
+            if c not in F.columns:
+                F[c] = 0.0
+
+        # keep as regular column 'ts'
+        F = F.reset_index().rename(columns={"index":"ts"})
+        out[sym] = F
 
     return out
