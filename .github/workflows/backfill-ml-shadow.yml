@@ -48,27 +48,21 @@ jobs:
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
 
-      - name: Assert local bundle exists (models/current)
-        run: |
-          if [ ! -f models/current/model.joblib ]; then
-            echo "models/current/model.joblib missing"; exit 1
-          fi
-          if [ ! -f models/current/manifest.json ]; then
-            echo "models/current/manifest.json missing"; exit 1
-          fi
-          ls -lah models/current
-
-      - name: Run backfill
-        run: python -m scripts.perf.backfill_ml_shadow
-
-      - name: Show shadow tail
-        run: |
-          echo "=== tail logs/signal_inference_shadow.jsonl ==="
-          tail -n 20 logs/signal_inference_shadow.jsonl || true
-
-      - name: Upload shadow log
-        uses: actions/upload-artifact@v4
+      # ⬇️ Pull the latest successful CI bundle
+      - name: Download bundle from latest successful CI
+        uses: dawidd6/action-download-artifact@v3
         with:
-          name: ml-shadow-backfill
-          path: logs/signal_inference_shadow.jsonl
-          if-no-files-found: error
+          # IMPORTANT: use the *file path* of your CI workflow here
+          workflow: .github/workflows/ci-tests.yml
+          workflow_conclusion: success
+          name: inference-bundle-current
+          path: _dl_bundle
+
+      - name: Install downloaded bundle
+        run: |
+          mkdir -p models/current
+          cp -v _dl_bundle/* models/current/ || true
+          echo "Bundle contents:"
+          ls -lah models/current || true
+
+      - name: Assert local
