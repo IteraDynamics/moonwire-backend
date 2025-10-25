@@ -54,12 +54,13 @@ jobs:
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
           python -m pip install matplotlib
 
-      # ---------- Ensure we have an inference bundle (reuse if present) ----------
+      # ---------- Ensure we have an inference bundle (per-symbol aware) ----------
       - name: Ensure inference bundle (reuse or build)
         env:
           MW_ML_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
           MW_ML_LOOKBACK_DAYS: "180"
           MW_ML_MODEL: "gb"
+          MW_PER_SYMBOL_MODELS: "1"
           MW_HORIZON_H: "1"
           MW_SOCIAL_ENABLED: "1"
           MW_SOCIAL_INCLUDE: ""
@@ -67,19 +68,22 @@ jobs:
           MW_BRANCH: ${{ github.ref_name }}
           MW_PROTECTED_PATTERN: "^main$"
         run: |
-          set -e
-          echo "Checking models/current…"
-          if [ -f models/current/model.joblib ] && [ -f models/current/manifest.json ] && [ -f models/current/features.json ]; then
-            echo "✅ Found existing bundle:"
-            ls -lah models/current
-          else
-            echo "ℹ️ No bundle found — building a minimal one via train_predict…"
+          set -euo pipefail
+          echo "Checking for per-symbol bundles..."
+          found_any=""
+          shopt -s globstar || true
+          for f in models/current/**/model.joblib models/current/model.joblib; do
+            if [ -f "$f" ]; then found_any="yes"; break; fi
+          done
+          if [ -z "$found_any" ]; then
+            echo "No model bundles found — training locally..."
             python -m scripts.ml.train_predict
-            echo "Bundle after build:"
-            ls -lah models/current || true
+          else
+            echo "✅ Found existing model bundles under models/current/"
+            find models/current -maxdepth 2 -type f -name "model.joblib" || true
           fi
 
-      # ---------- Write ML shadow rows (uses the bundle) ----------
+      # ---------- Generate ML shadow rows ----------
       - name: Generate ML shadow rows (probe with model)
         env:
           MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
@@ -94,63 +98,41 @@ jobs:
           log = Path("logs/signal_inference_shadow.jsonl")
           log.parent.mkdir(parents=True, exist_ok=True)
           syms = [s.strip().upper() for s in os.getenv("MW_SHADOW_SYMBOLS","BTC,ETH,SOL").split(",") if s.strip()]
-
           wrote = 0
           for s in syms:
-            try:
-              out = infer_asset_signal(s)  # uses models/current/**
-              rec = {
-                "symbol": s,
-                "reason": "paper-shadow",
-                "ml_ok": True,
-                "ml_dir": out.get("direction"),
-                "ml_conf": float(out.get("confidence", 0.0) or 0.0),
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "gov": load_governance_params(s),
-              }
-            except Exception as e:
-              rec = {
-                "symbol": s,
-                "reason": f"ml_exception:{type(e).__name__}",
-                "ml_ok": False, "ml_dir": None, "ml_conf": None,
-                "ts": datetime.now(timezone.utc).isoformat(),
-              }
-            with log.open("a", encoding="utf-8") as f:
-              f.write(json.dumps(rec) + "\n")
-            wrote += 1
-
+              try:
+                  out = infer_asset_signal(s)
+                  rec = {
+                      "symbol": s,
+                      "reason": "paper-shadow",
+                      "ml_ok": True,
+                      "ml_dir": out.get("direction"),
+                      "ml_conf": float(out.get("confidence", 0.0) or 0.0),
+                      "ts": datetime.now(timezone.utc).isoformat(),
+                      "gov": load_governance_params(s),
+                  }
+              except Exception as e:
+                  rec = {
+                      "symbol": s,
+                      "reason": f"ml_exception:{type(e).__name__}",
+                      "ml_ok": False, "ml_dir": None, "ml_conf": None,
+                      "ts": datetime.now(timezone.utc).isoformat(),
+                  }
+              with log.open("a", encoding="utf-8") as f:
+                  f.write(json.dumps(rec) + "\n")
+              wrote += 1
           print(f"[shadow] wrote {wrote} ML shadow row(s) → {log}")
-          print("Tail:")
-          try:
-            print("\n".join(log.read_text(encoding='utf-8').splitlines()[-5:]))
-          except Exception:
-            pass
           PY
 
-      # ---------- (Optional) convert existing signals → shadow (no-op if none) ----------
-      - name: Build shadow from real signal history (optional)
-        env:
-          MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
-          MW_SHADOW_LOOKBACK_H: ${{ github.event.inputs.lookback_h || '72' }}
-        run: |
-          if [ -s logs/signal_history.jsonl ] || [ -s logs/signals.jsonl ]; then
-            echo "Converting existing signal history → shadow rows…"
-            python -m scripts.perf.convert_signals_to_shadow || true
-          else
-            echo "No signal history found; skipping convert_signals_to_shadow."
-          fi
-
-      # ---------- Pull the BACKFILL shadow log artifact into logs/incoming ----------
+      # ---------- Pull the backfilled shadow log artifact ----------
       - name: Download backfilled shadow log (latest success)
         if: ${{ inputs.backfill_run_id == '' }}
         uses: dawidd6/action-download-artifact@v3
         with:
           repository: ${{ github.repository }}
-          # IMPORTANT: use the workflow file name *without* .yml or use the exact file name — this form is widely compatible
           workflow: backfill-ml-shadow
-          branch: main
           workflow_conclusion: success
-          name: shadow-log
+          name: ml-shadow-backfill          # ✅ correct artifact name
           path: logs/incoming
           allow_forks: true
           if_no_artifact_found: warn
@@ -161,11 +143,11 @@ jobs:
         with:
           run_id: ${{ inputs.backfill_run_id }}
           repo: ${{ github.repository }}
-          name: shadow-log
+          name: ml-shadow-backfill
           path: logs/incoming
           if_no_artifact_found: warn
 
-      # ---------- Merge any downloaded shadows into the canonical file ----------
+      # ---------- Merge downloaded shadows into canonical log ----------
       - name: Merge downloaded shadow artifacts
         run: |
           python - <<'PY'
@@ -174,81 +156,16 @@ jobs:
           incoming = root / "incoming"
           out = root / "signal_inference_shadow.jsonl"
           out.parent.mkdir(parents=True, exist_ok=True)
-
-          found = list(incoming.rglob("signal_inference_shadow*.jsonl")) if incoming.exists() else []
+          found = list(incoming.rglob("*.jsonl")) if incoming.exists() else []
           merged = 0
           if found:
-            with out.open("a", encoding="utf-8") as w:
-              for p in found:
-                try:
-                  txt = p.read_text(encoding="utf-8")
-                  if txt.strip():
-                    w.write(txt if txt.endswith("\n") else txt + "\n")
-                    merged += 1
-                except Exception:
-                  pass
-          print(f"[merge] merged {merged} file(s) into {out}")
-          PY
-
-      - name: Show shadow file status (recursive)
-        run: |
-          echo "Contents of ./logs (recursive):"
-          ls -lahR logs || true
-          echo "---- head ----"
-          head -n 5 logs/signal_inference_shadow.jsonl || true
-          echo "---- tail ----"
-          tail -n 10 logs/signal_inference_shadow.jsonl || true
-          echo "---- line count ----"
-          wc -l logs/signal_inference_shadow.jsonl || true
-
-      - name: Preflight – eligible shadow rows in window
-        env:
-          LOOKBACK_H: ${{ env.MW_PERF_LOOKBACK_H || '720' }}
-        run: |
-          python - <<'PY'
-          import os, json, sys
-          from pathlib import Path
-          from datetime import datetime, timezone, timedelta
-
-          p = Path("logs/signal_inference_shadow.jsonl")
-          if not p.exists():
-              print("no shadow log present"); sys.exit(0)
-
-          def parse_ts(s):
-              try:
-                  s = s[:-1] + "+00:00" if s.endswith("Z") else s
-                  return datetime.fromisoformat(s).astimezone(timezone.utc)
-              except Exception:
-                  return None
-
-          now = datetime.now(timezone.utc)
-          window_h = int(os.getenv("LOOKBACK_H","720"))
-          t0 = now - timedelta(hours=window_h)
-
-          total = in_window = ok = gated = 0
-          gated_reason = {}
-          for ln in p.read_text(encoding="utf-8").splitlines():
-              total += 1
-              try:
-                  j = json.loads(ln)
-              except Exception:
-                  continue
-              ts = parse_ts(str(j.get("ts","")))
-              if not ts or ts < t0 or ts > now:
-                  continue
-              in_window += 1
-              if not j.get("ml_ok", False):
-                  gated += 1; gated_reason["ml_not_ok"] = gated_reason.get("ml_not_ok",0)+1; continue
-              conf = j.get("ml_conf", 0.0) or 0.0
-              gov  = j.get("gov") or {}
-              conf_min = float(gov.get("conf_min", 0.6))
-              if conf < conf_min:
-                  gated += 1; gated_reason["below_conf_min"] = gated_reason.get("below_conf_min",0)+1; continue
-              ok += 1
-
-          print(f"[preflight] rows total={total}  within_window={in_window}  eligible={ok}  gated={gated}")
-          if gated_reason:
-              print("[preflight] gated_reasons:", gated_reason)
+              with out.open("a", encoding="utf-8") as w:
+                  for p in found:
+                      txt = p.read_text(encoding="utf-8").strip()
+                      if txt:
+                          w.write(txt + "\n")
+                          merged += 1
+          print(f"[merge] merged {merged} backfill shadow file(s) into {out}")
           PY
 
       # ---------- Replay shadow → paper trading ----------
@@ -260,31 +177,7 @@ jobs:
           echo "Performance summary:"
           test -f models/performance_metrics.json && cat models/performance_metrics.json || echo "no performance_metrics.json"
 
-      # ---------- Summary ----------
-      - name: Write summary
-        run: |
-          echo "### 🕵️ Paper from Shadow" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Symbols:** \`${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Shadow tail:**" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
-          tail -n 5 logs/signal_inference_shadow.jsonl >> "$GITHUB_STEP_SUMMARY" || true
-          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Paper trades tail:**" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
-          tail -n 5 logs/paper_trades.jsonl >> "$GITHUB_STEP_SUMMARY" || true
-          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f models/performance_metrics.json ]; then
-            echo "**Performance metrics:**" >> "$GITHUB_STEP_SUMMARY"
-            echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
-            cat models/performance_metrics.json >> "$GITHUB_STEP_SUMMARY"
-            echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      # ---------- Artifacts ----------
+      # ---------- Upload artifacts ----------
       - name: Upload paper artifacts
         uses: actions/upload-artifact@v4
         with:
