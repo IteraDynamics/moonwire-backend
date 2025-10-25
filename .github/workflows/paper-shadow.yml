@@ -49,7 +49,6 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
-          # plotting for paper_trader
           python -m pip install matplotlib
 
       # ---------- Ensure we have an inference bundle (reuse if present) ----------
@@ -103,9 +102,7 @@ jobs:
                 "ml_ok": True,
                 "ml_dir": out.get("direction"),
                 "ml_conf": float(out.get("confidence", 0.0) or 0.0),
-                # ✅ critical for replay:
                 "ts": datetime.now(timezone.utc).isoformat(),
-                # optional but helpful:
                 "gov": load_governance_params(s),
               }
             except Exception as e:
@@ -126,8 +123,6 @@ jobs:
           except Exception:
             pass
           PY
-          
-
 
       # ---------- (Optional) convert existing signals → shadow (no-op if none) ----------
       - name: Build shadow from real signal history (optional)
@@ -141,24 +136,22 @@ jobs:
           else
             echo "No signal history found; skipping convert_signals_to_shadow."
           fi
-          echo "Shadow tail (local after convert):"
-          tail -n 10 logs/signal_inference_shadow.jsonl || true
 
-      # ---------- Pull the BACKFILL shadow log artifact ----------
-      # Latest successful backfill (default)
+      # ---------- Pull the BACKFILL shadow log artifact into logs/incoming ----------
       - name: Download backfilled shadow log (latest success)
         if: ${{ inputs.backfill_run_id == '' }}
         uses: dawidd6/action-download-artifact@v3
         with:
           repository: ${{ github.repository }}
-          workflow: backfill-ml-shadow.yml
+          # IMPORTANT: use the workflow file name *without* .yml or use the exact file name — this form is widely compatible
+          workflow: backfill-ml-shadow
+          branch: main
           workflow_conclusion: success
           name: shadow-log
-          path: logs
+          path: logs/incoming
           allow_forks: true
           if_no_artifact_found: warn
 
-      # Specific backfill run id (optional override)
       - name: Download backfilled shadow log by run id (optional)
         if: ${{ inputs.backfill_run_id != '' }}
         uses: dawidd6/action-download-artifact@v3
@@ -166,22 +159,51 @@ jobs:
           run_id: ${{ inputs.backfill_run_id }}
           repo: ${{ github.repository }}
           name: shadow-log
-          path: logs
+          path: logs/incoming
           if_no_artifact_found: warn
 
-      - name: Show shadow file status
+      # ---------- Merge any downloaded shadows into the canonical file ----------
+      - name: Merge downloaded shadow artifacts
         run: |
-          echo "Contents of ./logs:"
-          ls -lah logs || true
-          echo "---- tail (shadow after download) ----"
+          python - <<'PY'
+          import pathlib
+          root = pathlib.Path("logs")
+          incoming = root / "incoming"
+          out = root / "signal_inference_shadow.jsonl"
+          out.parent.mkdir(parents=True, exist_ok=True)
+
+          found = list(incoming.rglob("signal_inference_shadow*.jsonl")) if incoming.exists() else []
+          merged = 0
+          if found:
+            with out.open("a", encoding="utf-8") as w:
+              for p in found:
+                try:
+                  txt = p.read_text(encoding="utf-8")
+                  if txt.strip():
+                    w.write(txt if txt.endswith("\n") else txt + "\n")
+                    merged += 1
+                except Exception:
+                  pass
+          print(f"[merge] merged {merged} file(s) into {out}")
+          PY
+
+      - name: Show shadow file status (recursive)
+        run: |
+          echo "Contents of ./logs (recursive):"
+          ls -lahR logs || true
+          echo "---- head ----"
+          head -n 5 logs/signal_inference_shadow.jsonl || true
+          echo "---- tail ----"
           tail -n 10 logs/signal_inference_shadow.jsonl || true
+          echo "---- line count ----"
+          wc -l logs/signal_inference_shadow.jsonl || true
 
       - name: Preflight – eligible shadow rows in window
         env:
           LOOKBACK_H: ${{ env.MW_PERF_LOOKBACK_H || '720' }}
         run: |
           python - <<'PY'
-          import os, json, time, sys
+          import os, json, sys
           from pathlib import Path
           from datetime import datetime, timezone, timedelta
 
@@ -202,8 +224,7 @@ jobs:
 
           total = in_window = ok = gated = 0
           gated_reason = {}
-          lines = p.read_text(encoding="utf-8").splitlines()
-          for ln in lines:
+          for ln in p.read_text(encoding="utf-8").splitlines():
               total += 1
               try:
                   j = json.loads(ln)
@@ -225,11 +246,7 @@ jobs:
           print(f"[preflight] rows total={total}  within_window={in_window}  eligible={ok}  gated={gated}")
           if gated_reason:
               print("[preflight] gated_reasons:", gated_reason)
-          # show last few for eyeballing
-          print("--- shadow tail ---")
-          print("\n".join(lines[-5:]))
           PY
-
 
       # ---------- Replay shadow → paper trading ----------
       - name: Replay shadow → paper trading
