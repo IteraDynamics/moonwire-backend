@@ -114,6 +114,13 @@ def replay() -> Dict[str, Any]:
         for r in selected:
             f.write(json.dumps(r) + "\n")
 
+
+# discard weak/indecisive signals
+    deadband = float(os.getenv("MW_PERF_DEADBAND", "0.05"))  # ±5%
+    if abs(ml_conf - 0.5) < deadband:
+        continue
+
+
     # 3) run the paper trader over these signals
     ctx = PTX()
     # respect env overrides already set by workflow (symbols, horizon, fees, etc.)
