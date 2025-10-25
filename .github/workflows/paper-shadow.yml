@@ -29,7 +29,7 @@ jobs:
       # Paper trader knobs
       MW_PERF_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
       MW_PERF_LOOKBACK_H: "720"
-      MW_PERF_HORIZON_MIN: "240"
+      MW_PERF_HORIZON_MIN: "360"
       MW_PERF_SLIPPAGE_BPS: "2"
       MW_PERF_FEES_BPS: "1"
       MW_PERF_CAPITAL: "100000"
