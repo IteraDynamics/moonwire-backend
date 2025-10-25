@@ -34,6 +34,7 @@ jobs:
       MW_PERF_FEES_BPS: "1"
       MW_PERF_CAPITAL: "100000"
       MW_PERF_FORCE_DEMO: "false"
+      MW_PERF_DEADBAND: "0.06"
 
     steps:
       - name: Checkout
