@@ -197,7 +197,7 @@ jobs:
 
           # Optional: specify different learners per coin
           #   BTC → Gradient Boost, ETH → Logistic Regression, SOL → fallback to MW_ML_MODEL (hybrid)
-          echo "MW_MODEL_MAP=BTC:gb,ETH:logreg,DEFAULT:hybrid" >> "$GITHUB_ENV"
+          echo "MW_MODEL_MAP=BTC:rf,ETH:gb,DEFAULT:hybrid" >> "$GITHUB_ENV"
 
           # === Burst detection knobs ===
           echo "BURST_Z=2.0" >> "$GITHUB_ENV"
