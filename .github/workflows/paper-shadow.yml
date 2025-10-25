@@ -4,7 +4,6 @@ permissions:
   contents: read
   actions: read
 
-
 on:
   workflow_dispatch:
     inputs:
@@ -16,6 +15,10 @@ on:
         description: "Lookback hours for converting signals → shadow (optional)"
         required: false
         default: "72"
+      backfill_run_id:
+        description: "Specific run id of backfill-ml-shadow to pull (optional)"
+        required: false
+        default: ""
 
 jobs:
   paper:
@@ -126,16 +129,40 @@ jobs:
           else
             echo "No signal history found; skipping convert_signals_to_shadow."
           fi
-          echo "Shadow tail:"
+          echo "Shadow tail (local after convert):"
           tail -n 10 logs/signal_inference_shadow.jsonl || true
 
-      - name: Download latest shadow log
+      # ---------- Pull the BACKFILL shadow log artifact ----------
+      # Latest successful backfill (default)
+      - name: Download backfilled shadow log (latest success)
+        if: ${{ inputs.backfill_run_id == '' }}
         uses: dawidd6/action-download-artifact@v3
         with:
+          repository: ${{ github.repository }}
+          workflow: backfill-ml-shadow.yml
+          workflow_conclusion: success
+          name: shadow-log
+          path: logs
+          allow_forks: true
+          if_no_artifact_found: warn
+
+      # Specific backfill run id (optional override)
+      - name: Download backfilled shadow log by run id (optional)
+        if: ${{ inputs.backfill_run_id != '' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          run_id: ${{ inputs.backfill_run_id }}
+          repo: ${{ github.repository }}
           name: shadow-log
           path: logs
           if_no_artifact_found: warn
 
+      - name: Show shadow file status
+        run: |
+          echo "Contents of ./logs:"
+          ls -lah logs || true
+          echo "---- tail (shadow after download) ----"
+          tail -n 10 logs/signal_inference_shadow.jsonl || true
 
       # ---------- Replay shadow → paper trading ----------
       - name: Replay shadow → paper trading
