@@ -1,5 +1,5 @@
 {
-  "BTC": { "conf_min": 0.62, "debounce_min": 45 },
-  "ETH": { "conf_min": 0.60, "debounce_min": 30 },
-  "SOL": { "conf_min": 0.72, "debounce_min": 90 }
+  "BTC": {"conf_min": 0.62, "debounce_min": 15},
+  "ETH": {"conf_min": 0.70, "debounce_min": 30},
+  "SOL": {"conf_min": 0.58, "debounce_min": 15}
 }
