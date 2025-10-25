@@ -12,15 +12,11 @@ on:
         required: false
         default: "180"
       include_all:
-        description: "Write all rows (ignore conf_min gating)?"
+        description: "Ignore conf_min gating?"
         required: false
         default: "true"
       conf_min_override:
-        description: "Override conf_min for gating (blank = use governance)"
-        required: false
-        default: ""
-      ci_run_id:
-        description: "(Optional) CI run_id to fetch inference bundle from; leave empty to use latest successful"
+        description: "Override conf_min (blank = governance)"
         required: false
         default: ""
 
@@ -33,7 +29,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
-      MW_BUNDLE_DIR: models/current
       MW_BACKFILL_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
       MW_BACKFILL_DAYS: ${{ github.event.inputs.days || '180' }}
       MW_BACKFILL_INCLUDE_ALL: ${{ github.event.inputs.include_all || 'true' }}
@@ -42,7 +37,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -53,50 +48,14 @@ jobs:
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
 
-      - name: Detect local bundle
-        id: have_bundle
+      - name: Assert local bundle exists (models/current)
         run: |
-          if [ -f models/current/model.joblib ] && [ -f models/current/manifest.json ]; then
-            echo "found=true" >> $GITHUB_OUTPUT
-          else
-            echo "found=false" >> $GITHUB_OUTPUT
+          if [ ! -f models/current/model.joblib ]; then
+            echo "models/current/model.joblib missing"; exit 1
           fi
-
-      # If no local bundle AND no explicit run_id, pull latest successful artifact from the CI workflow file path.
-      - name: Download bundle from latest successful CI (by file path)
-        if: steps.have_bundle.outputs.found == 'false' && (github.event.inputs.ci_run_id == '' || github.event.inputs.ci_run_id == null)
-        uses: dawidd6/action-download-artifact@v3
-        with:
-          # IMPORTANT: set this to your CI workflow FILE NAME or PATH
-          # Replace if yours isn’t exactly this:
-          workflow: .github/workflows/ci-tests.yml
-          name: inference-bundle-current
-          path: _dl_bundle
-          workflow_conclusion: success
-          # Optionally pin branch:
-          # branch: main
-
-      # If a run_id is provided, fetch from that specific run.
-      - name: Download bundle for specific run_id
-        if: steps.have_bundle.outputs.found == 'false' && github.event.inputs.ci_run_id != ''
-        uses: dawidd6/action-download-artifact@v3
-        with:
-          run_id: ${{ github.event.inputs.ci_run_id }}
-          name: inference-bundle-current
-          path: _dl_bundle
-
-      - name: Install downloaded bundle into models/current
-        if: steps.have_bundle.outputs.found == 'false'
-        run: |
-          mkdir -p models/current
-          shopt -s nullglob
-          for f in _dl_bundle/*; do cp "$f" "models/current/$(basename "$f")"; done
-          echo "models/current contents:"; ls -lah models/current || true
-
-      - name: Sanity: bundle state
-        run: |
-          test -f models/current/model.joblib || (echo "ERROR: model.joblib missing" && exit 1)
-          test -f models/current/manifest.json || (echo "ERROR: manifest.json missing" && exit 1)
+          if [ ! -f models/current/manifest.json ]; then
+            echo "models/current/manifest.json missing"; exit 1
+          fi
           ls -lah models/current
 
       - name: Run backfill
@@ -113,17 +72,3 @@ jobs:
           name: ml-shadow-backfill
           path: logs/signal_inference_shadow.jsonl
           if-no-files-found: error
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "### 🧰 Backfill ML Shadow" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Symbols: \`${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Days: \`${{ github.event.inputs.days || '180' }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Include all: \`${{ github.event.inputs.include_all || 'true' }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Conf override: \`${{ github.event.inputs.conf_min_override || '' }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Shadow tail:**" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
-          (tail -n 10 logs/signal_inference_shadow.jsonl || true) >> "$GITHUB_STEP_SUMMARY"
-          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
