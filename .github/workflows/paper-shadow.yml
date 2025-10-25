@@ -176,6 +176,61 @@ jobs:
           echo "---- tail (shadow after download) ----"
           tail -n 10 logs/signal_inference_shadow.jsonl || true
 
+      - name: Preflight – eligible shadow rows in window
+        env:
+          LOOKBACK_H: ${{ env.MW_PERF_LOOKBACK_H || '720' }}
+        run: |
+          python - <<'PY'
+          import os, json, time, sys
+          from pathlib import Path
+          from datetime import datetime, timezone, timedelta
+
+          p = Path("logs/signal_inference_shadow.jsonl")
+          if not p.exists():
+              print("no shadow log present"); sys.exit(0)
+
+          def parse_ts(s):
+              try:
+                  s = s[:-1] + "+00:00" if s.endswith("Z") else s
+                  return datetime.fromisoformat(s).astimezone(timezone.utc)
+              except Exception:
+                  return None
+
+          now = datetime.now(timezone.utc)
+          window_h = int(os.getenv("LOOKBACK_H","720"))
+          t0 = now - timedelta(hours=window_h)
+
+          total = in_window = ok = gated = 0
+          gated_reason = {}
+          lines = p.read_text(encoding="utf-8").splitlines()
+          for ln in lines:
+              total += 1
+              try:
+                  j = json.loads(ln)
+              except Exception:
+                  continue
+              ts = parse_ts(str(j.get("ts","")))
+              if not ts or ts < t0 or ts > now:
+                  continue
+              in_window += 1
+              if not j.get("ml_ok", False):
+                  gated += 1; gated_reason["ml_not_ok"] = gated_reason.get("ml_not_ok",0)+1; continue
+              conf = j.get("ml_conf", 0.0) or 0.0
+              gov  = j.get("gov") or {}
+              conf_min = float(gov.get("conf_min", 0.6))
+              if conf < conf_min:
+                  gated += 1; gated_reason["below_conf_min"] = gated_reason.get("below_conf_min",0)+1; continue
+              ok += 1
+
+          print(f"[preflight] rows total={total}  within_window={in_window}  eligible={ok}  gated={gated}")
+          if gated_reason:
+              print("[preflight] gated_reasons:", gated_reason)
+          # show last few for eyeballing
+          print("--- shadow tail ---")
+          print("\n".join(lines[-5:]))
+          PY
+
+
       # ---------- Replay shadow → paper trading ----------
       - name: Replay shadow → paper trading
         run: |
