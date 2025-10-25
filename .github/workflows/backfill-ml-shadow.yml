@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       symbols:
-        description: "Comma-separated symbols"
+        description: "Comma-separated symbols to backfill"
         required: false
         default: "BTC,ETH,SOL"
       days:
@@ -12,11 +12,11 @@ on:
         required: false
         default: "180"
       include_all:
-        description: "Ignore conf_min gating?"
+        description: "Ignore governance conf_min gating? (true/false)"
         required: false
         default: "true"
       conf_min_override:
-        description: "Override conf_min (blank = governance)"
+        description: "Override conf_min (blank = use governance)"
         required: false
         default: ""
 
@@ -29,10 +29,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
-      MW_BACKFILL_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
-      MW_BACKFILL_DAYS: ${{ github.event.inputs.days || '180' }}
-      MW_BACKFILL_INCLUDE_ALL: ${{ github.event.inputs.include_all || 'true' }}
-      MW_BACKFILL_CONF_MIN_OVERRIDE: ${{ github.event.inputs.conf_min_override }}
+      MW_BACKFILL_SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
+      MW_BACKFILL_DAYS: ${{ inputs.days || '180' }}
+      MW_BACKFILL_INCLUDE_ALL: ${{ inputs.include_all || 'true' }}
+      MW_BACKFILL_CONF_MIN_OVERRIDE: ${{ inputs.conf_min_override }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,27 +43,44 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
 
-      # ⬇️ Pull the latest successful CI bundle
-      - name: Download bundle from latest successful CI
+      # Download the latest successful CI bundle artifact (produced by ci-tests.yml)
+      - name: Download inference bundle from CI
         uses: dawidd6/action-download-artifact@v3
         with:
-          # IMPORTANT: use the *file path* of your CI workflow here
-          workflow: .github/workflows/ci-tests.yml
+          workflow: .github/workflows/ci-tests.yml   # path to your CI workflow file
           workflow_conclusion: success
-          name: inference-bundle-current
+          name: inference-bundle-current             # must match the upload name in CI
           path: _dl_bundle
 
-      - name: Install downloaded bundle
+      - name: Install bundle into models/current
         run: |
           mkdir -p models/current
           cp -v _dl_bundle/* models/current/ || true
           echo "Bundle contents:"
           ls -lah models/current || true
 
-      - name: Assert local
+      - name: Assert bundle exists
+        run: |
+          test -f models/current/model.joblib || (echo "models/current/model.joblib missing" && exit 1)
+          test -f models/current/manifest.json || (echo "models/current/manifest.json missing" && exit 1)
+
+      - name: Run ML shadow backfill
+        run: python -m scripts.perf.backfill_ml_shadow
+
+      - name: Shadow tail (debug)
+        run: |
+          echo "=== tail logs/signal_inference_shadow.jsonl ==="
+          tail -n 50 logs/signal_inference_shadow.jsonl || true
+
+      - name: Upload shadow log
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-shadow-backfill
+          path: logs/signal_inference_shadow.jsonl
+          if-no-files-found: error
