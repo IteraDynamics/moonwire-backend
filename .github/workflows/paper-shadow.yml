@@ -82,10 +82,6 @@ jobs:
         env:
           MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
         run: |
-                - name: Generate ML shadow rows (probe with model)
-        env:
-          MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
-        run: |
           python - <<'PY'
           import os, json
           from pathlib import Path
