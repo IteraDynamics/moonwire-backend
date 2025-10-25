@@ -1,0 +1,76 @@
+name: Backfill ML Shadow
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated symbols"
+        required: false
+        default: "BTC,ETH,SOL"
+      days:
+        description: "Lookback days"
+        required: false
+        default: "180"
+      include_all:
+        description: "Write all rows (ignore conf_min gating)?"
+        required: false
+        default: "true"
+      conf_min_override:
+        description: "Override conf_min for gating (blank = use governance)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      MPLBACKEND: Agg
+      MW_BUNDLE_DIR: models/current
+      MW_BACKFILL_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
+      MW_BACKFILL_DAYS: ${{ github.event.inputs.days || '180' }}
+      MW_BACKFILL_INCLUDE_ALL: ${{ github.event.inputs.include_all || 'true' }}
+      MW_BACKFILL_CONF_MIN_OVERRIDE: ${{ github.event.inputs.conf_min_override }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+
+      - name: Sanity: show inference bundle
+        run: |
+          ls -lah models/current || true
+          python - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("models/current")
+          man = p/"manifest.json"; feats = p/"features.json"; mdl = p/"model.joblib"
+          print("exists:", p.exists(), "files:", [x.name for x in p.iterdir()] if p.exists() else [])
+          if man.exists(): print("manifest head:", man.read_text()[:300])
+          print("features present:", feats.exists(), "model present:", mdl.exists())
+          PY
+
+      - name: Backfill ML shadow over history
+        run: python -m scripts.perf.backfill_ml_shadow
+
+      - name: Show shadow tail
+        run: tail -n 20 logs/signal_inference_shadow.jsonl || true
+
+      - name: Upload shadow log
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-shadow-backfill
+          path: logs/signal_inference_shadow.jsonl
+          if-no-files-found: error
