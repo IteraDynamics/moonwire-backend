@@ -16,7 +16,7 @@ on:
         required: false
         default: "72"
       backfill_run_id:
-        description: "Specific run id of backfill-ml-shadow to pull (optional)"
+        description: "Specific run id of Backfill ML Shadow to pull (optional)"
         required: false
         default: ""
 
@@ -69,21 +69,21 @@ jobs:
           MW_PROTECTED_PATTERN: "^main$"
         run: |
           set -euo pipefail
-          echo "Checking for per-symbol bundles..."
+          echo "Checking for model bundles under models/current/…"
           found_any=""
           shopt -s globstar || true
           for f in models/current/**/model.joblib models/current/model.joblib; do
             if [ -f "$f" ]; then found_any="yes"; break; fi
           done
           if [ -z "$found_any" ]; then
-            echo "No model bundles found — training locally..."
+            echo "No model bundles found — training locally…"
             python -m scripts.ml.train_predict
           else
-            echo "✅ Found existing model bundles under models/current/"
+            echo "✅ Found existing model bundles:"
             find models/current -maxdepth 2 -type f -name "model.joblib" || true
           fi
 
-      # ---------- Generate ML shadow rows ----------
+      # ---------- Generate a few fresh ML shadow rows (probe with model) ----------
       - name: Generate ML shadow rows (probe with model)
         env:
           MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
@@ -98,6 +98,7 @@ jobs:
           log = Path("logs/signal_inference_shadow.jsonl")
           log.parent.mkdir(parents=True, exist_ok=True)
           syms = [s.strip().upper() for s in os.getenv("MW_SHADOW_SYMBOLS","BTC,ETH,SOL").split(",") if s.strip()]
+
           wrote = 0
           for s in syms:
               try:
@@ -124,24 +125,25 @@ jobs:
           print(f"[shadow] wrote {wrote} ML shadow row(s) → {log}")
           PY
 
-      # ---------- Pull the backfilled shadow log artifact ----------
+      # ---------- Pull the backfilled shadow log artifact into logs/incoming ----------
       - name: Download backfilled shadow log (latest success)
-        if: ${{ inputs.backfill_run_id == '' }}
+        if: ${{ github.event.inputs.backfill_run_id == '' }}
         uses: dawidd6/action-download-artifact@v3
         with:
           repository: ${{ github.repository }}
-          workflow: backfill-ml-shadow
+          workflow: Backfill ML Shadow           # <<< workflow *name* (from that file's `name:`)
+          branch: main
           workflow_conclusion: success
-          name: ml-shadow-backfill          # ✅ correct artifact name
+          name: ml-shadow-backfill               # <<< artifact name in Backfill workflow
           path: logs/incoming
           allow_forks: true
           if_no_artifact_found: warn
 
       - name: Download backfilled shadow log by run id (optional)
-        if: ${{ inputs.backfill_run_id != '' }}
+        if: ${{ github.event.inputs.backfill_run_id != '' }}
         uses: dawidd6/action-download-artifact@v3
         with:
-          run_id: ${{ inputs.backfill_run_id }}
+          run_id: ${{ github.event.inputs.backfill_run_id }}
           repo: ${{ github.repository }}
           name: ml-shadow-backfill
           path: logs/incoming
@@ -156,20 +158,35 @@ jobs:
           incoming = root / "incoming"
           out = root / "signal_inference_shadow.jsonl"
           out.parent.mkdir(parents=True, exist_ok=True)
-          found = list(incoming.rglob("*.jsonl")) if incoming.exists() else []
+
           merged = 0
-          if found:
-              with out.open("a", encoding="utf-8") as w:
-                  for p in found:
-                      txt = p.read_text(encoding="utf-8").strip()
-                      if txt:
-                          w.write(txt + "\n")
-                          merged += 1
+          if incoming.exists():
+              # merge any *.jsonl files from artifact tree
+              for p in incoming.rglob("*.jsonl"):
+                  try:
+                      txt = p.read_text(encoding="utf-8")
+                  except Exception:
+                      continue
+                  if txt.strip():
+                      with out.open("a", encoding="utf-8") as w:
+                          w.write(txt if txt.endswith("\n") else txt + "\n")
+                      merged += 1
           print(f"[merge] merged {merged} backfill shadow file(s) into {out}")
           PY
 
+      - name: Show shadow file status
+        run: |
+          echo "Contents (recursive) of ./logs:"
+          ls -lahR logs || true
+          echo "---- tail merged canonical ----"
+          tail -n 10 logs/signal_inference_shadow.jsonl || true
+          echo "---- line count ----"
+          wc -l logs/signal_inference_shadow.jsonl || true
+
       # ---------- Replay shadow → paper trading ----------
       - name: Replay shadow → paper trading
+        env:
+          SHADOW_LOG: logs/signal_inference_shadow.jsonl   # ensure replay reads the merged file
         run: |
           python -m scripts.perf.replay_shadow_to_paper
           echo "Trades (tail):"
