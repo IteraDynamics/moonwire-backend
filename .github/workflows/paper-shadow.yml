@@ -10,7 +10,7 @@ on:
       symbols:
         description: "Comma-separated symbols to probe"
         required: false
-        default: "BTC,ETH,SOL"
+        default: "BTC,ETH"
       lookback_h:
         description: "Lookback hours for converting signals → shadow (optional)"
         required: false
@@ -59,7 +59,7 @@ jobs:
         env:
           MW_ML_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
           MW_ML_LOOKBACK_DAYS: "180"
-          MW_ML_MODEL: "hybrid"
+          MW_ML_MODEL: "gb"
           MW_HORIZON_H: "1"
           MW_SOCIAL_ENABLED: "1"
           MW_SOCIAL_INCLUDE: ""
