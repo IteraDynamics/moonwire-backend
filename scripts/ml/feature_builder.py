@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os, json
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict
 import numpy as np
 import pandas as pd
 
@@ -16,7 +16,6 @@ def _returns(df: pd.DataFrame, col="close") -> pd.Series:
 def _atr(df: pd.DataFrame, n=14) -> pd.Series:
     # If high/low not present (common in hourly aggregates), approximate
     if not {"high","low","close"}.issubset(df.columns):
-        # synthesize high/low around close using a tiny band of realized volatility
         c = df["close"].astype(float)
         r = c.pct_change().abs().fillna(0.0)
         h = c * (1 + r)
@@ -80,22 +79,25 @@ def _social_score_series(root: Path, smooth_h: int = 6) -> pd.DataFrame:
     """ Simple normalized activity proxy, smoothed. """
     df = _load_social_hourly(root)
     if df.empty:
-        return pd.DataFrame({"social_score": []})
+        return pd.DataFrame(columns=["social_score"])
     rate = df["n"].asfreq("H").fillna(0.0)
     sm = rate.rolling(smooth_h, min_periods=1).mean()
-    # normalize to [0,1] via zscore → sigmoid
     z = _zscore(sm).clip(-5, 5)
     score = 1.0 / (1.0 + np.exp(-z))
-    return pd.DataFrame({"social_score": score})
+    out = pd.DataFrame({"social_score": score})
+    out.index.name = "ts"
+    return out
 
 def _social_burst_series(root: Path, z_thresh=2.0, smooth_h=3) -> pd.DataFrame:
     df = _load_social_hourly(root)
     if df.empty:
-        return pd.DataFrame({"social_burst": []})
+        return pd.DataFrame(columns=["social_burst"])
     rate = df["n"].asfreq("H").fillna(0.0)
     sm = rate.rolling(smooth_h, min_periods=1).mean()
     z  = _zscore(sm).fillna(0.0)
-    return pd.DataFrame({"social_burst": (z > z_thresh).astype(float)})
+    out = pd.DataFrame({"social_burst": (z > z_thresh).astype(float)})
+    out.index.name = "ts"
+    return out
 
 # =========================
 # Price burst helper
@@ -142,7 +144,6 @@ def build_features(prices_map: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFram
             df["ts"] = pd.to_datetime(df["ts"], utc=True)
             df = df.sort_values("ts").set_index("ts")
         else:
-            # assume index is already time-like
             df = df.sort_index()
             if not isinstance(df.index, pd.DatetimeIndex):
                 raise ValueError("prices_map DataFrame must have 'ts' column or DatetimeIndex")
@@ -166,18 +167,29 @@ def build_features(prices_map: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFram
         except Exception:
             df["high_vol"] = 0.0
 
-        # Join social_score + social_burst (outer left join on index)
+        # Join social_score + social_burst on index
         F = df.copy()
         if not social_score_df.empty:
             F = F.join(social_score_df, how="left")
         if not social_burst_df.empty:
             F = F.join(social_burst_df, how="left")
-        F["social_score"] = F.get("social_score", 0.0).fillna(0.0)
-        F["social_burst"] = F.get("social_burst", 0.0).fillna(0.0)
+
+        # Fill safely (avoid .fillna on floats)
+        if "social_score" in F.columns:
+            F["social_score"] = F["social_score"].fillna(0.0)
+        else:
+            F["social_score"] = 0.0
+
+        if "social_burst" in F.columns:
+            F["social_burst"] = F["social_burst"].fillna(0.0)
+        else:
+            F["social_burst"] = 0.0
 
         # Price burst
         try:
-            F["price_burst"] = _price_burst(F, "r_1h", burst_short, burst_long, float(os.getenv("BURST_Z","2.0")))
+            F["price_burst"] = _price_burst(
+                F, "r_1h", burst_short, burst_long, float(os.getenv("BURST_Z","2.0"))
+            )
         except Exception:
             F["price_burst"] = 0.0
 
