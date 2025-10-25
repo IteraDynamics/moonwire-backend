@@ -96,7 +96,7 @@ jobs:
           echo "models/current contents:"
           ls -lah models/current || true
 
-      - name: Sanity: show bundle state
+      - name: Sanity show bundle state
         run: |
           ls -lah models/current || true
           test -f models/current/model.joblib || (echo "ERROR: model.joblib missing" && exit 1)
