@@ -185,3 +185,5 @@ jobs:
             logs/paper_trades.jsonl
             models/performance_metrics.json
             artifacts/perf_*.png
+            artifacts/cv_summary.md
+            artifacts/cv_results.json
