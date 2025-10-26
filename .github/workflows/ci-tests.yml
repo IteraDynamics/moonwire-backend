@@ -197,12 +197,12 @@ jobs:
 
           # Optional: specify different learners per coin
           #   BTC → Gradient Boost, ETH → Logistic Regression, SOL → fallback to MW_ML_MODEL (hybrid)
-          echo "MW_MODEL_MAP=BTC:rf,ETH:gb,DEFAULT:hybrid" >> "$GITHUB_ENV"
+          echo "MW_MODEL_MAP=BTC:rf,ETH:gb,DEFAULT:gb" >> "$GITHUB_ENV"
 
           # === Burst detection knobs ===
-          echo "BURST_Z=0" >> "$GITHUB_ENV"
-          echo "BURST_SHORT_H=0" >> "$GITHUB_ENV"
-          echo "BURST_LONG_H=0" >> "$GITHUB_ENV"
+          echo "BURST_Z=2" >> "$GITHUB_ENV"
+          echo "BURST_SHORT_H=6" >> "$GITHUB_ENV"
+          echo "BURST_LONG_H=48" >> "$GITHUB_ENV"
           # (optional) social smoothing already in your env as MW_SOC_SMOOTH
           
 
