@@ -29,14 +29,14 @@ jobs:
       # Paper trader knobs
       MW_PERF_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
       MW_PERF_LOOKBACK_H: "720"
-      MW_PERF_HORIZON_MIN: "180"
+      MW_PERF_HORIZON_MIN: "240"
       MW_PERF_SLIPPAGE_BPS: "2"
       MW_PERF_FEES_BPS: "1"
       MW_PERF_CAPITAL: "100000"
       MW_PERF_FORCE_DEMO: "false"
       MW_PERF_DEADBAND: "0.08"
       MW_PERF_MIN_FLIP_MIN: "360"
-      REPLAY_CONF_MIN: "0.54"
+      REPLAY_CONF_MIN: "0.58"
 
     steps:
       - name: Checkout
