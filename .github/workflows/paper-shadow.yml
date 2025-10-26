@@ -133,6 +133,22 @@ jobs:
           echo "Performance summary:"
           test -f models/performance_metrics.json && cat models/performance_metrics.json || echo "no performance_metrics.json"
 
+
+      - name: Cross-validate model stability (k-fold)
+        env:
+          MW_ML_SYMBOLS: ${{ env.MW_PERF_SYMBOLS }}   # keep symbols aligned
+          MW_ML_LOOKBACK_DAYS: "180"
+          MW_ML_MODEL: "gb"                            # or rf/logreg/hybrid
+          MW_CV_FOLDS: "5"
+          MW_HORIZON_H: "1"
+          CV_CONF_MIN: ${{ env.REPLAY_CONF_MIN || '0.58' }}
+        run: |
+          python -m scripts.ml.cv_eval
+          echo "## 🧪 CV Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          test -f artifacts/cv_summary.md && cat artifacts/cv_summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+
       # ---------- Summary ----------
       - name: Write summary
         run: |
