@@ -1,26 +1,4 @@
 {
-  "BTC": {
-    "conf_min": 0.62,
-    "horizon_min": 180,
-    "deadband": 0.08,
-    "min_flip_min": 180,
-    "fees_bps": 1,
-    "slippage_bps": 2
-  },
-  "ETH": {
-    "conf_min": 0.58,
-    "horizon_min": 180,
-    "deadband": 0.08,
-    "min_flip_min": 90,
-    "fees_bps": 1,
-    "slippage_bps": 2
-  },
-  "SOL": {
-    "conf_min": 0.65,
-    "horizon_min": 180,
-    "deadband": 0.05,
-    "min_flip_min": 240,
-    "fees_bps": 1,
-    "slippage_bps": 3
-  }
+  "BTC": {"conf_min": 0.58, "debounce_min": 360},
+  "ETH": {"conf_min": 0.62, "debounce_min": 240}
 }
