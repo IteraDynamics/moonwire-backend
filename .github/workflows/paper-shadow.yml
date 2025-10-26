@@ -36,7 +36,7 @@ jobs:
       MW_PERF_FORCE_DEMO: "false"
       MW_PERF_DEADBAND: "0.08"
       MW_PERF_MIN_FLIP_MIN: "360"
-      REPLAY_CONF_MIN: "0.58"
+      REPLAY_CONF_MIN: "0.54"
 
     steps:
       - name: Checkout
@@ -59,7 +59,7 @@ jobs:
         env:
           MW_ML_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
           MW_ML_LOOKBACK_DAYS: "180"
-          MW_ML_MODEL: "logreg"
+          MW_ML_MODEL: "hybrid"
           MW_PER_SYMBOL_MODELS: "1"
           MW_HORIZON_H: "1"
           MW_SOCIAL_ENABLED: "1"
