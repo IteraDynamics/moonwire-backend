@@ -1,16 +1,16 @@
 {
   "BTC": {
     "conf_min": 0.62,
-    "horizon_min": 240,
-    "deadband": 0.04,
+    "horizon_min": 180,
+    "deadband": 0.08,
     "min_flip_min": 180,
     "fees_bps": 1,
     "slippage_bps": 2
   },
   "ETH": {
     "conf_min": 0.58,
-    "horizon_min": 120,
-    "deadband": 0.03,
+    "horizon_min": 180,
+    "deadband": 0.08,
     "min_flip_min": 90,
     "fees_bps": 1,
     "slippage_bps": 2
