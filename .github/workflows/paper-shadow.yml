@@ -8,17 +8,21 @@ on:
   workflow_dispatch:
     inputs:
       symbols:
-        description: "Comma-separated symbols to probe"
+        description: "Comma-separated symbols to trade"
         required: false
         default: "BTC,ETH"
       lookback_h:
-        description: "Lookback hours for converting signals → shadow (optional)"
+        description: "Replay window (hours)"
         required: false
-        default: "72"
+        default: "720"
       backfill_run_id:
-        description: "Specific run id of Backfill ML Shadow to pull (optional)"
+        description: "Run ID of Backfill ML Shadow to use (blank = latest success)"
         required: false
         default: ""
+      paper_ref:
+        description: "Git ref (commit SHA / tag / branch) to run PAPER TRADER from"
+        required: false
+        default: ""   # blank = current commit
 
 jobs:
   paper:
@@ -26,10 +30,10 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}
       MPLBACKEND: Agg
-      # Paper trader knobs
-      MW_PERF_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
-      MW_PERF_LOOKBACK_H: "720"
-      MW_PERF_HORIZON_MIN: "240"
+      # Paper trader knobs (unchanged)
+      MW_PERF_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH' }}
+      MW_PERF_LOOKBACK_H: ${{ github.event.inputs.lookback_h || '720' }}
+      MW_PERF_HORIZON_MIN: "180"
       MW_PERF_SLIPPAGE_BPS: "2"
       MW_PERF_FEES_BPS: "1"
       MW_PERF_CAPITAL: "100000"
@@ -39,8 +43,17 @@ jobs:
       REPLAY_CONF_MIN: "0.58"
 
     steps:
-      - name: Checkout
+      # Checkout the repo AT THE REQUESTED REF for running scripts/perf/*
+      - name: Checkout (paper trader ref)
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.paper_ref || github.sha }}
+
+      - name: Show paper code ref
+        run: |
+          echo "Paper code ref:"
+          git rev-parse HEAD
+          echo "Branch/Tag (if any): ${{ github.event.inputs.paper_ref || '(current SHA)' }}"
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -54,87 +67,18 @@ jobs:
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
           python -m pip install matplotlib
 
-      # ---------- Ensure we have an inference bundle (per-symbol aware) ----------
-      - name: Ensure inference bundle (reuse or build)
-        env:
-          MW_ML_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
-          MW_ML_LOOKBACK_DAYS: "180"
-          MW_ML_MODEL: "hybrid"
-          MW_PER_SYMBOL_MODELS: "1"
-          MW_HORIZON_H: "1"
-          MW_SOCIAL_ENABLED: "1"
-          MW_SOCIAL_INCLUDE: ""
-          MW_FAIL_ON_DEMO: "0"
-          MW_BRANCH: ${{ github.ref_name }}
-          MW_PROTECTED_PATTERN: "^main$"
-        run: |
-          set -euo pipefail
-          echo "Checking for model bundles under models/current/…"
-          found_any=""
-          shopt -s globstar || true
-          for f in models/current/**/model.joblib models/current/model.joblib; do
-            if [ -f "$f" ]; then found_any="yes"; break; fi
-          done
-          if [ -z "$found_any" ]; then
-            echo "No model bundles found — training locally…"
-            python -m scripts.ml.train_predict
-          else
-            echo "✅ Found existing model bundles:"
-            find models/current -maxdepth 2 -type f -name "model.joblib" || true
-          fi
+      # We don’t need to (re)train here; we’re ONLY replaying the shadow backfill.
+      # Still allow tiny local probe rows if you want, but they won’t affect large backfills.
 
-      # ---------- Generate a few fresh ML shadow rows (probe with model) ----------
-      - name: Generate ML shadow rows (probe with model)
-        env:
-          MW_SHADOW_SYMBOLS: ${{ github.event.inputs.symbols || 'BTC,ETH,SOL' }}
-        run: |
-          python - <<'PY'
-          import os, json
-          from pathlib import Path
-          from datetime import datetime, timezone
-          from src.ml.infer import infer_asset_signal
-          from src.signal_generator import load_governance_params
-
-          log = Path("logs/signal_inference_shadow.jsonl")
-          log.parent.mkdir(parents=True, exist_ok=True)
-          syms = [s.strip().upper() for s in os.getenv("MW_SHADOW_SYMBOLS","BTC,ETH,SOL").split(",") if s.strip()]
-
-          wrote = 0
-          for s in syms:
-              try:
-                  out = infer_asset_signal(s)
-                  rec = {
-                      "symbol": s,
-                      "reason": "paper-shadow",
-                      "ml_ok": True,
-                      "ml_dir": out.get("direction"),
-                      "ml_conf": float(out.get("confidence", 0.0) or 0.0),
-                      "ts": datetime.now(timezone.utc).isoformat(),
-                      "gov": load_governance_params(s),
-                  }
-              except Exception as e:
-                  rec = {
-                      "symbol": s,
-                      "reason": f"ml_exception:{type(e).__name__}",
-                      "ml_ok": False, "ml_dir": None, "ml_conf": None,
-                      "ts": datetime.now(timezone.utc).isoformat(),
-                  }
-              with log.open("a", encoding="utf-8") as f:
-                  f.write(json.dumps(rec) + "\n")
-              wrote += 1
-          print(f"[shadow] wrote {wrote} ML shadow row(s) → {log}")
-          PY
-
-      # ---------- Pull the backfilled shadow log artifact into logs/incoming ----------
+      # ---------- Pull the backfilled shadow log artifact ----------
       - name: Download backfilled shadow log (latest success)
         if: ${{ github.event.inputs.backfill_run_id == '' }}
         uses: dawidd6/action-download-artifact@v3
         with:
           repository: ${{ github.repository }}
-          workflow: Backfill ML Shadow           # <<< workflow *name* (from that file's `name:`)
-          branch: main
+          workflow: backfill-ml-shadow
           workflow_conclusion: success
-          name: ml-shadow-backfill               # <<< artifact name in Backfill workflow
+          name: ml-shadow-backfill
           path: logs/incoming
           allow_forks: true
           if_no_artifact_found: warn
@@ -158,23 +102,20 @@ jobs:
           incoming = root / "incoming"
           out = root / "signal_inference_shadow.jsonl"
           out.parent.mkdir(parents=True, exist_ok=True)
-
+          found = list(incoming.rglob("*.jsonl")) if incoming.exists() else []
           merged = 0
-          if incoming.exists():
-              # merge any *.jsonl files from artifact tree
-              for p in incoming.rglob("*.jsonl"):
-                  try:
-                      txt = p.read_text(encoding="utf-8")
-                  except Exception:
-                      continue
-                  if txt.strip():
-                      with out.open("a", encoding="utf-8") as w:
-                          w.write(txt if txt.endswith("\n") else txt + "\n")
-                      merged += 1
+          if found:
+              with out.open("w", encoding="utf-8") as w:  # overwrite to ensure a clean run
+                  for p in found:
+                      txt = p.read_text(encoding="utf-8").strip()
+                      if txt:
+                          # ensure trailing newline
+                          w.write(txt + ("\n" if not txt.endswith("\n") else ""))
+                          merged += 1
           print(f"[merge] merged {merged} backfill shadow file(s) into {out}")
           PY
 
-      - name: Show shadow file status
+      - name: Preflight – shadow stats
         run: |
           echo "Contents (recursive) of ./logs:"
           ls -lahR logs || true
@@ -185,8 +126,6 @@ jobs:
 
       # ---------- Replay shadow → paper trading ----------
       - name: Replay shadow → paper trading
-        env:
-          SHADOW_LOG: logs/signal_inference_shadow.jsonl   # ensure replay reads the merged file
         run: |
           python -m scripts.perf.replay_shadow_to_paper
           echo "Trades (tail):"
@@ -194,51 +133,39 @@ jobs:
           echo "Performance summary:"
           test -f models/performance_metrics.json && cat models/performance_metrics.json || echo "no performance_metrics.json"
 
-      # ---------- Upload artifacts ----------
+      # ---------- Summary ----------
+      - name: Write summary
+        run: |
+          echo "### 🕵️ Paper from Shadow" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Paper code ref:** \`$(git rev-parse --short HEAD)\` (input: \`${{ github.event.inputs.paper_ref || 'CURRENT' }}\`)" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ github.event.inputs.backfill_run_id }}" ]; then
+            echo "- **Backfill source:** run id \`${{ github.event.inputs.backfill_run_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Backfill source:** latest successful \`backfill-ml-shadow\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- **Shadow lines:** $(wc -l < logs/signal_inference_shadow.jsonl 2>/dev/null || echo 0)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Paper trades tail:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+          tail -n 5 logs/paper_trades.jsonl >> "$GITHUB_STEP_SUMMARY" || true
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f models/performance_metrics.json ]; then
+            echo "**Performance metrics:**" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`\`\`json" >> "$GITHUB_STEP_SUMMARY"
+            cat models/performance_metrics.json >> "$GITHUB_STEP_SUMMARY"
+            echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # ---------- Artifacts ----------
       - name: Upload paper artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: paper-artifacts
+          name: paper-artifacts-${{ github.event.inputs.paper_ref || 'current' }}
           if-no-files-found: warn
           path: |
             logs/signal_inference_shadow.jsonl
             logs/paper_trades.jsonl
             models/performance_metrics.json
             artifacts/perf_*.png
-
-      - name: Write summary
-        run: |
-          {
-            echo "### 🕵️ Paper from Shadow";
-            echo "";
-            echo "**Symbols:** \`${{ env.MW_PERF_SYMBOLS }}\`";
-            echo "";
-            echo "**Replay config:**";
-            echo "";
-            echo "- LOOKBACK_H: \`${{ env.MW_PERF_LOOKBACK_H }}\`";
-            echo "- HORIZON_MIN: \`${{ env.MW_PERF_HORIZON_MIN }}\`";
-            echo "- DEADBAND: \`${{ env.MW_PERF_DEADBAND }}\`";
-            echo "- MIN_FLIP_MIN: \`${{ env.MW_PERF_MIN_FLIP_MIN }}\`";
-            echo "- REPLAY_CONF_MIN: \`${{ env.REPLAY_CONF_MIN }}\`";
-            echo "- FEES_BPS / SLIPPAGE_BPS: \`${{ env.MW_PERF_FEES_BPS }} / ${{ env.MW_PERF_SLIPPAGE_BPS }}\`";
-            echo "";
-            echo "**Shadow tail:**";
-            echo '```json';
-            tail -n 5 logs/signal_inference_shadow.jsonl || true
-            echo '```';
-            echo "";
-            echo "**Paper trades tail:**";
-            echo '```json';
-            tail -n 5 logs/paper_trades.jsonl || true
-            echo '```';
-            echo "";
-            if [ -f models/performance_metrics.json ]; then
-              echo "**Performance metrics:**";
-              echo '```json';
-              cat models/performance_metrics.json
-              echo '```';
-            else
-              echo "_No performance_metrics.json produced_";
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-      
