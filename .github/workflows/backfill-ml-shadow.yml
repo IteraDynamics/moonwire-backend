@@ -1,5 +1,4 @@
-
-name: Backfill ML Shadow 
+name: Backfill ML Shadow (Walk-Forward)
 
 on:
   workflow_dispatch:
@@ -9,9 +8,21 @@ on:
         required: false
         default: "BTC,ETH,SOL"
       days:
-        description: "Lookback days"
+        description: "Total lookback days for the whole period (e.g., 180)"
         required: false
         default: "180"
+      folds:
+        description: "Number of walk-forward folds"
+        required: false
+        default: "5"
+      test_days:
+        description: "Length of each test window in days (per fold). If blank, defaults to days/folds."
+        required: false
+        default: ""
+      model:
+        description: "Base model type for training (gb|rf|lr|hybrid)"
+        required: false
+        default: "gb"
       include_all:
         description: "Ignore governance conf_min gating? (true/false)"
         required: false
@@ -30,8 +41,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
-      MW_BACKFILL_SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
-      MW_BACKFILL_DAYS: ${{ inputs.days || '180' }}
+      # User inputs (with fallbacks)
+      MW_WF_SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
+      MW_WF_DAYS: ${{ inputs.days || '180' }}
+      MW_WF_FOLDS: ${{ inputs.folds || '5' }}
+      MW_WF_TEST_DAYS: ${{ inputs.test_days }}
+      MW_WF_MODEL: ${{ inputs.model || 'gb' }}
       MW_BACKFILL_INCLUDE_ALL: ${{ inputs.include_all || 'true' }}
       MW_BACKFILL_CONF_MIN_OVERRIDE: ${{ inputs.conf_min_override }}
 
@@ -50,92 +65,134 @@ jobs:
           if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
 
-      # -------------------------------
-      # Ensure an inference bundle exists
-      # -------------------------------
-
-      # Try to download the bundle produced by CI (won't fail the job if absent)
-      - name: Try download inference bundle from CI
+      # Try to download the latest successful CI bundle (used only if you want a warm start).
+      # We still retrain per fold below to avoid leakage.
+      - name: Try download inference bundle from CI (optional warm start)
         uses: dawidd6/action-download-artifact@v3
         continue-on-error: true
         with:
-          # Use the workflow's *name* as it appears in GitHub ("CI"), not the path.
           workflow: CI
           workflow_conclusion: success
           name: inference-bundle-current
           path: _dl_bundle
 
-      - name: Install downloaded bundle (if any)
+      - name: Seed models/current from downloaded bundle (if present)
         run: |
           mkdir -p models/current
           if ls _dl_bundle 1>/dev/null 2>&1; then
-            echo "Found downloaded bundle files:"
-            ls -lah _dl_bundle || true
-            # Copy flat or nested contents into models/current
+            echo "Seeding models/current from CI bundle…"
             cp -rv _dl_bundle/* models/current/ 2>/dev/null || true
           else
-            echo "No downloaded bundle present."
+            echo "No CI bundle found — will train from scratch per fold."
           fi
-          echo "Current models/current contents (after copy):"
+          echo "Current models/current:"
           ls -lah models/current || true
 
-      # Fallback: build a fresh (per-symbol aware) bundle if none present
-      - name: Build bundle locally if missing
+      # --- Walk-forward driver ---
+      - name: Walk-forward backfill (train per fold ➜ backfill next window)
         env:
-          MW_ML_SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
-          MW_ML_LOOKBACK_DAYS: ${{ inputs.days || '180' }}
-          MW_ML_MODEL: "hybrid"
-          MW_HORIZON_H: "1"
-          MW_SOCIAL_ENABLED: "1"
-          MW_SOCIAL_INCLUDE: ""
-          MW_PER_SYMBOL_MODELS: "1"
-          MW_FAIL_ON_DEMO: "0"
-          MW_BRANCH: ${{ github.ref_name }}
-          MW_PROTECTED_PATTERN: "^main$"
+          GITHUB_SHA_SHORT: ${{ github.sha }}
         run: |
-          set -e
-          echo "Checking for any model.joblib under models/current/** ..."
-          shopt -s globstar || true
-          found_any=""
-          for f in models/current/**/model.joblib models/current/model.joblib; do
-            if [ -f "$f" ]; then found_any="yes"; break; fi
-          done
+          python - <<'PY'
+          import os, sys, json, shutil, subprocess
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          
+          def sh(cmd: str, env=None):
+              print(f"+ {cmd}", flush=True)
+              cp = subprocess.run(cmd, shell=True, check=True, env=env)
+              return cp.returncode
 
-          if [ -z "$found_any" ]; then
-            echo "No bundle found; building locally via scripts.ml.train_predict ..."
-            python -m scripts.ml.train_predict
-          else
-            echo "Bundle already present; skipping local build."
-          fi
+          symbols = [s.strip().upper() for s in os.getenv("MW_WF_SYMBOLS","BTC,ETH,SOL").split(",") if s.strip()]
+          folds = int(os.getenv("MW_WF_FOLDS","5"))
+          total_days = int(os.getenv("MW_WF_DAYS","180"))
+          model = os.getenv("MW_WF_MODEL","gb").lower()
 
-          echo "Bundle after ensure/build:"
-          ls -lah models/current || true
-          # List nested per-symbol dirs if present
-          if [ -d models/current ]; then
-            find models/current -maxdepth 2 -type f -name "model.joblib" -print || true
-          fi
+          test_days_env = os.getenv("MW_WF_TEST_DAYS","").strip()
+          if test_days_env:
+              test_days = int(test_days_env)
+          else:
+              # default: split total evenly
+              test_days = max(1, total_days // max(1, folds))
 
-      - name: Assert bundle exists
-        run: |
-          shopt -s globstar || true
-          cnt=$(ls models/current/**/model.joblib models/current/model.joblib 2>/dev/null | wc -l | tr -d ' ')
-          echo "Found model files: $cnt"
-          if [ "$cnt" -eq 0 ]; then
-            echo "ERROR: No model.joblib found under models/current/**"
-            exit 1
-          fi
-          # also ensure there is at least one manifest.json nearby
-          mcnt=$(ls models/current/**/manifest.json models/current/manifest.json 2>/dev/null | wc -l | tr -d ' ')
-          if [ "$mcnt" -eq 0 ]; then
-            echo "ERROR: No manifest.json found under models/current/**"
-            exit 1
-          fi
+          # Expanding training window:
+          # Fold i (1..folds):
+          #   train_end = now - (folds - i) * test_days
+          #   train_days = total_days - (folds - i) * test_days
+          #   test_end  = train_end + test_days
+          #   backfill for [test_end - test_days, test_end]
+          now = datetime.now(timezone.utc).replace(microsecond=0)
+          logs = Path("logs"); logs.mkdir(parents=True, exist_ok=True)
+          out_shadow = logs / "signal_inference_shadow.jsonl"
+          # reset/clear
+          if out_shadow.exists():
+              out_shadow.unlink()
 
-      # -------------------------------
-      # Backfill & Upload
-      # -------------------------------
-      - name: Run ML shadow backfill
-        run: python -m scripts.perf.backfill_ml_shadow
+          # keep these consistent across folds
+          include_all = str(os.getenv("MW_BACKFILL_INCLUDE_ALL","true"))
+          conf_min_override = os.getenv("MW_BACKFILL_CONF_MIN_OVERRIDE","")
+
+          for i in range(1, folds+1):
+              rem = folds - i
+              train_end = now - timedelta(days=rem * test_days)
+              train_days = total_days - rem * test_days
+              if train_days < 5:
+                  print(f"[fold {i}] train_days too small ({train_days}); skipping this fold.", flush=True)
+                  continue
+              test_end = train_end + timedelta(days=test_days)
+
+              # 1) Clean models/current for a true per-fold retrain
+              if Path("models/current").exists():
+                  shutil.rmtree("models/current")
+              Path("models/current").mkdir(parents=True, exist_ok=True)
+
+              # 2) Train bundle up to train_end (no future leakage)
+              env_train = os.environ.copy()
+              env_train.update({
+                  "MW_ML_SYMBOLS": ",".join(symbols),
+                  "MW_ML_LOOKBACK_DAYS": str(train_days),
+                  "MW_ML_MODEL": model,
+                  "MW_PER_SYMBOL_MODELS": "1",
+                  "MW_HORIZON_H": "1",
+                  "MW_SOCIAL_ENABLED": "1",
+                  "MW_SOCIAL_INCLUDE": "",
+                  "MW_FAIL_ON_DEMO": "0",
+                  "MW_FIX_END_TS": train_end.isoformat().replace("+00:00","Z"),
+              })
+              print(f"[fold {i}] Train: lookback_days={train_days}  fix_end={env_train['MW_FIX_END_TS']}", flush=True)
+              sh("python -m scripts.ml.train_predict", env=env_train)
+
+              # quick sanity
+              have_model = any(Path("models/current").rglob("model.joblib"))
+              if not have_model:
+                  print(f"[fold {i}] ERROR: no model.joblib found after training.", flush=True)
+                  sys.exit(1)
+
+              # 3) Backfill for the *test* window, appending to shadow log
+              env_bf = os.environ.copy()
+              env_bf.update({
+                  "MW_BACKFILL_SYMBOLS": ",".join(symbols),
+                  "MW_BACKFILL_DAYS": str(test_days),
+                  "MW_BACKFILL_INCLUDE_ALL": include_all,
+                  "MW_BACKFILL_CONF_MIN_OVERRIDE": conf_min_override,
+                  "MW_FIX_END_TS": test_end.isoformat().replace("+00:00","Z"),
+                  # annotate rows with fold info if your script supports reading this env
+                  "MW_BACKFILL_FOLD_TAG": f"fold-{i}",
+              })
+              print(f"[fold {i}] Backfill test window: days={test_days}  fix_end={env_bf['MW_FIX_END_TS']}", flush=True)
+              sh("python -m scripts.perf.backfill_ml_shadow", env=env_bf)
+
+          # Final report
+          if out_shadow.exists():
+              print(f"---- shadow head ----")
+              print("\n".join(out_shadow.read_text(encoding='utf-8').splitlines()[:5]))
+              print(f"---- shadow tail ----")
+              print("\n".join(out_shadow.read_text(encoding='utf-8').splitlines()[-5:]))
+              print(f"---- line count ----")
+              print(len(out_shadow.read_text(encoding='utf-8').splitlines()))
+          else:
+              print("No shadow file produced.", flush=True)
+          PY
 
       - name: Shadow tail (debug)
         run: |
