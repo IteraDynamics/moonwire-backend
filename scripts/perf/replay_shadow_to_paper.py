@@ -39,14 +39,43 @@ def _read_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
             try:
                 yield json.loads(line)
             except Exception:
-                continue
+            
+import json as _json
+
+_GOV_PATH = Path("models/governance_params.json")
+_GOV_CACHE = None
+
+def _load_governance():
+    global _GOV_CACHE
+    if _GOV_CACHE is not None:
+        return _GOV_CACHE
+    try:
+        if _GOV_PATH.exists():
+            _GOV_CACHE = _json.loads(_GOV_PATH.read_text(encoding="utf-8"))
+        else:
+            _GOV_CACHE = {}
+    except Exception:
+        _GOV_CACHE = {}
+    return _GOV_CACHE
 
 def _conf_min_from_row(row: Dict[str, Any]) -> float:
+    # 1) prefer embedded gov (paper-shadow rows)
     gov = row.get("gov") or {}
-    try:
-        return float(gov.get("conf_min", DEFAULT_CONF_MIN))
-    except Exception:
-        return DEFAULT_CONF_MIN
+    if "conf_min" in gov:
+        try:
+            return float(gov["conf_min"])
+        except Exception:
+            pass
+    # 2) otherwise load per-coin from file (works for backfill rows)
+    sym = str(row.get("symbol", "")).upper()
+    g = _load_governance()
+    if sym and sym in g and "conf_min" in g[sym]:
+        try:
+            return float(g[sym]["conf_min"])
+        except Exception:
+            pass
+    # 3) final fallback: env default
+    return DEFAULT_CONF_MIN
 
 def _row_qualifies(row: Dict[str, Any], win_start: datetime) -> bool:
     sym = str(row.get("symbol", "")).upper()
