@@ -1,5 +1,5 @@
 
-name: Backfill ML Shadow 
+name: Backfill ML Shadow
 
 on:
   workflow_dispatch:
