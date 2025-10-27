@@ -43,6 +43,9 @@ GOVERNANCE_PARAMS_PATH = MODELS_DIR / "governance_params.json"
 # ML hyperparameters (training-time config)
 ML_HYPERPARAMETERS_PATH = MODELS_DIR / "ml_hyperparameters.json"
 
+# Paper trading parameters (simulation config)
+PAPER_TRADING_PARAMS_PATH = MODELS_DIR / "paper_trading_params.json"
+
 # Performance metrics
 PERFORMANCE_METRICS_PATH = MODELS_DIR / "performance_metrics.json"
 
