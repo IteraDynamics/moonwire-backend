@@ -1,21 +1,32 @@
 # scripts/perf/replay_shadow_to_paper.py
 from __future__ import annotations
 
-import json, os
+import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from scripts.perf.paper_trader import Ctx as PTX, run_paper_trader  # uses your existing paper_trader
+from scripts.perf.paper_trader import Ctx as PTX, run_paper_trader  # your existing paper trader
 
+# -------------------------------------------------------------------
+# Config (env-overridable)
+# -------------------------------------------------------------------
 SHADOW_PATH = Path(os.getenv("SHADOW_LOG", "logs/signal_inference_shadow.jsonl"))
 OUT_TRADES  = Path(os.getenv("PAPER_TRADES_LOG", "logs/paper_trades.jsonl"))
 
-DEFAULT_CONF_MIN = float(os.getenv("REPLAY_CONF_MIN", "0.60"))  # floor unless row.gov overrides
+# Global fallbacks (used when a shadow row does not carry "gov")
+DEFAULT_CONF_MIN   = float(os.getenv("REPLAY_CONF_MIN", "0.60"))
+DEFAULT_DEADBAND   = float(os.getenv("REPLAY_DEADBAND", "0.00"))  # treat near-0.5 as indecisive
+DEFAULT_MIN_FLIP_M = int(os.getenv("REPLAY_MIN_FLIP_MIN", "0"))
+
 LOOKBACK_H = int(os.getenv("REPLAY_LOOKBACK_H", os.getenv("MW_PERF_LOOKBACK_H", "72")))
 ALLOWED    = {s.strip().upper() for s in os.getenv("MW_PERF_SYMBOLS", "BTC,ETH,SOL").split(",") if s.strip()}
 
+# -------------------------------------------------------------------
+# Utils
+# -------------------------------------------------------------------
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -39,87 +50,150 @@ def _read_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
             try:
                 yield json.loads(line)
             except Exception:
-            
-import json as _json
+                # skip bad lines
+                continue
 
-_GOV_PATH = Path("models/governance_params.json")
-_GOV_CACHE = None
-
-def _load_governance():
-    global _GOV_CACHE
-    if _GOV_CACHE is not None:
-        return _GOV_CACHE
+def _gov_float(row: Dict[str, Any], key: str, fallback: float) -> float:
+    gov = row.get("gov") or {}
     try:
-        if _GOV_PATH.exists():
-            _GOV_CACHE = _json.loads(_GOV_PATH.read_text(encoding="utf-8"))
-        else:
-            _GOV_CACHE = {}
+        return float(gov.get(key, fallback))
     except Exception:
-        _GOV_CACHE = {}
-    return _GOV_CACHE
+        return fallback
 
 def _conf_min_from_row(row: Dict[str, Any]) -> float:
-    # 1) prefer embedded gov (paper-shadow rows)
-    gov = row.get("gov") or {}
-    if "conf_min" in gov:
-        try:
-            return float(gov["conf_min"])
-        except Exception:
-            pass
-    # 2) otherwise load per-coin from file (works for backfill rows)
-    sym = str(row.get("symbol", "")).upper()
-    g = _load_governance()
-    if sym and sym in g and "conf_min" in g[sym]:
-        try:
-            return float(g[sym]["conf_min"])
-        except Exception:
-            pass
-    # 3) final fallback: env default
-    return DEFAULT_CONF_MIN
+    return _gov_float(row, "conf_min", DEFAULT_CONF_MIN)
 
-def _row_qualifies(row: Dict[str, Any], win_start: datetime) -> bool:
+def _deadband_from_row(row: Dict[str, Any]) -> float:
+    # distance from 0.5 below which we drop the row
+    return _gov_float(row, "deadband", DEFAULT_DEADBAND)
+
+def _min_flip_from_row(row: Dict[str, Any]) -> int:
+    # minimum minutes between taking opposite directions for same symbol
+    val = _gov_float(row, "min_flip_min", float(DEFAULT_MIN_FLIP_M))
+    try:
+        return int(val)
+    except Exception:
+        return DEFAULT_MIN_FLIP_M
+
+# -------------------------------------------------------------------
+# Selection & conversion
+# -------------------------------------------------------------------
+@dataclass
+class _ShadowRow:
+    ts: datetime
+    symbol: str
+    direction: str
+    confidence: float
+    raw: Dict[str, Any]
+
+def _in_time_window(ts: Optional[datetime], win_start: datetime, win_end: datetime) -> bool:
+    return bool(ts) and (win_start <= ts <= win_end)
+
+def _qualify(row: Dict[str, Any], win_start: datetime, win_end: datetime) -> Optional[_ShadowRow]:
     sym = str(row.get("symbol", "")).upper()
     if sym not in ALLOWED:
-        return False
-    ts = _parse_ts(row.get("ts")) or _now_utc()
-    if ts < win_start:
-        return False
-    if not bool(row.get("ml_ok", False)):
-        return False
-    conf = row.get("ml_conf")
-    if not isinstance(conf, (int, float)):
-        return False
-    return float(conf) >= _conf_min_from_row(row)
+        return None
 
-def _to_signal(row: Dict[str, Any]) -> Dict[str, Any]:
-    ts = _parse_ts(row.get("ts")) or _now_utc()
-    sym = str(row.get("symbol")).upper()
+    ts = _parse_ts(row.get("ts"))
+    if not _in_time_window(ts, win_start, win_end):
+        return None
+
+    if not bool(row.get("ml_ok", False)):
+        return None
+
     direction = str(row.get("ml_dir", "")).lower()
-    conf = float(row.get("ml_conf", 0.0) or 0.0)
+    if direction not in {"long", "short"}:
+        return None
+
+    try:
+        conf = float(row.get("ml_conf", 0.0) or 0.0)
+    except Exception:
+        return None
+
+    conf_min = _conf_min_from_row(row)
+    if conf < conf_min:
+        return None
+
+    deadband = _deadband_from_row(row)
+    if abs(conf - 0.5) < deadband:
+        return None
+
+    return _ShadowRow(ts=ts, symbol=sym, direction=direction, confidence=conf, raw=row)
+
+def _to_signal(sr: _ShadowRow) -> Dict[str, Any]:
+    ts_iso = sr.ts.isoformat().replace("+00:00", "Z")
     return {
-        "id": f"shadow_{ts.isoformat()}_{sym}_{direction}",
-        "ts": ts.isoformat().replace("+00:00","Z"),
-        "symbol": sym,
-        "direction": direction if direction in {"long","short"} else "long",
-        "confidence": conf,
+        "id": f"shadow_{ts_iso}_{sr.symbol}_{sr.direction}",
+        "ts": ts_iso,
+        "symbol": sr.symbol,
+        "direction": sr.direction,
+        "confidence": sr.confidence,
         "price": None,
         "source": "shadow",
         "model_version": "bundle/current",
         "outcome": None,
     }
 
+def _apply_min_flip(selected: List[_ShadowRow]) -> List[_ShadowRow]:
+    """
+    Enforce per-symbol min_flip_min using each row's own gov (if present) or global default.
+    We must evaluate rows in chronological order.
+    """
+    selected = sorted(selected, key=lambda r: (r.symbol, r.ts))
+    kept: List[_ShadowRow] = []
+    last: Dict[str, Tuple[datetime, str, int]] = {}  # sym -> (ts, dir, min_flip_min)
+
+    for r in selected:
+        mf_this = _min_flip_from_row(r.raw)
+        state = last.get(r.symbol)
+        if state is None:
+            kept.append(r)
+            last[r.symbol] = (r.ts, r.direction, mf_this)
+            continue
+
+        last_ts, last_dir, last_mf = state
+        # Use the stricter (max) of the two mins when deciding to flip
+        gate_min = max(last_mf, mf_this)
+        if r.direction != last_dir:
+            delta_min = (r.ts - last_ts).total_seconds() / 60.0
+            if delta_min < gate_min:
+                # skip churny opposite signal
+                continue
+
+        kept.append(r)
+        last[r.symbol] = (r.ts, r.direction, mf_this)
+
+    return kept
+
+# -------------------------------------------------------------------
+# Main replay
+# -------------------------------------------------------------------
 def replay() -> Dict[str, Any]:
-    win_start = _now_utc() - timedelta(hours=LOOKBACK_H)
+    now = _now_utc()
+    win_start = now - timedelta(hours=LOOKBACK_H)
 
     rows = list(_read_jsonl(SHADOW_PATH))
-    selected = [_to_signal(r) for r in rows if _row_qualifies(r, win_start)]
+    considered = 0
+    selected: List[_ShadowRow] = []
 
+    for r in rows:
+        sr = _qualify(r, win_start, now)
+        if sr is None:
+            continue
+        considered += 1
+        selected.append(sr)
+
+    # anti-churn (min_flip) pass
+    selected = _apply_min_flip(selected)
+
+    # write the canonical signals file for the paper trader
     sig_path = Path("logs") / "signal_history.jsonl"
     sig_path.parent.mkdir(parents=True, exist_ok=True)
     with sig_path.open("w", encoding="utf-8") as f:
-        for r in selected:
-            f.write(json.dumps(r) + "\n")
+        for sr in sorted(selected, key=lambda x: x.ts):
+            f.write(json.dumps(_to_signal(sr)) + "\n")
 
+    # run paper trader
     ctx = PTX()
     ctx.symbols = list(ALLOWED)
     ctx.lookback_h = LOOKBACK_H
@@ -127,11 +201,12 @@ def replay() -> Dict[str, Any]:
     ctx.demo_mode = False
     out = run_paper_trader(ctx, mode="replay-shadow")
 
+    # small summary to stdout
     summary = {
         "shadow_path": str(SHADOW_PATH),
         "trades_out": str(OUT_TRADES),
         "total_rows": len(rows),
-        "considered_rows": sum(1 for r in rows if (t := _parse_ts(r.get("ts"))) and t >= win_start),
+        "eligible_rows": considered,
         "written_trades": out.get("aggregate", {}).get("trades", 0),
         "per_symbol": {k: v.get("trades", 0) for k, v in out.get("by_symbol", {}).items()},
     }
