@@ -25,5 +25,24 @@ REVIEWER_SCORES_PATH = LOGS_DIR / "reviewer_scores.jsonl"
 RETRAINING_LOG_PATH = LOGS_DIR / "retraining_log.jsonl"
 RETRAINING_TRIGGERED_LOG_PATH = LOGS_DIR / "retraining_triggered.jsonl"
 
-# NEW: historical time-series for reviewer scores
+# Historical time-series for reviewer scores
 REVIEWER_SCORES_HISTORY_PATH = LOGS_DIR / "reviewer_scores_history.jsonl"
+
+# Shadow inference and signal logs
+SHADOW_LOG_PATH = LOGS_DIR / "signal_inference_shadow.jsonl"
+SIGNAL_HISTORY_LOG_PATH = LOGS_DIR / "signal_history.jsonl"
+
+# Feedback and review queues
+FEEDBACK_LOG_PATH = LOGS_DIR / "feedback.jsonl"
+SUPPRESSION_REVIEW_PATH = LOGS_DIR / "suppression_review_queue.jsonl"
+RETRAIN_QUEUE_PATH = LOGS_DIR / "retrain_queue.jsonl"
+
+# Governance parameters
+GOVERNANCE_PARAMS_PATH = MODELS_DIR / "governance_params.json"
+
+# Performance metrics
+PERFORMANCE_METRICS_PATH = MODELS_DIR / "performance_metrics.json"
+
+# Training metadata
+TRAINING_VERSION_FILE = MODELS_DIR / "training_version.txt"
+TRIGGER_LOG_PATH = MODELS_DIR / "trigger_history.jsonl"
