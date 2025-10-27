@@ -102,7 +102,7 @@ jobs:
           SHADOW_SRC: ${{ steps.choose_shadow.outputs.shadow_path }}
         run: |
           python - <<'PY'
-          import os, json, math
+          import os, json, math, subprocess, sys
           from pathlib import Path
           from datetime import datetime, timedelta, timezone
 
@@ -133,7 +133,7 @@ jobs:
                       if j["symbol"].upper() not in syms: continue
                       t = parse_ts(j.get("ts"))
                       if not t: continue
-                      j["_ts"] = t
+                      j["_ts"] = t  # helper for sorting/windowing ONLY
                       rows.append(j)
                   except Exception:
                       pass
@@ -160,7 +160,6 @@ jobs:
           print(f"[WF] symbols={syms}  k={k}  rows_in_win={len(rows)}  window={rows[0]['_ts']} .. {rows[-1]['_ts']}")
           summary = {"folds": [], "aggregate": None}
 
-          # Utility: gating
           def conf_min_for_row(j):
               if conf_min_override:
                   try: return float(conf_min_override)
@@ -181,19 +180,19 @@ jobs:
                   if not j.get("ml_ok", False): continue
                   conf = float(j.get("ml_conf") or 0.0)
                   if conf < conf_min_for_row(j): continue
-                  fold_rows.append(j)
+                  # copy and strip helper key to keep JSON serializable
+                  jj = dict(j)
+                  jj.pop("_ts", None)
+                  fold_rows.append(jj)
 
               # Write this fold to canonical shadow and run paper trader replay
               dst.parent.mkdir(parents=True, exist_ok=True)
               with dst.open("w", encoding="utf-8") as w:
-                  for j in fold_rows:
-                      w.write(json.dumps(j) + "\n")
+                  for jj in fold_rows:
+                      w.write(json.dumps(jj) + "\n")
 
-              # Run paper trader (module call via subprocess keeps env consistent)
-              import subprocess, sys
-              cmd = [sys.executable, "-m", "scripts.perf.replay_shadow_to_paper"]
               print(f"[WF] Fold {fi+1}/{k}: rows={len(fold_rows)}  range={f_start}..{f_end}")
-              subprocess.run(cmd, check=True)
+              subprocess.run([sys.executable, "-m", "scripts.perf.replay_shadow_to_paper"], check=True)
 
               # Read per-fold metrics
               if metrics_path.exists():
@@ -212,10 +211,11 @@ jobs:
                   d["trades"] += int(sv.get("trades",0))
 
           summary["aggregate"] = all_agg
-          Path("models/walkforward_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+          Path("models/walkforward_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
           print("[WF] Summary:")
-          print(json.dumps(summary, indent=2))
+          print(json.dumps(summary, indent=2, default=str))
           PY
+
 
       - name: Append summary to job summary
         run: |
