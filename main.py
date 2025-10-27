@@ -1,20 +1,36 @@
 import os
+import sys
+import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.paths import LOGS_DIR, REVIEWER_IMPACT_LOG_PATH, REVIEWER_SCORES_PATH
 
-# Ensure logging directory exists at boot
-os.makedirs(LOGS_DIR, exist_ok=True)  
+# Configure logging BEFORE importing any other modules
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOGS_DIR / 'moonwire.log')
+    ]
+)
 
-print("📁 Log directory initialized:")
-print(f"  - Impact log path: {REVIEWER_IMPACT_LOG_PATH}")
-print(f"  - Scores path:     {REVIEWER_SCORES_PATH}")
+logger = logging.getLogger(__name__)
+
+# Ensure logging directory exists at boot
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+logger.info("MoonWire backend initializing", extra={
+    "logs_dir": str(LOGS_DIR),
+    "impact_log": str(REVIEWER_IMPACT_LOG_PATH),
+    "scores_path": str(REVIEWER_SCORES_PATH),
+    "env": os.getenv("MW_ENV", "dev")
+})
 
 from src.twitter_router import router as twitter_router
 from src.news_router import router as news_router
 from src.composite_router import router as composite_router
-# from src.feedback_router import router as feedback_router
 from src.health_router import router as health_router
 from src.admin_router import router as admin_router
 from src.trend_router import router as trend_router
@@ -55,13 +71,17 @@ from src.trigger_likelihood_router import router as trigger_likelihood_router
 
 app = FastAPI()
 
-# CORS
+# CORS - configurable via environment variable
+# Default to localhost for development safety
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+logger.info(f"CORS configured for origins: {ALLOWED_ORIGINS}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Cache boot
@@ -71,7 +91,6 @@ load_mock_cache_data()
 app.include_router(twitter_router)
 app.include_router(news_router)
 app.include_router(composite_router)
-# app.include_router(feedback_router)
 app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(trend_router)

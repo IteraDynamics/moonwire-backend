@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional, List
@@ -11,6 +12,11 @@ from src.signal_filter import is_signal_valid
 from src.cache_instance import cache
 from src.sentiment_blended import blend_sentiment_scores
 from src.dispatcher import dispatch_alerts
+from src.jsonl_writer import atomic_jsonl_append
+from src.observability import failure_tracker
+from src.paths import SHADOW_LOG_PATH, GOVERNANCE_PARAMS_PATH
+
+logger = logging.getLogger(__name__)
 
 # --- optional ML inference (soft dependency) -------------------------------
 _ML_INFER_FN = None
@@ -21,8 +27,6 @@ except Exception:
     _ML_INFER_FN = None
 
 # --- governance params loader ----------------------------------------------
-GOV_PATH = Path("models/governance_params.json")
-
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -39,7 +43,7 @@ def load_governance_params(symbol: str) -> Dict[str, Any]:
     Returns per-symbol governance knobs. Defaults are conservative.
     """
     default = {"conf_min": 0.60, "debounce_min": 15}
-    data = _read_json(GOV_PATH, {})
+    data = _read_json(GOVERNANCE_PARAMS_PATH, {})
     row = data.get(symbol) or {}
     return {
         "conf_min": float(row.get("conf_min", default["conf_min"])),
@@ -47,23 +51,22 @@ def load_governance_params(symbol: str) -> Dict[str, Any]:
     }
 
 # --- shadow logging ---------------------------------------------------------
-SHADOW_LOG = Path("logs/signal_inference_shadow.jsonl")
-SHADOW_LOG.parent.mkdir(parents=True, exist_ok=True)
-
 def _shadow_write(payload: Dict[str, Any]) -> None:
     """
-    Append a single JSON line to the shadow log. Never throw.
+    Append a single JSON line to the shadow log with atomic writes.
+    Uses observable failure tracking - never throws.
     """
     try:
         payload = dict(payload)
         if "ts" not in payload:
             payload["ts"] = _utcnow_iso()
-        line = json.dumps(payload, default=str)
-        with SHADOW_LOG.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        # don't break signal flow for logging errors
-        pass
+        atomic_jsonl_append(SHADOW_LOG_PATH, payload)
+    except Exception as e:
+        # Don't break signal flow, but track failures for monitoring
+        failure_tracker.record_failure("shadow_write", e, {
+            "symbol": payload.get("symbol"),
+            "reason": payload.get("reason")
+        })
 
 # --- ML inference wrapper (safe) -------------------------------------------
 def _infer_ml(asset: str) -> Dict[str, Any]:
@@ -126,7 +129,9 @@ def generate_signals():
     Always: write **ML shadow** inference per asset.
     Flip to live-ML by setting MW_INFER_LIVE=1.
     """
-    print(f"[{datetime.utcnow()}] Running signal generation...")
+    logger.info("Running signal generation", extra={
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
 
     stablecoins = {"USDC", "USDT", "DAI", "TUSD", "BUSD"}
     valid_signals: List[dict] = []
@@ -195,7 +200,7 @@ def generate_signals():
                     "confidence_score": confidence,
                     "confidence_label": label_confidence(confidence),
                     "direction": direction,
-                    "timestamp": datetime.utcnow(),
+                    "timestamp": datetime.now(timezone.utc),
                     "governance": gov,
                     "inference": "ml_live",
                 }
@@ -223,7 +228,7 @@ def generate_signals():
                     "confidence_score": confidence,
                     "confidence_label": label_confidence(confidence),
                     "direction": direction,
-                    "timestamp": datetime.utcnow(),
+                    "timestamp": datetime.now(timezone.utc),
                     "inference": "heuristic",
                 }
 
@@ -251,10 +256,7 @@ def shadow_probe(symbols: Iterable[str] | str = ("BTC", "ETH", "SOL"), reason: s
     # Normalize symbols to a list
     if isinstance(symbols, str):
         symbols = [symbols]
-    try:
-        ts = datetime.now(timezone.utc).isoformat()
-    except Exception:
-        ts = datetime.utcnow().isoformat() + "Z"
+    ts = datetime.now(timezone.utc).isoformat()
 
     wrote = 0
     for sym in symbols:
@@ -272,7 +274,10 @@ def shadow_probe(symbols: Iterable[str] | str = ("BTC", "ETH", "SOL"), reason: s
         }
         _shadow_write(rec)
         wrote += 1
-    print(f"[shadow_probe] wrote {wrote} record(s) to {SHADOW_LOG}")
+    logger.info(f"Shadow probe completed", extra={
+        "records_written": wrote,
+        "log_path": str(SHADOW_LOG_PATH)
+    })
 
 # --- tiny CLI hook for CI probes (optional) --------------------------------
 if __name__ == "__main__":

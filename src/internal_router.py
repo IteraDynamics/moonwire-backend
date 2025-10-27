@@ -2,21 +2,25 @@ from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel
 from collections import defaultdict
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import os
+import logging
 import requests
 from src.signal_utils import compute_trust_scores
 from src.reviewer_impact_logger import log_reviewer_impact
 from src.reviewer_impact_logger import ReviewerImpactLog
 from src.reviewer_log_utils import log_reviewer_action
+from src.jsonl_writer import atomic_jsonl_append
+from src.paths import (
+    FEEDBACK_LOG_PATH,
+    SUPPRESSION_REVIEW_PATH,
+    RETRAIN_QUEUE_PATH
+)
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/internal", tags=["internal-tools"])
-
-FEEDBACK_LOG_PATH = Path("data/feedback.jsonl")
-SUPPRESSION_REVIEW_PATH = Path("data/suppression_review_queue.jsonl")
-RETRAIN_QUEUE_PATH = Path("data/retrain_queue.jsonl")
 
 # === Feedback Summary Route ===
 @router.get("/feedback-summary")
@@ -148,7 +152,7 @@ def update_suppression_status(update: SuppressionStatusUpdate):
         raise HTTPException(status_code=400, detail="Invalid status value.")
 
     action_weights = {"ignored": 0.1, "reviewed": 0.3, "retrained": 0.6, "overridden": 1.0}
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     updated_entries = []
     found = False
     status_changed = False
@@ -287,7 +291,7 @@ def suppression_pattern_summary(
         return {"patterns": []}
 
     pattern_groups = defaultdict(list)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     start_dt = datetime.fromisoformat(start_date) if start_date else datetime.min
     end_dt = datetime.fromisoformat(end_date) if end_date else now
@@ -359,7 +363,7 @@ def trust_breakdown_timeline(
 
     timeline_map = defaultdict(list)
     start_dt = datetime.fromisoformat(start_date) if start_date else datetime.min
-    end_dt = datetime.fromisoformat(end_date) if end_date else datetime.utcnow()
+    end_dt = datetime.fromisoformat(end_date) if end_date else datetime.now(timezone.utc)
 
     with SUPPRESSION_REVIEW_PATH.open("r") as f:
         for line in f:
@@ -419,7 +423,7 @@ def trust_today_diagnostics():
     if not SUPPRESSION_REVIEW_PATH.exists():
         return {"error": "Suppression log not found."}
 
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     total_signals = 0
     suppressed = 0
     overridden = 0
@@ -471,11 +475,8 @@ def trust_today_diagnostics():
         "avg_trust_score_today": avg_trust,
         "top_risky_assets": top_assets,
         "most_common_retrain_hints": top_hints,
-        "last_updated_at": datetime.utcnow().isoformat()
+        "last_updated_at": datetime.now(timezone.utc).isoformat()
     }
-
-SUPPRESSION_REVIEW_PATH = Path("data/suppression_review_queue.jsonl")
-SUPPRESSION_REVIEW_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 class SuppressedSignal(BaseModel):
     signal_id: str
@@ -500,7 +501,7 @@ def log_signal_for_review(signal: SuppressedSignal):
         "trust_score": signal.trust_score,
         "suppression_reason": signal.suppression_reason,
         "status": "pending",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "label": signal.label,
         "score": signal.score,
         "confidence": signal.confidence,
@@ -510,57 +511,9 @@ def log_signal_for_review(signal: SuppressedSignal):
     }
 
     try:
-        with SUPPRESSION_REVIEW_PATH.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
+        atomic_jsonl_append(SUPPRESSION_REVIEW_PATH, entry)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write suppression log: {e}")
 
     return {"logged": True, "signal_id": signal.signal_id}
-    
-    valid_statuses = {"reviewed", "ignored", "retrained", "overridden"}
-
-class SuppressionStatusUpdate(BaseModel):
-    signal_id: str
-    status: str
-    reviewer_id: str
-    note: Optional[str] = None
-
-@router.post("/update-suppression-status")
-def update_suppression_status(update: SuppressionStatusUpdate = Body(...)):
-    if update.status not in valid_statuses:
-        raise HTTPException(status_code=400, detail="Invalid status value.")
-
-    now = datetime.utcnow()
-    entry = {
-        "signal_id": update.signal_id,
-        "status": update.status,
-        "reviewer_id": update.reviewer_id,
-        "reviewer_note": update.note,
-        "logged_at": now.isoformat(),
-    }
-
-    log_reviewer_impact(**entry)
-
-    return {"updated": True}
-    
-class ReviewerImpactLog(BaseModel):
-    signal_id: str
-    reviewer_id: str
-    action: str  # e.g. "reviewed", "ignored", etc.
-    note: Optional[str] = None
-    
-# This is just a helper — no decorator
-def log_reviewer_impact(entry: ReviewerImpactLog):
-    log_reviewer_action(
-        signal_id=entry.signal_id,
-        reviewer_id=entry.reviewer_id,
-        action=entry.action,
-        note=entry.note,
-    )
-
-# This is your actual HTTP endpoint — keep this decorator
-#@router.post("/reviewer-impact-log")
-#async def reviewer_impact_endpoint(log: ReviewerImpactLog):
-#    log_reviewer_impact(log)
-#    return {"status": "logged"}
 

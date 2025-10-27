@@ -12,6 +12,5 @@ schedule
 pydantic
 pandas
 scikit-learn
-requests
 numpy
 joblib
