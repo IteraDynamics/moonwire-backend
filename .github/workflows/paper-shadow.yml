@@ -1,4 +1,13 @@
-name: Paper from Shadow
+# ⚠️ DEPRECATION WARNING ⚠️
+# This workflow has LOOK-AHEAD BIAS (data leakage) because it:
+# 1. Trains models on ALL historical data
+# 2. Backfills shadow predictions on that same data (the model has "seen" it before)
+# 3. Paper trades those predictions with inflated results
+#
+# For PROPER validation without leakage, use walkforward-cv.yml instead.
+# This workflow may be useful for quick smoke tests or recent model monitoring only.
+
+name: Paper from Shadow (⚠️ DEPRECATED - Has Look-Ahead Bias)
 
 permissions:
   contents: read

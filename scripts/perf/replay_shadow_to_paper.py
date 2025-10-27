@@ -7,21 +7,51 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import logging
 
 from scripts.perf.paper_trader import Ctx as PTX, run_paper_trader  # your existing paper trader
+from src.paths import PAPER_TRADING_PARAMS_PATH
+
+logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------------
-# Config (env-overridable)
+# Load centralized paper trading config
+# -------------------------------------------------------------------
+def _load_paper_trading_config() -> Dict[str, Any]:
+    """Load paper trading parameters from config file with sensible defaults."""
+    defaults = {
+        "deadband": 0.08,
+        "min_flip_min": 360,
+        "lookback_h": 720,
+        "conf_min": 0.60
+    }
+
+    try:
+        if PAPER_TRADING_PARAMS_PATH.exists():
+            with PAPER_TRADING_PARAMS_PATH.open("r", encoding="utf-8") as f:
+                config = json.load(f)
+                logger.info(f"Loaded paper trading params from {PAPER_TRADING_PARAMS_PATH}")
+                return {**defaults, **config}  # Config overrides defaults
+    except Exception as e:
+        logger.warning(f"Failed to load paper trading params from {PAPER_TRADING_PARAMS_PATH}: {e}. Using defaults.")
+
+    return defaults
+
+_PT_CONFIG = _load_paper_trading_config()
+
+# -------------------------------------------------------------------
+# Config (env-overridable, with config file as fallback)
 # -------------------------------------------------------------------
 SHADOW_PATH = Path(os.getenv("SHADOW_LOG", "logs/signal_inference_shadow.jsonl"))
 OUT_TRADES  = Path(os.getenv("PAPER_TRADES_LOG", "logs/paper_trades.jsonl"))
 
 # Global fallbacks (used when a shadow row does not carry "gov")
-DEFAULT_CONF_MIN   = float(os.getenv("REPLAY_CONF_MIN", "0.60"))
-DEFAULT_DEADBAND   = float(os.getenv("REPLAY_DEADBAND", "0.00"))  # treat near-0.5 as indecisive
-DEFAULT_MIN_FLIP_M = int(os.getenv("REPLAY_MIN_FLIP_MIN", "0"))
+# Priority: env var > config file > hardcoded default
+DEFAULT_CONF_MIN   = float(os.getenv("REPLAY_CONF_MIN", str(_PT_CONFIG.get("conf_min", 0.60))))
+DEFAULT_DEADBAND   = float(os.getenv("REPLAY_DEADBAND", os.getenv("MW_PERF_DEADBAND", str(_PT_CONFIG.get("deadband", 0.08)))))
+DEFAULT_MIN_FLIP_M = int(os.getenv("REPLAY_MIN_FLIP_MIN", os.getenv("MW_PERF_MIN_FLIP_MIN", str(_PT_CONFIG.get("min_flip_min", 360)))))
 
-LOOKBACK_H = int(os.getenv("REPLAY_LOOKBACK_H", os.getenv("MW_PERF_LOOKBACK_H", "72")))
+LOOKBACK_H = int(os.getenv("REPLAY_LOOKBACK_H", os.getenv("MW_PERF_LOOKBACK_H", str(_PT_CONFIG.get("lookback_h", 720)))))
 ALLOWED    = {s.strip().upper() for s in os.getenv("MW_PERF_SYMBOLS", "BTC,ETH,SOL").split(",") if s.strip()}
 
 # -------------------------------------------------------------------

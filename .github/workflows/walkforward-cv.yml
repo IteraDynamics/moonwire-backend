@@ -170,6 +170,8 @@ jobs:
           MW_PERF_FEES_BPS: "1"
           MW_PERF_CAPITAL: "100000"
           MW_PERF_FORCE_DEMO: "false"
+          MW_PERF_DEADBAND: "0.08"
+          MW_PERF_MIN_FLIP_MIN: "360"
         run: |
           python -m scripts.perf.replay_shadow_to_paper
           echo "Metrics:"
