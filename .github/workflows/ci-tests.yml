@@ -175,7 +175,7 @@ jobs:
           echo "MW_HORIZON_H=1" >> "$GITHUB_ENV"
           echo "MW_FEES_BPS=1" >> "$GITHUB_ENV"
           echo "MW_SLIPPAGE_BPS=2" >> "$GITHUB_ENV"
-          echo "MW_CONF_GRID=0.48,0.50,0.52,0.55,0.58,0.60,0.62" >> "$GITHUB_ENV"
+          echo "MW_CONF_GRID=0.50,0.52,0.55,0.58,0.60,0.62,0.65,0.68,0.70" >> "$GITHUB_ENV"
           echo "MW_DEBOUNCE_GRID_MIN=5,10,15,30" >> "$GITHUB_ENV"
           echo "MW_HORIZON_GRID_H=1,2,3,6" >> "$GITHUB_ENV"
           echo "TUNER_STRICT=0" >> "$GITHUB_ENV"
