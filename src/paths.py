@@ -43,6 +43,6 @@ GOVERNANCE_PARAMS_PATH = MODELS_DIR / "governance_params.json"
 # Performance metrics
 PERFORMANCE_METRICS_PATH = MODELS_DIR / "performance_metrics.json"
 
-# Training metadata
-TRAINING_VERSION_FILE = MODELS_DIR / "training_version.txt"
-TRIGGER_LOG_PATH = MODELS_DIR / "trigger_history.jsonl"
+# Training metadata (allow test overrides via env vars)
+TRAINING_VERSION_FILE = Path(os.getenv("TRAINING_VERSION_FILE", str(MODELS_DIR / "training_version.txt")))
+TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", str(MODELS_DIR / "trigger_history.jsonl")))
