@@ -355,3 +355,112 @@ def run_paper_trader(ctx: Ctx, mode: str = "backtest") -> Dict[str, Any]:
         plt.tight_layout(); plt.savefig(ctx.artifacts_dir / "perf_by_symbol_bar.png"); plt.close()
 
     return out
+
+
+# =========================
+# SHIM: PaperTrader adapter
+# =========================
+class PaperTrader:
+    """
+    Adapter to support `from scripts.perf.paper_trader import PaperTrader`
+    and provide a `replay_shadow(...)` method that converts shadow inference
+    rows into normalized "paper trade intents".
+
+    This does NOT compute PnL — it just normalizes/filters shadow rows and
+    writes:
+      - logs/paper_trades.jsonl
+      - models/paper_summary.json
+    """
+
+    def __init__(self, accept_reasons: Optional[Iterable[str]] = None, min_conf: float = 0.0):
+        # Shadow rows to consider trade-like (tweak as you enrich shadow logging)
+        self.accept_reasons = set(accept_reasons or {"shadow", "shadow_only_live_ml_candidate", "live_ml_executed"})
+        self.min_conf = float(min_conf)
+
+    def _iter_shadow(self, shadow_path: Path) -> Iterable[Dict[str, Any]]:
+        if not shadow_path.exists() or shadow_path.stat().st_size == 0:
+            return []
+        with shadow_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    yield json.loads(s)
+                except Exception:
+                    continue
+
+    def _norm_ts(self, ts: Any) -> str:
+        try:
+            if isinstance(ts, str) and "T" in ts:
+                return ts
+        except Exception:
+            pass
+        return _iso(_now_utc())
+
+    def replay_shadow(
+        self,
+        shadow_path: Path = Path("logs/signal_inference_shadow.jsonl"),
+        trades_out: Path = Path("logs/paper_trades.jsonl"),
+        summary_out: Path = Path("models/paper_summary.json"),
+    ) -> Dict[str, Any]:
+        _ensure_dir(trades_out.parent)
+        _ensure_dir(summary_out.parent)
+
+        total = 0
+        considered = 0
+        written = 0
+        per_symbol: Dict[str, Dict[str, int]] = {}
+
+        # start fresh
+        _fsync_text(trades_out, "", mode="w")
+
+        for row in self._iter_shadow(shadow_path):
+            total += 1
+            reason = row.get("reason")
+            if reason not in self.accept_reasons:
+                continue
+
+            direction = row.get("ml_dir")
+            confidence = row.get("ml_conf")
+            symbol = row.get("symbol")
+
+            if direction not in {"long", "short"}:
+                continue
+
+            try:
+                conf = float(confidence) if confidence is not None else None
+            except Exception:
+                conf = None
+
+            if conf is None or conf < self.min_conf:
+                continue
+
+            considered += 1
+
+            trade = {
+                "ts": self._norm_ts(row.get("ts")),
+                "symbol": symbol,
+                "side": direction,
+                "confidence": conf,
+                "source": reason,
+                "governance": row.get("gov", {}),
+            }
+            _fsync_text(trades_out, json.dumps(trade) + "\n", mode="a")
+            written += 1
+
+            if symbol:
+                per_symbol.setdefault(symbol, {"candidates": 0, "written": 0})
+                per_symbol[symbol]["candidates"] += 1
+                per_symbol[symbol]["written"] += 1
+
+        summary = {
+            "shadow_path": str(shadow_path),
+            "trades_out": str(trades_out),
+            "total_rows": total,
+            "considered_rows": considered,
+            "written_trades": written,
+            "per_symbol": per_symbol,
+        }
+        _fsync_text(summary_out, json.dumps(summary, indent=2) + "\n", mode="w")
+        return summary

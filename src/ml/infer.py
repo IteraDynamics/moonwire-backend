@@ -2,16 +2,30 @@
 from __future__ import annotations
 import json
 import os
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import joblib
 import numpy as np
 from datetime import datetime, timedelta, timezone
 
-from src.paths import MODELS_DIR, RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+from src.paths import (
+    MODELS_DIR,
+    RETRAINING_LOG_PATH,
+    RETRAINING_TRIGGERED_LOG_PATH
+)
+from src.jsonl_writer import atomic_jsonl_append
 from src.analytics.origin_utils import normalize_origin as _norm
 
-# Filenames
+logger = logging.getLogger(__name__)
+
+# Module-level paths that tests need to override via env vars
+# These are defined HERE (not in src.paths) so that importlib.reload()
+# will re-evaluate them with updated env vars
+_TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", str(MODELS_DIR / "trigger_history.jsonl")))
+_TRAINING_VERSION_FILE = Path(os.getenv("TRAINING_VERSION_FILE", str(MODELS_DIR / "training_version.txt")))
+
+# Filenames (legacy trigger-likelihood models retained)
 _LOGI_MODEL = "trigger_likelihood_v0.joblib"
 _LOGI_META  = "trigger_likelihood_v0.meta.json"
 _COV_NAME   = "feature_coverage.json"
@@ -21,11 +35,6 @@ _RF_META    = "trigger_likelihood_rf.meta.json"
 
 _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
-
-# Logs / metadata
-_TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
-_TRAINING_VERSION_FILE = Path(os.getenv("TRAINING_VERSION_FILE", MODELS_DIR / "training_version.txt"))
-
 
 # ---------- tiny utils ----------
 def _read_model_version() -> str:
@@ -57,8 +66,7 @@ def _load_cov(models_dir: Path | None = None) -> Dict[str, Any]:
     except Exception:
         return {}
 
-
-# ---------- public metadata helpers ----------
+# ---------- public metadata helpers (legacy) ----------
 def model_metadata(models_dir: Path | None = None) -> Dict[str, Any]:
     """Logistic metadata (+ coverage merged) for back-compat."""
     try:
@@ -91,8 +99,7 @@ def model_metadata_all(models_dir: Path | None = None) -> Dict[str, Any]:
         pass
     return out
 
-
-# ---------- scoring ----------
+# ---------- scoring (legacy trigger-likelihood) ----------
 def _vectorize(features: Dict[str, Any], feat_order: List[str]) -> np.ndarray:
     return np.array([[float(features.get(k, 0.0) or 0.0) for k in feat_order]], dtype=float)
 
@@ -131,51 +138,37 @@ def infer_score(payload: Dict[str, Any], *, explain: bool = False, top_n: int = 
         out["contributions"] = _contributions_linear(model, x, feat_order, top_n=top_n)
     return out
 
-
 def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = None) -> Dict[str, Any]:
-    """
-    Ensemble scoring over available models (logistic + random forest + gb).
-    Returns dict with mean prob, band, votes, etc., and **logs** the scoring event.
-    """
     votes: Dict[str, float] = {}
     demo = False
     feats: Dict[str, Any] = payload.get("features") or {}
-
-    # try logistic
     try:
         L_model, L_meta = _load_model_and_meta(_LOGI_MODEL, _LOGI_META, models_dir)
         order = L_meta.get("feature_order") or []
         votes["logistic"] = float(L_model.predict_proba(_vectorize(feats, order))[0, 1])
     except Exception:
         pass
-
-    # RF
     try:
         RF_model, RF_meta = _load_model_and_meta(_RF_MODEL, _RF_META, models_dir)
         order = RF_meta.get("feature_order") or []
         votes["rf"] = float(RF_model.predict_proba(_vectorize(feats, order))[0, 1])
     except Exception:
         pass
-
-    # GB
     try:
         GB_model, GB_meta = _load_model_and_meta(_GB_MODEL, _GB_META, models_dir)
         order = GB_meta.get("feature_order") or []
         votes["gb"] = float(GB_model.predict_proba(_vectorize(feats, order))[0, 1])
     except Exception:
         pass
-
     if not votes:
         bz = float(feats.get("burst_z", 0.0))
         p_demo = 1 / (1 + np.exp(-0.08 * bz))
         votes["logistic"] = p_demo
         demo = True
-
     probs = list(votes.values())
     mean = float(np.mean(probs))
     low = float(min(probs))
     high = float(max(probs))
-
     res: Dict[str, Any] = {
         "prob_trigger_next_6h": mean,
         "low": low,
@@ -184,10 +177,8 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
         "models": list(votes.keys()),
         "demo": demo,
     }
-
-    # -------- logging (robust; never throws) --------
+    # logging (never throws)
     try:
-        # 1) figure out origin, with many fallbacks
         origin_for_log = (
             payload.get("origin")
             or feats.get("_origin")
@@ -196,19 +187,13 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
             or os.getenv("TL_LOG_FALLBACK_ORIGIN", "unknown")
         )
         origin_for_log = str(origin_for_log).strip().lower() if origin_for_log is not None else "unknown"
-
-        # 2) explanation fields (if a caller added them upstream)
         exp = res.get("explanation") or payload.get("explanation") or {}
-
-        adjusted_score = float(
-            exp.get("adjusted_score", res.get("prob_trigger_next_6h", 0.0)) or 0.0
-        )
+        adjusted_score = float(exp.get("adjusted_score", res.get("prob_trigger_next_6h", 0.0)) or 0.0)
         threshold_used = exp.get("threshold_after_volatility")
         decision = exp.get("decision", "not_triggered" if adjusted_score < (threshold_used or 1.0) else "triggered")
         regime = exp.get("volatility_regime")
         drifted = exp.get("drifted_features", [])
         top_feats = exp.get("top_contributors", [])
-
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "origin": origin_for_log,
@@ -220,21 +205,13 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
             "top_contributors": top_feats,
             "model_version": _read_model_version(),
         }
-        _TRIGGER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _TRIGGER_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        # never fail user scoring for logging issues
-        pass
-
+        atomic_jsonl_append(_TRIGGER_LOG_PATH, entry)
+    except Exception as e:
+        logger.warning(f"Failed to log trigger inference: {e}")
     return res
-
 
 # ---------- Volatility-aware thresholds ----------
 def compute_volatility_adjusted_threshold(base_threshold: float, regime: str) -> Dict[str, Any]:
-    """
-    Adjust threshold based on volatility regime.
-    """
     try:
         mults = {
             "calm": float(os.getenv("TL_REGIME_THRESH_MULT_CALM", "0.9")),
@@ -244,7 +221,6 @@ def compute_volatility_adjusted_threshold(base_threshold: float, regime: str) ->
         multiplier = mults.get(str(regime).strip().lower(), 1.0)
     except Exception:
         multiplier = 1.0
-
     adjusted = base_threshold * multiplier
     return {
         "base_threshold": base_threshold,
@@ -252,7 +228,6 @@ def compute_volatility_adjusted_threshold(base_threshold: float, regime: str) ->
         "regime_multiplier": multiplier,
         "threshold_after_volatility": adjusted,
     }
-
 
 # Back-compat alias
 def score(payload: dict, explain: bool = False):
@@ -264,8 +239,7 @@ __all__ = [
     "compute_volatility_adjusted_threshold",
 ]
 
-
-# ---------- Online backtest ----------
+# ---------- Online backtest (legacy utility) ----------
 def _load_jsonl(path: Path) -> List[dict]:
     try:
         return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
@@ -328,3 +302,101 @@ def live_backtest_last_24h(interval: str = "hour", threshold: float = 0.5) -> Di
         "overall": {"precision": round(prec,3), "recall": round(rec,3), "tp":tp,"fp":fp,"fn":fn,"tn":tn},
         "per_origin": per_origin[:3],
     }
+
+# ==== MoonWire asset inference bridge (models/current per-symbol) ===========
+from pathlib import Path as _Path
+import json as _json
+import joblib as _joblib
+import numpy as _np
+
+def _load_current_bundle(models_dir: _Path | None = None, symbol: str | None = None):
+    """
+    Load per-symbol bundle if present:
+      models/current/{SYMBOL}/{manifest.json,features.json,model.joblib}
+    Fallbacks:
+      models/current/default/...
+      models/current/...
+    Returns (model, feature_order, manifest_dict)
+    """
+    root = _Path("models/current") if models_dir is None else _Path(models_dir)
+
+    search = []
+    if symbol:
+        search.append(root / str(symbol).upper())
+    search.append(root / "default")
+    search.append(root)  # legacy
+
+    for base in search:
+        man_p = base / "manifest.json"
+        feat_p = base / "features.json"
+        mdl_p = base / "model.joblib"
+        if man_p.exists() and mdl_p.exists():
+            manifest = _json.loads(man_p.read_text(encoding="utf-8"))
+            feats = []
+            if feat_p.exists():
+                fj = _json.loads(feat_p.read_text(encoding="utf-8"))
+                feats = fj.get("feature_order") or fj.get("features") or []
+            if not feats:
+                feats = manifest.get("feature_order") or manifest.get("features") or []
+            if not feats:
+                raise RuntimeError("feature list missing in bundle")
+            model = _joblib.load(mdl_p)
+            return model, [str(f) for f in feats], manifest
+
+    raise FileNotFoundError(f"inference bundle not found for symbol={symbol} under {root}")
+
+def _build_latest_features(symbol: str, manifest: dict) -> dict:
+    """
+    Recompute the latest feature row for `symbol` so inference matches training.
+    """
+    from scripts.ml.data_loader import load_prices
+    from scripts.ml.feature_builder import build_features
+    lookback = int(manifest.get("lookback_days", 180) or 180)
+    prices = load_prices([symbol], lookback_days=lookback)
+    feats_map = build_features(prices)
+    df = feats_map[symbol]
+    if df is None or len(df) == 0:
+        raise RuntimeError("no features built for symbol")
+    return df.iloc[-1].to_dict()
+
+def infer_asset_signal(symbol: str, *, models_dir: _Path | None = None) -> dict:
+    """
+    Returns:
+      {
+        "symbol": "BTC",
+        "y_pred": 0|1,
+        "direction": "long"|"short",
+        "confidence": float,  # probability of long
+        "p_long": float,
+        "feature_order": [...],
+        "model_type": "...",
+      }
+    """
+    model, feat_order, manifest = _load_current_bundle(models_dir, symbol=symbol)
+    row = _build_latest_features(symbol, manifest)
+    x = _np.array([[float(row.get(k, 0.0) or 0.0) for k in feat_order]], dtype=float)
+
+    if hasattr(model, "predict_proba"):
+        p_long = float(model.predict_proba(x)[0, 1])
+    elif hasattr(model, "decision_function"):
+        z = float(model.decision_function(x)[0])
+        p_long = 1.0 / (1.0 + _np.exp(-z))
+    else:
+        raise RuntimeError("model has neither predict_proba nor decision_function")
+
+    y_pred = 1 if p_long >= 0.5 else 0
+    return {
+        "symbol": symbol,
+        "y_pred": y_pred,
+        "direction": "long" if y_pred == 1 else "short",
+        "confidence": p_long,
+        "p_long": p_long,
+        "feature_order": feat_order,
+        "model_type": manifest.get("model_type", "unknown"),
+    }
+
+try:
+    __all__.append("infer_asset_signal")  # type: ignore
+except Exception:
+    __all__ = [*globals().get("__all__", []), "infer_asset_signal"]
+# ===========================================================================

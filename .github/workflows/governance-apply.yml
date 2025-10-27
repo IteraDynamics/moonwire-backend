@@ -1,0 +1,87 @@
+name: Governance Apply
+
+permissions:
+  contents: read
+  actions: read
+
+
+on:
+  schedule:
+    - cron: "20 3 * * *"   # daily 03:20 UTC
+  workflow_dispatch: {}
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      MW_NO_TRADE: "1"
+      GOV_OUT: "models/governance_params.json"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Prefer your existing script if present:
+      - name: Apply governance (fallback safe updater)
+        run: |
+          python - <<'PY'
+          import json, statistics as stat
+          from pathlib import Path
+          import datetime as dt
+
+          shadow = Path("logs/signal_inference_shadow.jsonl")
+          out    = Path("models/governance_params.json")
+          out.parent.mkdir(parents=True, exist_ok=True)
+
+          # naive: per symbol, lower conf_min if recent conf high; raise if low
+          recent = {}
+          if shadow.exists():
+              for line in shadow.read_text(encoding="utf-8").splitlines()[-2000:]:
+                  try:
+                      row = json.loads(line)
+                  except Exception:
+                      continue
+                  if not row.get("ml_ok"):
+                      continue
+                  sym = row.get("symbol")
+                  conf = row.get("ml_conf")
+                  if sym and isinstance(conf, (int,float)):
+                      recent.setdefault(sym, []).append(conf)
+
+          params = {}
+          for sym, arr in recent.items():
+              m = stat.fmean(arr) if arr else 0.5
+              # center conf_min gently around 0.6 with 5% step
+              base = 0.60
+              step = 0.05
+              if m > 0.62:
+                  conf_min = max(0.55, base - step)
+              elif m < 0.58:
+                  conf_min = min(0.85, base + step)
+              else:
+                  conf_min = base
+              params[sym] = {"conf_min": round(conf_min, 2), "debounce_min": 15}
+
+          if not params:
+              params = {"BTC": {"conf_min": 0.60, "debounce_min": 15}}
+
+          meta = {"updated": dt.datetime.utcnow().isoformat()}
+          payload = {**params, "_meta": meta}
+          out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+          print("Wrote", out)
+          PY
+
+      - name: Upload governance params
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-params
+          path: models/governance_params.json
+          if-no-files-found: error

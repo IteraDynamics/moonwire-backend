@@ -1,0 +1,114 @@
+# .github/workflows/shadow-inference.yml
+name: Shadow Inference
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: "CI run id that produced 'inference-bundle-current'"
+        required: false
+      symbols:
+        description: "Comma-separated symbols to probe"
+        required: false
+        default: "BTC,ETH,SOL"
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt || true
+
+      # ---------- pull inference bundle from ANOTHER run ----------
+      - name: Download inference bundle from CI run
+        if: ${{ inputs.ci_run_id != '' }}
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          run_id: ${{ inputs.ci_run_id }}
+          repo: ${{ github.repository }}
+          name: inference-bundle-current
+          path: _dl_bundle
+          if_no_artifact_found: fail
+
+      - name: Materialize bundle into models/current
+        if: ${{ inputs.ci_run_id != '' }}
+        run: |
+          set -eux
+          mkdir -p models/current
+          # The artifact may contain files at root or under models/current/
+          if [ -d _dl_bundle/models/current ]; then
+            shopt -s dotglob
+            cp -R _dl_bundle/models/current/* models/current/ || true
+          else
+            shopt -s dotglob
+            cp -R _dl_bundle/* models/current/ || true
+          fi
+          echo "models/current contents:"
+          ls -lah models/current || true
+
+      - name: Sanity load bundle & score BTC
+        run: |
+          python - <<'PY'
+          import json, joblib, pathlib
+          p = pathlib.Path("models/current")
+          print("bundle files:", [x.name for x in p.iterdir()] if p.exists() else "missing")
+          man = json.loads((p/"manifest.json").read_text())
+          print("manifest.model_type:", man.get("model_type"))
+          from src.ml.infer import infer_asset_signal
+          res = infer_asset_signal("BTC", models_dir=p)
+          print("infer_asset_signal:", res)
+          PY
+
+
+      # ---------- run the shadow probe ----------
+      - name: Run shadow probe
+        run: |
+          python - <<'PY'
+          import os
+          from src.signal_generator import shadow_probe
+          syms = [s.strip().upper() for s in (os.getenv("SYMS","BTC,ETH,SOL")).split(",") if s.strip()]
+          shadow_probe(syms)
+          PY
+        env:
+          SYMS: ${{ inputs.symbols }}
+
+      - name: Tail shadow log
+        run: |
+          echo "### Inference Shadow (tail)"
+          if test -s logs/signal_inference_shadow.jsonl; then
+            tail -n 5 logs/signal_inference_shadow.jsonl
+          else
+            echo "no shadow log"
+          fi
+
+      - name: Upload inference shadow
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-shadow
+          path: logs/signal_inference_shadow.jsonl
+          if-no-files-found: warn
+
+      - name: Upload shadow log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadow-log
+          path: logs/signal_inference_shadow.jsonl
+          if-no-files-found: warn
