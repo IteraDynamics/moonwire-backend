@@ -27,6 +27,18 @@ on:
         description: "Override conf_min during gating (blank = use governance/backfill row)"
         required: false
         default: ""
+      deadband_override:
+        description: "Override deadband for paper trading (blank = use config file default: 0.08)"
+        required: false
+        default: ""
+      min_flip_min_override:
+        description: "Override min_flip_min for paper trading in minutes (blank = use config file default: 360)"
+        required: false
+        default: ""
+      lookback_h_override:
+        description: "Override lookback_h for paper trading replay window (blank = use config file default: 720)"
+        required: false
+        default: ""
 
 jobs:
   walkforward:
@@ -38,6 +50,9 @@ jobs:
       KFOLDS: ${{ inputs.k_folds }}
       WIN_H: ${{ inputs.window_hours }}
       CONF_MIN_OVERRIDE: ${{ inputs.conf_min_override }}
+      DEADBAND_OVERRIDE: ${{ inputs.deadband_override }}
+      MIN_FLIP_MIN_OVERRIDE: ${{ inputs.min_flip_min_override }}
+      LOOKBACK_H_OVERRIDE: ${{ inputs.lookback_h_override }}
 
     steps:
       - name: Checkout
@@ -110,6 +125,11 @@ jobs:
           k = max(2, int(os.getenv("KFOLDS","5")))
           win_h = int(os.getenv("WIN_H","720"))
           conf_min_override = os.getenv("CONF_MIN_OVERRIDE","").strip()
+
+          # Paper trading override parameters (passed to replay_shadow_to_paper)
+          deadband_override = os.getenv("DEADBAND_OVERRIDE","").strip()
+          min_flip_min_override = os.getenv("MIN_FLIP_MIN_OVERRIDE","").strip()
+          lookback_h_override = os.getenv("LOOKBACK_H_OVERRIDE","").strip()
 
           src = Path(os.getenv("SHADOW_SRC","logs/signal_inference_shadow_backfill.jsonl"))
           dst = Path("logs") / "signal_inference_shadow.jsonl"  # canonical that paper_trader reads
@@ -192,7 +212,17 @@ jobs:
                       w.write(json.dumps(jj) + "\n")
 
               print(f"[WF] Fold {fi+1}/{k}: rows={len(fold_rows)}  range={f_start}..{f_end}")
-              subprocess.run([sys.executable, "-m", "scripts.perf.replay_shadow_to_paper"], check=True)
+
+              # Build env for replay_shadow_to_paper with overrides
+              replay_env = os.environ.copy()
+              if deadband_override:
+                  replay_env["MW_PERF_DEADBAND"] = deadband_override
+              if min_flip_min_override:
+                  replay_env["MW_PERF_MIN_FLIP_MIN"] = min_flip_min_override
+              if lookback_h_override:
+                  replay_env["MW_PERF_LOOKBACK_H"] = lookback_h_override
+
+              subprocess.run([sys.executable, "-m", "scripts.perf.replay_shadow_to_paper"], check=True, env=replay_env)
 
               # Read per-fold metrics
               if metrics_path.exists():
