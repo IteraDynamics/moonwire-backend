@@ -2,14 +2,28 @@
 from __future__ import annotations
 import json
 import os
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import joblib
 import numpy as np
 from datetime import datetime, timedelta, timezone
 
-from src.paths import MODELS_DIR, RETRAINING_LOG_PATH, RETRAINING_TRIGGERED_LOG_PATH
+from src.paths import (
+    MODELS_DIR,
+    RETRAINING_LOG_PATH,
+    RETRAINING_TRIGGERED_LOG_PATH
+)
+from src.jsonl_writer import atomic_jsonl_append
 from src.analytics.origin_utils import normalize_origin as _norm
+
+logger = logging.getLogger(__name__)
+
+# Module-level paths that tests need to override via env vars
+# These are defined HERE (not in src.paths) so that importlib.reload()
+# will re-evaluate them with updated env vars
+_TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", str(MODELS_DIR / "trigger_history.jsonl")))
+_TRAINING_VERSION_FILE = Path(os.getenv("TRAINING_VERSION_FILE", str(MODELS_DIR / "training_version.txt")))
 
 # Filenames (legacy trigger-likelihood models retained)
 _LOGI_MODEL = "trigger_likelihood_v0.joblib"
@@ -21,10 +35,6 @@ _RF_META    = "trigger_likelihood_rf.meta.json"
 
 _GB_MODEL   = "trigger_likelihood_gb.joblib"
 _GB_META    = "trigger_likelihood_gb.meta.json"
-
-# Logs / metadata
-_TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", MODELS_DIR / "trigger_history.jsonl"))
-_TRAINING_VERSION_FILE = Path(os.getenv("TRAINING_VERSION_FILE", MODELS_DIR / "training_version.txt"))
 
 # ---------- tiny utils ----------
 def _read_model_version() -> str:
@@ -195,11 +205,9 @@ def infer_score_ensemble(payload: Dict[str, Any], *, models_dir: Path | None = N
             "top_contributors": top_feats,
             "model_version": _read_model_version(),
         }
-        _TRIGGER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _TRIGGER_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
+        atomic_jsonl_append(_TRIGGER_LOG_PATH, entry)
+    except Exception as e:
+        logger.warning(f"Failed to log trigger inference: {e}")
     return res
 
 # ---------- Volatility-aware thresholds ----------

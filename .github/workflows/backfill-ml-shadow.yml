@@ -1,4 +1,3 @@
-
 name: Backfill ML Shadow
 
 on:
@@ -20,6 +19,10 @@ on:
         description: "Override conf_min (blank = use governance)"
         required: false
         default: ""
+      fix_end_ts:
+        description: "Fix end timestamp (ISO8601, e.g. 2025-10-25T21:00:00Z). Leave blank to use 'now'."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -30,10 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
+      # Backfill knobs (read by scripts.perf.backfill_ml_shadow)
       MW_BACKFILL_SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
       MW_BACKFILL_DAYS: ${{ inputs.days || '180' }}
       MW_BACKFILL_INCLUDE_ALL: ${{ inputs.include_all || 'true' }}
       MW_BACKFILL_CONF_MIN_OVERRIDE: ${{ inputs.conf_min_override }}
+      MW_FIX_END_TS: ${{ inputs.fix_end_ts }}
 
     steps:
       - name: Checkout
@@ -54,15 +59,25 @@ jobs:
       # Ensure an inference bundle exists
       # -------------------------------
 
-      # Try to download the bundle produced by CI (won't fail the job if absent)
-      - name: Try download inference bundle from CI
+      # Try to download the bundle produced by CI (won't fail if absent)
+      - name: Try download inference bundle from CI (primary name)
         uses: dawidd6/action-download-artifact@v3
         continue-on-error: true
         with:
-          # Use the workflow's *name* as it appears in GitHub ("CI"), not the path.
           workflow: CI
           workflow_conclusion: success
           name: inference-bundle-current
+          path: _dl_bundle
+
+      # Try alternate artifact name (optional)
+      - name: Try download inference bundle from CI (alt name)
+        if: ${{ hashFiles('_dl_bundle/**') == '' }}
+        uses: dawidd6/action-download-artifact@v3
+        continue-on-error: true
+        with:
+          workflow: CI
+          workflow_conclusion: success
+          name: ml-inference-bundle
           path: _dl_bundle
 
       - name: Install downloaded bundle (if any)
@@ -70,7 +85,7 @@ jobs:
           mkdir -p models/current
           if ls _dl_bundle 1>/dev/null 2>&1; then
             echo "Found downloaded bundle files:"
-            ls -lah _dl_bundle || true
+            ls -lahR _dl_bundle || true
             # Copy flat or nested contents into models/current
             cp -rv _dl_bundle/* models/current/ 2>/dev/null || true
           else
@@ -78,13 +93,14 @@ jobs:
           fi
           echo "Current models/current contents (after copy):"
           ls -lah models/current || true
+          find models/current -maxdepth 2 -type f -print || true
 
       # Fallback: build a fresh (per-symbol aware) bundle if none present
       - name: Build bundle locally if missing
         env:
           MW_ML_SYMBOLS: ${{ inputs.symbols || 'BTC,ETH,SOL' }}
           MW_ML_LOOKBACK_DAYS: ${{ inputs.days || '180' }}
-          MW_ML_MODEL: "hybrid"
+          MW_ML_MODEL: "gb"
           MW_HORIZON_H: "1"
           MW_SOCIAL_ENABLED: "1"
           MW_SOCIAL_INCLUDE: ""
@@ -93,7 +109,7 @@ jobs:
           MW_BRANCH: ${{ github.ref_name }}
           MW_PROTECTED_PATTERN: "^main$"
         run: |
-          set -e
+          set -euo pipefail
           echo "Checking for any model.joblib under models/current/** ..."
           shopt -s globstar || true
           found_any=""
@@ -105,15 +121,12 @@ jobs:
             echo "No bundle found; building locally via scripts.ml.train_predict ..."
             python -m scripts.ml.train_predict
           else
-            echo "Bundle already present; skipping local build."
+            echo "✅ Bundle already present; skipping local build."
           fi
 
           echo "Bundle after ensure/build:"
           ls -lah models/current || true
-          # List nested per-symbol dirs if present
-          if [ -d models/current ]; then
-            find models/current -maxdepth 2 -type f -name "model.joblib" -print || true
-          fi
+          find models/current -maxdepth 2 -type f -print || true
 
       - name: Assert bundle exists
         run: |
@@ -124,23 +137,35 @@ jobs:
             echo "ERROR: No model.joblib found under models/current/**"
             exit 1
           fi
-          # also ensure there is at least one manifest.json nearby
           mcnt=$(ls models/current/**/manifest.json models/current/manifest.json 2>/dev/null | wc -l | tr -d ' ')
           if [ "$mcnt" -eq 0 ]; then
             echo "ERROR: No manifest.json found under models/current/**"
             exit 1
           fi
+          echo "✅ Inference bundle looks good."
 
       # -------------------------------
       # Backfill & Upload
       # -------------------------------
       - name: Run ML shadow backfill
-        run: python -m scripts.perf.backfill_ml_shadow
+        run: |
+          set -e
+          echo "Backfilling with:"
+          echo "  MW_BACKFILL_SYMBOLS=${MW_BACKFILL_SYMBOLS}"
+          echo "  MW_BACKFILL_DAYS=${MW_BACKFILL_DAYS}"
+          echo "  MW_BACKFILL_INCLUDE_ALL=${MW_BACKFILL_INCLUDE_ALL}"
+          echo "  MW_BACKFILL_CONF_MIN_OVERRIDE='${MW_BACKFILL_CONF_MIN_OVERRIDE}'"
+          echo "  MW_FIX_END_TS='${MW_FIX_END_TS}'"
+          python -m scripts.perf.backfill_ml_shadow
 
       - name: Shadow tail (debug)
         run: |
           echo "=== tail logs/signal_inference_shadow.jsonl ==="
           tail -n 50 logs/signal_inference_shadow.jsonl || true
+          echo "=== head ==="
+          head -n 5 logs/signal_inference_shadow.jsonl || true
+          echo "=== line count ==="
+          wc -l logs/signal_inference_shadow.jsonl || true
 
       - name: Upload shadow log (ml-shadow-backfill)
         uses: actions/upload-artifact@v4

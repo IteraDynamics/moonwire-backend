@@ -1,0 +1,239 @@
+name: Walkforward CV (K-fold, expanding window)
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "Comma-separated symbols to evaluate"
+        required: false
+        default: "BTC,ETH"
+      days_total:
+        description: "Total lookback days (e.g., 180)"
+        required: false
+        default: "180"
+      k_folds:
+        description: "Number of folds (e.g., 5)"
+        required: false
+        default: "5"
+      min_train_days:
+        description: "Minimum training window (days) before first fold (warmup)"
+        required: false
+        default: "36"
+      include_all_signals:
+        description: "Backfill ignores conf_min gating? (true/false)"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  cv:
+    name: Fold ${{ matrix.fold }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fold: [1, 2, 3, 4, 5]  # will be trimmed/ignored by runtime if k_folds < 5
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      MPLBACKEND: Agg
+      SYMS: ${{ github.event.inputs.symbols || 'BTC,ETH' }}
+      DAYS_TOTAL: ${{ github.event.inputs.days_total || '180' }}
+      K_FOLDS: ${{ github.event.inputs.k_folds || '5' }}
+      MIN_TRAIN_DAYS: ${{ github.event.inputs.min_train_days || '36' }}
+      INCLUDE_ALL: ${{ github.event.inputs.include_all_signals || 'true' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+          python -m pip install matplotlib
+
+      - name: Compute fold windows (train end, test start/end)
+        id: win
+        run: |
+          python - <<'PY'
+          import os, json, math
+          from datetime import datetime, timedelta, timezone
+
+          syms = [s.strip().upper() for s in os.getenv("SYMS","BTC,ETH").split(",") if s.strip()]
+          days_total = int(os.getenv("DAYS_TOTAL","180"))
+          k_folds    = int(os.getenv("K_FOLDS","5"))
+          fold       = int(os.getenv("GITHUB_MATRIX_FOLD","1"))
+          min_train  = int(os.getenv("MIN_TRAIN_DAYS","36"))
+
+          # Clamp fold index to k_folds in case matrix is larger
+          if fold > k_folds:
+              # Emit a no-op plan and we will skip
+              plan = {"skip": True}
+              print(f"::set-output name=plan::{json.dumps(plan)}")
+              raise SystemExit(0)
+
+          now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+          start_total = now - timedelta(days=days_total)
+          test_days = days_total // k_folds
+          # Partition into contiguous blocks of length test_days
+          # Fold i tests on block i (1-indexed), training ends at test_start (exclusive)
+          test_start = start_total + timedelta(days=test_days*(fold-1))
+          test_end   = test_start + timedelta(days=test_days)
+          # Expanding-window training: from start_total up to test_start
+          train_days = max(min_train, (test_start - start_total).days)
+          train_fix_end = test_start  # ensure no leakage into test window
+
+          plan = {
+              "skip": False,
+              "symbols": syms,
+              "test_days": test_days,
+              "train_days": train_days,
+              "train_fix_end_iso": test_start.isoformat().replace("+00:00","Z"),
+              "test_end_iso": test_end.isoformat().replace("+00:00","Z"),
+              "test_lookback_h": test_days*24,
+          }
+          print("Fold plan:", plan)
+          # Outputs for later steps
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fp:
+              fp.write(f"plan={json.dumps(plan)}\n")
+          PY
+        env:
+          GITHUB_MATRIX_FOLD: ${{ matrix.fold }}
+
+      - name: Skip fold if matrix > k_folds
+        if: ${{ fromJson(steps.win.outputs.plan).skip }}
+        run: echo "Skipping fold ${{ matrix.fold }} (beyond k_folds)"
+
+      # ---------- Train models for this fold (ends at test_start) ----------
+      - name: Train per-symbol bundle (no leakage)
+        if: ${{ !fromJson(steps.win.outputs.plan).skip }}
+        env:
+          MW_ML_SYMBOLS: ${{ env.SYMS }}
+          MW_ML_LOOKBACK_DAYS: ${{ fromJson(steps.win.outputs.plan).train_days }}
+          MW_PER_SYMBOL_MODELS: "1"
+          MW_ML_MODEL: "gb"             # or "hybrid" / per your repo
+          MW_HORIZON_H: "1"
+          MW_SOCIAL_ENABLED: "1"
+          MW_SOCIAL_INCLUDE: ""
+          MW_FAIL_ON_DEMO: "0"
+          MW_FIX_END_TS: ${{ fromJson(steps.win.outputs.plan).train_fix_end_iso }}
+        run: |
+          echo "[fold ${{ matrix.fold }}] Train: lookback_days=${{ env.MW_ML_LOOKBACK_DAYS }}  fix_end=${{ env.MW_FIX_END_TS }}"
+          python -m scripts.ml.train_predict
+          echo "Bundle tree:"
+          find models/current -maxdepth 2 -type f -print || true
+
+      - name: Assert bundle exists
+        if: ${{ !fromJson(steps.win.outputs.plan).skip }}
+        run: |
+          shopt -s globstar || true
+          cnt=$(ls models/current/**/model.joblib models/current/model.joblib 2>/dev/null | wc -l | tr -d ' ')
+          echo "Found model files: $cnt"
+          if [ "$cnt" -eq 0 ]; then
+            echo "ERROR: No model.joblib found under models/current/**"
+            exit 1
+          fi
+
+      # ---------- Backfill ONLY the test window ----------
+      - name: Backfill ML shadow (test window only)
+        if: ${{ !fromJson(steps.win.outputs.plan).skip }}
+        env:
+          MW_BACKFILL_SYMBOLS: ${{ env.SYMS }}
+          MW_BACKFILL_DAYS: ${{ fromJson(steps.win.outputs.plan).test_days }}
+          MW_BACKFILL_INCLUDE_ALL: ${{ env.INCLUDE_ALL }}
+          MW_FIX_END_TS: ${{ fromJson(steps.win.outputs.plan).test_end_iso }}
+        run: |
+          echo "[fold ${{ matrix.fold }}] Backfill: days=${{ env.MW_BACKFILL_DAYS }}  fix_end=${{ env.MW_FIX_END_TS }}"
+          python -m scripts.perf.backfill_ml_shadow
+          echo "Shadow line count:"
+          wc -l logs/signal_inference_shadow.jsonl || true
+          echo "Shadow tail:"
+          tail -n 5 logs/signal_inference_shadow.jsonl || true
+
+      # ---------- Replay ONLY the test window ----------
+      - name: Replay shadow → paper (test window only)
+        if: ${{ !fromJson(steps.win.outputs.plan).skip }}
+        env:
+          MW_PERF_SYMBOLS: ${{ env.SYMS }}
+          MW_PERF_LOOKBACK_H: ${{ fromJson(steps.win.outputs.plan).test_lookback_h }}
+          MW_PERF_HORIZON_MIN: "60"
+          MW_PERF_SLIPPAGE_BPS: "2"
+          MW_PERF_FEES_BPS: "1"
+          MW_PERF_CAPITAL: "100000"
+          MW_PERF_FORCE_DEMO: "false"
+        run: |
+          python -m scripts.perf.replay_shadow_to_paper
+          echo "Metrics:"
+          cat models/performance_metrics.json || true
+
+      - name: Upload fold metrics
+        if: ${{ !fromJson(steps.win.outputs.plan).skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cv-fold-${{ matrix.fold }}
+          path: |
+            models/performance_metrics.json
+            logs/signal_inference_shadow.jsonl
+          if-no-files-found: error
+
+  summarize:
+    name: Summarize CV
+    runs-on: ubuntu-latest
+    needs: [cv]
+    steps:
+      - name: Download all fold metrics
+        uses: actions/download-artifact@v4
+        with:
+          path: _cv
+      - name: Aggregate & write summary
+        run: |
+          python - <<'PY'
+          import json, pathlib, math, statistics as st
+          root = pathlib.Path("_cv")
+          per_fold = []
+          for d in sorted(root.glob("cv-fold-*/")):
+              m = d / "models/performance_metrics.json"
+              if not m.exists(): 
+                  continue
+              j = json.loads(m.read_text())
+              per_fold.append(j)
+
+          # Aggregate per symbol across folds
+          by_sym = {}
+          for fold in per_fold:
+              for sym, stats in (fold.get("by_symbol") or {}).items():
+                  if sym not in by_sym: by_sym[sym] = {"wr":[], "pf":[]}
+                  wr = stats.get("win_rate")
+                  pf = stats.get("profit_factor")
+                  if wr is not None: by_sym[sym]["wr"].append(float(wr))
+                  if pf is not None: by_sym[sym]["pf"].append(float(pf))
+
+          def smean(xs): return sum(xs)/len(xs) if xs else float("nan")
+          def sstd(xs):  return st.pstdev(xs) if len(xs)>1 else 0.0
+
+          lines = []
+          lines.append("## 🧪 Walk-Forward CV (Expanding Window) – Summary\n")
+          lines.append(f"- Folds collected: **{len(per_fold)}**\n")
+          for sym, bags in by_sym.items():
+              wrm, wrs = smean(bags["wr"]), sstd(bags["wr"])
+              pfm, pfs = smean(bags["pf"]), sstd(bags["pf"])
+              lines.append(f"### {sym}\n")
+              lines.append(f"- Win-rate mean: **{wrm:.4f}**  std: {wrs:.4f}\n")
+              lines.append(f"- Profit-factor mean: **{pfm:.4f}**  std: {pfs:.4f}\n")
+
+          out = "\n".join(lines)
+          print(out)
+          # Write to job summary
+          import os
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fp:
+              fp.write(out)
+          PY

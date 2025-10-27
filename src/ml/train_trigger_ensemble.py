@@ -17,8 +17,12 @@ from src.paths import (
     MODELS_DIR,
     RETRAINING_LOG_PATH,
     RETRAINING_TRIGGERED_LOG_PATH,
+    ML_HYPERPARAMETERS_PATH,
 )
 from src.ml.feature_builder import build_examples, synth_demo_dataset
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -53,17 +57,67 @@ def _git_sha() -> str | None:
         return None
 
 
+def _load_hyperparameters() -> Dict[str, Any]:
+    """
+    Load ML hyperparameters from config file.
+    Returns defaults if file doesn't exist or is invalid.
+    """
+    default_config = {
+        "ensemble": {
+            "models": ["lr", "rf", "gb"],
+            "weights": {"lr": 0.3, "rf": 0.4, "gb": 0.3}
+        },
+        "lr": {
+            "solver": "liblinear",
+            "max_iter": 2000,
+            "class_weight": "balanced"
+        },
+        "rf": {
+            "n_estimators": 200,
+            "max_depth": None,
+            "min_samples_split": 2,
+            "class_weight": "balanced",
+            "random_state": 42,
+            "n_jobs": -1
+        },
+        "gb": {
+            "n_estimators": 100,
+            "learning_rate": 0.1,
+            "max_depth": 3,
+            "random_state": 42
+        },
+        "training": {
+            "days_lookback": 14,
+            "interval": "hour",
+            "train_val_split": 0.8
+        }
+    }
+
+    try:
+        if ML_HYPERPARAMETERS_PATH.exists():
+            with ML_HYPERPARAMETERS_PATH.open("r", encoding="utf-8") as f:
+                config = json.load(f)
+                logger.info(f"Loaded ML hyperparameters from {ML_HYPERPARAMETERS_PATH}")
+                return config
+    except Exception as e:
+        logger.warning(f"Failed to load ML hyperparameters from {ML_HYPERPARAMETERS_PATH}: {e}. Using defaults.")
+
+    return default_config
+
+
 def _train_one(
-    key: str, cls, Xtr: np.ndarray, ytr: np.ndarray, Xva: np.ndarray, yva: np.ndarray
+    key: str, cls, Xtr: np.ndarray, ytr: np.ndarray, Xva: np.ndarray, yva: np.ndarray, hyperparams: Dict[str, Any]
 ) -> _ModelPack:
+    """Train a single model with hyperparameters from config."""
+    # Get model-specific hyperparameters
+    model_params = hyperparams.get(key, {})
+
     if key == "lr":
-        model = LogisticRegression(solver="liblinear", class_weight="balanced", max_iter=2000)
+        model = LogisticRegression(**model_params)
     elif key == "rf":
-        model = RandomForestClassifier(
-            n_estimators=200, max_depth=None, n_jobs=-1, random_state=42, class_weight="balanced"
-        )
+        model = RandomForestClassifier(**model_params)
     elif key == "gb":
-        model = GradientBoostingClassifier(random_state=42)
+        model = GradientBoostingClassifier(**model_params)
     else:
         model = cls()
 
@@ -95,8 +149,8 @@ def _normalize_weights(weights: Dict[str, float]) -> Dict[str, float]:
 
 
 def train_ensemble(
-    days: int = 14,
-    interval: str = "hour",
+    days: int | None = None,
+    interval: str | None = None,
     out_dir: Path | None = None,
     n_boot: int = 30,
 ) -> Dict[str, Any]:
@@ -106,7 +160,18 @@ def train_ensemble(
       - trigger_ensemble_rf.joblib
       - trigger_ensemble_gb.joblib
       - trigger_ensemble.meta.json (with feature_order, weights, metrics, bootstrap bands)
+
+    If days/interval are None, uses values from ml_hyperparameters.json config.
     """
+    # Load hyperparameters config
+    hyperparams = _load_hyperparameters()
+    training_config = hyperparams.get("training", {})
+
+    # Use config values if not explicitly provided
+    days = days if days is not None else training_config.get("days_lookback", 14)
+    interval = interval if interval is not None else training_config.get("interval", "hour")
+    train_val_split = training_config.get("train_val_split", 0.8)
+
     out = out_dir or MODELS_DIR
     out.mkdir(parents=True, exist_ok=True)
 
@@ -127,15 +192,15 @@ def train_ensemble(
 
     X, y = _mk_arrays(rows, feat_order)
     n = X.shape[0]
-    cut = max(2, int(0.8 * n))
+    cut = max(2, int(train_val_split * n))
     Xtr, ytr = X[:cut], y[:cut]
     Xva, yva = X[cut:], y[cut:]
 
     packs: List[_ModelPack] = []
-    # Train LR / RF / GB
-    packs.append(_train_one("lr", LogisticRegression, Xtr, ytr, Xva, yva))
-    packs.append(_train_one("rf", RandomForestClassifier, Xtr, ytr, Xva, yva))
-    packs.append(_train_one("gb", GradientBoostingClassifier, Xtr, ytr, Xva, yva))
+    # Train LR / RF / GB with hyperparameters from config
+    packs.append(_train_one("lr", LogisticRegression, Xtr, ytr, Xva, yva, hyperparams))
+    packs.append(_train_one("rf", RandomForestClassifier, Xtr, ytr, Xva, yva, hyperparams))
+    packs.append(_train_one("gb", GradientBoostingClassifier, Xtr, ytr, Xva, yva, hyperparams))
 
     # Save models
     for p in packs:
