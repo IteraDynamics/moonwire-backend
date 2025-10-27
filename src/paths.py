@@ -43,6 +43,5 @@ GOVERNANCE_PARAMS_PATH = MODELS_DIR / "governance_params.json"
 # Performance metrics
 PERFORMANCE_METRICS_PATH = MODELS_DIR / "performance_metrics.json"
 
-# Training metadata (allow test overrides via env vars)
-TRAINING_VERSION_FILE = Path(os.getenv("TRAINING_VERSION_FILE", str(MODELS_DIR / "training_version.txt")))
-TRIGGER_LOG_PATH = Path(os.getenv("TRIGGER_LOG_PATH", str(MODELS_DIR / "trigger_history.jsonl")))
+# Note: TRIGGER_LOG_PATH and TRAINING_VERSION_FILE are defined in src/ml/infer.py
+# as module-level variables to support test env var overrides via importlib.reload()
