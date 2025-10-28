@@ -1,4 +1,9 @@
 {
-  "BTC": { "conf_min": 0.66, "deadband": 0.06, "min_flip_min": 360, "debounce_min": 45 },
-  "ETH": { "conf_min": 0.62, "deadband": 0.05, "min_flip_min": 240, "debounce_min": 45 }
+  "symbols": ["BTC","ETH"],        // keep SOL out for now
+  "lookback_h": 720,
+  "horizon_min": 180,
+  "fees_bps": 1,
+  "slippage_bps": 2,
+  "capital": 100000,
+  "force_demo": false
 }
