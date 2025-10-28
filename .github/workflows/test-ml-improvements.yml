@@ -29,6 +29,11 @@ on:
         description: "Number of walk-forward folds (3, 5, 7, etc.)"
         required: false
         default: "3"
+      enable_social:
+        description: "Enable social features (Reddit sentiment)"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   test-ml-approach:
@@ -67,6 +72,7 @@ jobs:
           export MW_REGIME_VOLATILITY_THRESHOLD=0.06
           export MW_REGIME_TREND_THRESHOLD=0.08
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
           python -m scripts.ml.train_predict
           # Save results with approach name
           if [ -f models/ml_model_manifest.json ]; then
@@ -85,6 +91,7 @@ jobs:
           export MW_REGIME_ENABLED=0
           export MW_REGIME_FILTER_ENABLED=0
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
           python -m scripts.ml.train_predict
           if [ -f models/ml_model_manifest.json ]; then
             cp models/ml_model_manifest.json artifacts/approach_2_manifest.json
@@ -103,6 +110,7 @@ jobs:
           export MW_REGIME_ENABLED=0
           export MW_REGIME_FILTER_ENABLED=0
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
           python -m scripts.ml.train_predict
           if [ -f models/ml_model_manifest.json ]; then
             cp models/ml_model_manifest.json artifacts/approach_3_manifest.json
@@ -122,6 +130,7 @@ jobs:
           export MW_REGIME_VOLATILITY_THRESHOLD=0.06
           export MW_REGIME_TREND_THRESHOLD=0.08
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
           python -m scripts.ml.train_predict
           if [ -f models/ml_model_manifest.json ]; then
             cp models/ml_model_manifest.json artifacts/approach_4_manifest.json
