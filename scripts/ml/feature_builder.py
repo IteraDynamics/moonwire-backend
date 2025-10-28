@@ -7,6 +7,13 @@ from typing import Dict
 import numpy as np
 import pandas as pd
 
+# Import regime detector for market regime features
+try:
+    from .regime_detector import detect_market_regime, get_regime_config, regime_filtering_enabled
+    _REGIME_AVAILABLE = True
+except ImportError:
+    _REGIME_AVAILABLE = False
+
 # =========================
 # Core helpers
 # =========================
@@ -193,11 +200,27 @@ def build_features(prices_map: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFram
         except Exception:
             F["price_burst"] = 0.0
 
+        # Regime detection (optional, enabled by MW_REGIME_ENABLED env var)
+        if _REGIME_AVAILABLE and str(os.getenv("MW_REGIME_ENABLED", "0")).lower() in {"1", "true", "yes"}:
+            try:
+                regime_config = get_regime_config()
+                # detect_market_regime expects close column in df, with datetime index
+                prices_for_regime = df[["close"]].copy()
+                regime = detect_market_regime(prices_for_regime, symbol=sym, **regime_config)
+                # Add as binary feature (1=trending, 0=choppy)
+                F["regime_trending"] = (regime == "trending").astype(float)
+            except Exception as e:
+                print(f"[WARN] Failed to add regime feature for {sym}: {e}")
+                F["regime_trending"] = 0.0
+        else:
+            F["regime_trending"] = 0.0
+
         # Safety: ensure all expected features present
         expected = [
             "r_1h","r_3h","r_6h",
             "vol_6h","atr_14h","sma_gap","high_vol",
             "social_score","price_burst","social_burst",
+            "regime_trending",  # NEW
         ]
         for c in expected:
             if c not in F.columns:

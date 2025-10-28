@@ -1,4 +1,5 @@
 {
+  "comment": "Default configuration (current baseline)",
   "ensemble": {
     "models": ["lr", "rf", "gb"],
     "weights": {
@@ -27,8 +28,72 @@
     "random_state": 42
   },
   "training": {
-    "days_lookback": 14,
+    "days_lookback": 180,
     "interval": "hour",
     "train_val_split": 0.8
+  },
+  "configs": {
+    "approach_1_regime_filter": {
+      "comment": "Baseline + Regime Detection & Filtering",
+      "training": {
+        "days_lookback": 180,
+        "interval": "hour",
+        "train_val_split": 0.8
+      },
+      "env": {
+        "MW_REGIME_ENABLED": "1",
+        "MW_REGIME_FILTER_ENABLED": "1",
+        "MW_REGIME_VOLATILITY_THRESHOLD": "0.06",
+        "MW_REGIME_TREND_THRESHOLD": "0.08"
+      }
+    },
+    "approach_2_extended_data": {
+      "comment": "Extended training data (365 days)",
+      "training": {
+        "days_lookback": 365,
+        "interval": "hour",
+        "train_val_split": 0.8
+      },
+      "env": {
+        "MW_ML_LOOKBACK_DAYS": "365"
+      }
+    },
+    "approach_3_simple_lr": {
+      "comment": "Simplified LR-only model with top 5 features",
+      "model_type": "logreg",
+      "lr": {
+        "solver": "liblinear",
+        "max_iter": 3000,
+        "class_weight": "balanced",
+        "C": 0.1
+      },
+      "training": {
+        "days_lookback": 365,
+        "interval": "hour",
+        "train_val_split": 0.8
+      },
+      "features": {
+        "top_5_only": true,
+        "selected": ["r_6h", "vol_6h", "social_score", "atr_14h", "sma_gap"]
+      },
+      "env": {
+        "MW_ML_MODEL": "logreg",
+        "MW_ML_LOOKBACK_DAYS": "365",
+        "MW_FEATURE_SELECTION": "top5"
+      }
+    },
+    "approach_4_per_regime": {
+      "comment": "Separate models per market regime",
+      "training": {
+        "days_lookback": 365,
+        "interval": "hour",
+        "train_val_split": 0.8
+      },
+      "env": {
+        "MW_REGIME_ENABLED": "1",
+        "MW_PER_REGIME_MODELS": "1",
+        "MW_ML_LOOKBACK_DAYS": "365"
+      }
+    }
   }
 }
