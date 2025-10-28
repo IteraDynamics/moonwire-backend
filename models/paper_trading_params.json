@@ -5,5 +5,7 @@
   "fees_bps": 1,
   "slippage_bps": 2,
   "capital": 100000,
-  "force_demo": false
+  "force_demo": false,
+  "position_size_pct": 0.02,       // 2% risk per trade
+  "stop_loss_pct": 0.05            // 5% max loss per trade
 }

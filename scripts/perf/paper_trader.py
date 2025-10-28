@@ -60,6 +60,8 @@ class Ctx:
     capital: float = float(os.getenv("MW_PERF_CAPITAL", "100000"))
     risk_free: float = float(os.getenv("MW_PERF_RISK_FREE", "0.0"))
     lookback_h: int = int(os.getenv("MW_PERF_LOOKBACK_H", "72"))
+    position_size_pct: float = float(os.getenv("MW_PERF_POSITION_SIZE_PCT", "1.0"))
+    stop_loss_pct: Optional[float] = field(default_factory=lambda: float(os.getenv("MW_PERF_STOP_LOSS_PCT")) if os.getenv("MW_PERF_STOP_LOSS_PCT") else None)
 
     @property
     def signals_file(self) -> Optional[Path]:
@@ -224,10 +226,43 @@ def _simulate(ctx: Ctx, signals: List[Dict[str, Any]], book: Dict[str, Dict[str,
             eff_entry = price * (1 + slip + fee) if side == "long" else price * (1 - slip - fee)
             exit_ts = ts + horizon
             exit_price = _price_at(book, sym, exit_ts) or eff_entry
+
+            # Check for stop loss during the trade period
+            stopped_out = False
+            if ctx.stop_loss_pct is not None and ctx.stop_loss_pct > 0:
+                # Sample 10 price points during the trade period to check for stop loss
+                samples = 10
+                for i in range(1, samples + 1):
+                    check_ts = ts + timedelta(minutes=(horizon.total_seconds() / 60) * (i / samples))
+                    check_price = _price_at(book, sym, check_ts)
+                    if check_price is None:
+                        continue
+
+                    # Calculate current P&L percentage from entry
+                    if side == "long":
+                        current_pnl_pct = (check_price - eff_entry) / max(eff_entry, 1e-12)
+                        if current_pnl_pct <= -ctx.stop_loss_pct:
+                            # Stop loss hit - exit at this price
+                            exit_ts = check_ts
+                            exit_price = check_price
+                            stopped_out = True
+                            break
+                    else:  # short
+                        current_pnl_pct = (eff_entry - check_price) / max(eff_entry, 1e-12)
+                        if current_pnl_pct <= -ctx.stop_loss_pct:
+                            # Stop loss hit - exit at this price
+                            exit_ts = check_ts
+                            exit_price = check_price
+                            stopped_out = True
+                            break
+
             signed = 1.0 if side == "long" else -1.0
             gross = signed * (exit_price - eff_entry) / max(eff_entry, 1e-12)
             gross -= (slip + fee)  # exit costs
-            pnl = equity * gross
+
+            # Apply position sizing
+            position_equity = equity * ctx.position_size_pct
+            pnl = position_equity * gross
             equity += pnl
 
             trades.append(Trade(ts, exit_ts, sym, side, float(eff_entry), float(exit_price), float(pnl), float(gross)))
@@ -279,6 +314,14 @@ def run_paper_trader(ctx: Ctx, mode: str = "backtest") -> Dict[str, Any]:
     rets = np.diff(eq_vals) / np.maximum(eq_vals[:-1], 1e-12) if len(eq_vals) > 1 else np.array([])
     metrics = compute_metrics(eq_vals, rets, trades)
 
+    # Calculate signals per day for the entire period
+    if len(trades) > 1:
+        time_span = (trades[-1].ts_entry - trades[0].ts_entry).total_seconds()
+        days = max(1.0, time_span / 86400.0)  # Convert seconds to days
+        signals_per_day = len(trades) / days
+    else:
+        signals_per_day = 0.0
+
     # By-symbol metrics
     by_symbol: Dict[str, Dict[str, Any]] = {}
     for s in ctx.symbols:
@@ -291,8 +334,18 @@ def run_paper_trader(ctx: Ctx, mode: str = "backtest") -> Dict[str, Any]:
         eq_series_s = np.array(eq_series_s, dtype=float)
         rets_s = np.diff(eq_series_s) / np.maximum(eq_series_s[:-1], 1e-12) if len(eq_series_s) > 1 else np.array([])
         m_s = compute_metrics(eq_series_s, rets_s, sym_trades)
+
+        # Calculate signals per day for this symbol
+        if len(sym_trades) > 1:
+            sym_time_span = (sym_trades[-1].ts_entry - sym_trades[0].ts_entry).total_seconds()
+            sym_days = max(1.0, sym_time_span / 86400.0)
+            sym_signals_per_day = len(sym_trades) / sym_days
+        else:
+            sym_signals_per_day = 0.0
+
         by_symbol[s] = {
             "trades": len(sym_trades),
+            "signals_per_day": round(sym_signals_per_day, 2),
             "sharpe": m_s["sharpe"],
             "sortino": m_s["sortino"],
             "max_drawdown": m_s["max_drawdown"],
@@ -303,6 +356,7 @@ def run_paper_trader(ctx: Ctx, mode: str = "backtest") -> Dict[str, Any]:
 
     agg = {
         "trades": len(trades),
+        "signals_per_day": round(signals_per_day, 2),
         "sharpe": metrics["sharpe"],
         "sortino": metrics["sortino"],
         "max_drawdown": metrics["max_drawdown"],
