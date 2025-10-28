@@ -6,9 +6,9 @@
     "debounce_min": 75
   },
   "ETH": {
-    "conf_min": 0.64,
-    "deadband": 0.06,
-    "min_flip_min": 420,
-    "debounce_min": 60
+    "conf_min": 0.63,
+    "deadband": 0.07,
+    "min_flip_min": 480,
+    "debounce_min": 75
   }
 }
