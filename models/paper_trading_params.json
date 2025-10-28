@@ -1,9 +1,9 @@
 {
-  "deadband": 0.08,
-  "min_flip_min": 360,
-  "horizon_min": 60,
-  "slippage_bps": 2,
+  "symbols": ["BTC","ETH"],        // keep SOL out for now
+  "lookback_h": 720,
+  "horizon_min": 180,
   "fees_bps": 1,
+  "slippage_bps": 2,
   "capital": 100000,
-  "lookback_h": 720
+  "force_demo": false
 }
