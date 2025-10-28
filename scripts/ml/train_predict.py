@@ -15,6 +15,19 @@ from .labeler import label_next_horizon
 from .splitter import walk_forward_splits
 from .model_runner import train_model, predict_proba
 
+# Import per-regime training (optional)
+try:
+    from .per_regime_trainer import (
+        per_regime_enabled,
+        train_per_regime_models,
+        predict_per_regime,
+        save_per_regime_models
+    )
+    _PER_REGIME_AVAILABLE = True
+except ImportError:
+    _PER_REGIME_AVAILABLE = False
+    per_regime_enabled = lambda: False
+
 ROOT = pathlib.Path(".").resolve()
 
 # --- optional provenance (no-op if module not present)
@@ -24,15 +37,25 @@ except Exception:
     detect_provenance = None
 
 # =========================
-# Feature list (now includes bursts)
+# Feature list (now includes bursts + optional regime)
 # =========================
-FEATURES = [
+_BASE_FEATURES = [
     "r_1h","r_3h","r_6h",
     "vol_6h","atr_14h","sma_gap","high_vol",
     "social_score",
     "price_burst",      # NEW
     "social_burst",     # NEW
 ]
+
+# Dynamically add regime_trending if enabled
+def _get_features():
+    """Get feature list, conditionally including regime feature."""
+    features = _BASE_FEATURES.copy()
+    if str(os.getenv("MW_REGIME_ENABLED", "0")).lower() in {"1", "true", "yes"}:
+        features.append("regime_trending")
+    return features
+
+FEATURES = _get_features()
 
 # =========================
 # Per-coin model overrides
@@ -97,10 +120,36 @@ def _write_provenance(prices_map, symbols, lookback_days):
     print(f"[provenance] wrote {out}")
 
 # ---------- helpers ----------
+def _get_selected_features() -> List[str]:
+    """
+    Get feature list based on MW_FEATURE_SELECTION env var.
+
+    Options:
+    - 'top5': Use only top 5 most important features
+    - 'all' or empty: Use all features (default)
+    """
+    feature_selection = env_str("MW_FEATURE_SELECTION", "all").lower()
+
+    if feature_selection == "top5":
+        # Top 5 features based on empirical importance
+        return ["r_6h", "vol_6h", "social_score", "atr_14h", "sma_gap"]
+
+    # Default: use all features
+    return FEATURES
+
+
 def _feature_matrix(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-    X = df[FEATURES].values.astype(float)
+    selected_features = _get_selected_features()
+
+    # Ensure all selected features exist in df
+    available_features = [f for f in selected_features if f in df.columns]
+    if len(available_features) != len(selected_features):
+        missing = set(selected_features) - set(available_features)
+        print(f"[WARN] Missing features: {missing}. Using {len(available_features)} available features.")
+
+    X = df[available_features].values.astype(float)
     y = df["y_long"].values.astype(int)
-    return X, y, FEATURES
+    return X, y, available_features
 
 def _plots_roc_pr_placeholder():
     (ROOT / "artifacts").mkdir(parents=True, exist_ok=True)
@@ -178,6 +227,10 @@ def main():
     primary_symbol: Optional[str] = symbols[0] if symbols else None
     export_model = None
 
+    # Check if regime filtering or per-regime training is enabled
+    regime_filter_enabled = str(os.getenv("MW_REGIME_FILTER_ENABLED", "0")).lower() in {"1", "true", "yes"}
+    per_regime_training = _PER_REGIME_AVAILABLE and per_regime_enabled()
+
     for sym in symbols:
         df = label_next_horizon(feats[sym], horizon_h=horizon_h)
         X, y, feature_cols = _feature_matrix(df)
@@ -190,7 +243,56 @@ def main():
         for tr_ix, te_ix in walk_forward_splits(df, n_splits=3, train_days=train_days, test_days=test_days):
             if len(tr_ix) < 10 or len(te_ix) < 5:
                 continue
-            m = train_model(X[tr_ix], y[tr_ix], model_type=sym_model_type)
+
+            # ===== PER-REGIME TRAINING (Approach 4) =====
+            if per_regime_training:
+                try:
+                    df_train = df.iloc[tr_ix]
+                    df_test = df.iloc[te_ix]
+                    # Train separate models for each regime
+                    regime_models = train_per_regime_models(
+                        X[tr_ix], y[tr_ix],
+                        df_train, prices[sym],
+                        model_type=sym_model_type,
+                        symbol=sym
+                    )
+                    # Predict using regime-specific models
+                    p = predict_per_regime(
+                        regime_models,
+                        X[te_ix],
+                        df_test,
+                        prices[sym],
+                        symbol=sym
+                    )
+                    preds[te_ix] = p
+                    manifest_base["fold_metrics"].append({
+                        "symbol": sym,
+                        "model_type": sym_model_type,
+                        "fold": fold_ix,
+                        "train_len": int(len(tr_ix)),
+                        "test_len": int(len(te_ix)),
+                        "pred_mean": float(p.mean()),
+                        "per_regime_training": True,
+                    })
+                    fold_ix += 1
+                    continue
+                except Exception as e:
+                    print(f"[per_regime] {sym} fold {fold_ix}: Per-regime training failed: {e}, falling back to standard training")
+
+            # ===== STANDARD TRAINING WITH OPTIONAL REGIME FILTERING (Approach 1) =====
+            # Apply regime filtering to training data only (if enabled)
+            tr_ix_filtered = tr_ix
+            if regime_filter_enabled and "regime_trending" in df.columns:
+                # Filter training set to only include trending markets
+                regime_mask = df["regime_trending"].iloc[tr_ix].values > 0.5
+                tr_ix_filtered = tr_ix[regime_mask]
+                print(f"[regime_filter] {sym} fold {fold_ix}: filtered {len(tr_ix)} -> {len(tr_ix_filtered)} training samples (trending only)")
+
+                if len(tr_ix_filtered) < 10:
+                    print(f"[regime_filter] {sym} fold {fold_ix}: insufficient trending samples, skipping fold")
+                    continue
+
+            m = train_model(X[tr_ix_filtered], y[tr_ix_filtered], model_type=sym_model_type)
             p = predict_proba(m, X[te_ix])
             preds[te_ix] = p
             manifest_base["fold_metrics"].append({
@@ -198,8 +300,11 @@ def main():
                 "model_type": sym_model_type,
                 "fold": fold_ix,
                 "train_len": int(len(tr_ix)),
+                "train_len_filtered": int(len(tr_ix_filtered)) if regime_filter_enabled else int(len(tr_ix)),
                 "test_len": int(len(te_ix)),
                 "pred_mean": float(p.mean()),
+                "regime_filter_enabled": regime_filter_enabled,
+                "per_regime_training": False,
             })
             fold_ix += 1
 
