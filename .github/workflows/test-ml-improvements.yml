@@ -1,0 +1,203 @@
+name: ML Improvement Testing
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      approach:
+        description: "Which ML improvement approach to test"
+        required: true
+        type: choice
+        options:
+          - "1_regime_filter"
+          - "2_extended_data"
+          - "3_simple_lr"
+          - "4_per_regime"
+          - "all_approaches"
+      symbols:
+        description: "Symbols to test (comma-separated)"
+        required: false
+        default: "BTC,ETH"
+
+jobs:
+  test-ml-approach:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      MPLBACKEND: Agg
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+          python -m pip install matplotlib scikit-learn pandas numpy joblib
+
+      - name: Test Approach 1 - Regime Filtering
+        if: ${{ inputs.approach == '1_regime_filter' || inputs.approach == 'all_approaches' }}
+        run: |
+          echo "=================================================="
+          echo "Testing Approach 1: Regime Detection + Filtering"
+          echo "=================================================="
+          export MW_ML_LOOKBACK_DAYS=180
+          export MW_ML_MODEL=hybrid
+          export MW_REGIME_ENABLED=1
+          export MW_REGIME_FILTER_ENABLED=1
+          export MW_REGIME_VOLATILITY_THRESHOLD=0.06
+          export MW_REGIME_TREND_THRESHOLD=0.08
+          export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          python -m scripts.ml.train_predict
+          # Save results with approach name
+          if [ -f models/ml_model_manifest.json ]; then
+            cp models/ml_model_manifest.json artifacts/approach_1_manifest.json
+          fi
+
+      - name: Test Approach 2 - Extended Data
+        if: ${{ inputs.approach == '2_extended_data' || inputs.approach == 'all_approaches' }}
+        run: |
+          echo "=================================================="
+          echo "Testing Approach 2: Extended Training Data"
+          echo "=================================================="
+          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_MODEL=hybrid
+          export MW_REGIME_ENABLED=0
+          export MW_REGIME_FILTER_ENABLED=0
+          export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          python -m scripts.ml.train_predict
+          if [ -f models/ml_model_manifest.json ]; then
+            cp models/ml_model_manifest.json artifacts/approach_2_manifest.json
+          fi
+
+      - name: Test Approach 3 - Simple LR
+        if: ${{ inputs.approach == '3_simple_lr' || inputs.approach == 'all_approaches' }}
+        run: |
+          echo "=================================================="
+          echo "Testing Approach 3: Simplified LR-only Model"
+          echo "=================================================="
+          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_MODEL=logreg
+          export MW_FEATURE_SELECTION=top5
+          export MW_REGIME_ENABLED=0
+          export MW_REGIME_FILTER_ENABLED=0
+          export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          python -m scripts.ml.train_predict
+          if [ -f models/ml_model_manifest.json ]; then
+            cp models/ml_model_manifest.json artifacts/approach_3_manifest.json
+          fi
+
+      - name: Test Approach 4 - Per-Regime Models
+        if: ${{ inputs.approach == '4_per_regime' || inputs.approach == 'all_approaches' }}
+        run: |
+          echo "=================================================="
+          echo "Testing Approach 4: Per-Regime Models"
+          echo "=================================================="
+          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_MODEL=hybrid
+          export MW_REGIME_ENABLED=1
+          export MW_PER_REGIME_MODELS=1
+          export MW_REGIME_VOLATILITY_THRESHOLD=0.06
+          export MW_REGIME_TREND_THRESHOLD=0.08
+          export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          python -m scripts.ml.train_predict
+          if [ -f models/ml_model_manifest.json ]; then
+            cp models/ml_model_manifest.json artifacts/approach_4_manifest.json
+          fi
+
+      - name: Generate comparison report
+        if: ${{ inputs.approach == 'all_approaches' }}
+        run: |
+          python3 << 'PYTHON_SCRIPT'
+          import json
+          from pathlib import Path
+
+          approaches = {
+              "Approach 1: Regime Filtering": "artifacts/approach_1_manifest.json",
+              "Approach 2: Extended Data": "artifacts/approach_2_manifest.json",
+              "Approach 3: Simple LR": "artifacts/approach_3_manifest.json",
+              "Approach 4: Per-Regime Models": "artifacts/approach_4_manifest.json",
+          }
+
+          print("\n" + "="*70)
+          print("ML IMPROVEMENT APPROACHES - COMPARISON")
+          print("="*70 + "\n")
+
+          for name, path in approaches.items():
+              p = Path(path)
+              if not p.exists():
+                  print(f"❌ {name}: No results found")
+                  continue
+
+              try:
+                  data = json.loads(p.read_text())
+                  fold_metrics = data.get("fold_metrics", [])
+
+                  if not fold_metrics:
+                      print(f"⚠️  {name}: No fold metrics")
+                      continue
+
+                  print(f"✅ {name}")
+                  print(f"   Lookback: {data.get('lookback_days', 'N/A')} days")
+                  print(f"   Model: {data.get('model_type', 'N/A')}")
+                  print(f"   Features: {len(data.get('features', []))}")
+                  print(f"   Total folds: {len(fold_metrics)}")
+
+                  # Calculate average pred_mean across folds
+                  pred_means = [f.get('pred_mean', 0) for f in fold_metrics]
+                  if pred_means:
+                      avg_pred = sum(pred_means) / len(pred_means)
+                      print(f"   Avg prediction: {avg_pred:.4f}")
+
+                  print()
+
+              except Exception as e:
+                  print(f"❌ {name}: Error parsing results - {e}\n")
+
+          print("="*70)
+          print("Next step: Check artifacts for detailed results")
+          print("="*70)
+          PYTHON_SCRIPT
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-improvement-results-${{ inputs.approach }}
+          path: |
+            artifacts/
+            models/ml_model_manifest.json
+            models/backtest_summary.json
+            models/current/
+          retention-days: 30
+
+      - name: Display results summary
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "Results Summary"
+          echo "=========================================="
+          if [ -f models/ml_model_manifest.json ]; then
+            echo "✅ Training completed successfully"
+            echo ""
+            echo "Key files generated:"
+            echo "  - models/ml_model_manifest.json"
+            echo "  - artifacts/ml_*.png"
+            echo "  - models/current/*.joblib"
+            echo ""
+            echo "Download artifacts to view detailed results:"
+            echo "  Actions → This workflow run → Artifacts"
+          else
+            echo "❌ Training may have failed"
+            echo "Check logs above for errors"
+          fi
+          echo "=========================================="
