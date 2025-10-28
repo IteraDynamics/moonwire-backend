@@ -58,6 +58,32 @@ jobs:
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
           python -m pip install matplotlib scikit-learn pandas numpy joblib
 
+      - name: Backfill Reddit Social Data
+        if: ${{ inputs.enable_social }}
+        env:
+          MW_REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          MW_REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          MW_REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
+        run: |
+          echo "=================================================="
+          echo "Backfilling Reddit Social Data"
+          echo "=================================================="
+          export MW_BACKFILL_DAYS=${{ inputs.lookback_days }}
+          export MW_OFFLINE_DEMO=0
+          export MW_REDDIT_SUBS="CryptoCurrency,Bitcoin,ethtrader,Solana"
+          echo "Fetching $MW_BACKFILL_DAYS days of Reddit data..."
+          python -m scripts.social.backfill_social
+          echo ""
+          echo "Social data backfill complete!"
+          if [ -f logs/social_reddit.jsonl ]; then
+            echo "✓ logs/social_reddit.jsonl created"
+            echo "  Lines: $(wc -l < logs/social_reddit.jsonl)"
+            echo "  Size: $(du -h logs/social_reddit.jsonl | cut -f1)"
+          else
+            echo "⚠ Warning: social_reddit.jsonl not created"
+          fi
+          echo "=================================================="
+
       - name: Test Approach 1 - Regime Filtering
         if: ${{ inputs.approach == '1_regime_filter' || inputs.approach == 'all_approaches' }}
         run: |
