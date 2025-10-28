@@ -21,6 +21,14 @@ on:
         description: "Symbols to test (comma-separated)"
         required: false
         default: "BTC,ETH"
+      lookback_days:
+        description: "Days of training data (180, 365, etc.)"
+        required: false
+        default: "180"
+      n_splits:
+        description: "Number of walk-forward folds (3, 5, 7, etc.)"
+        required: false
+        default: "3"
 
 jobs:
   test-ml-approach:
@@ -51,7 +59,8 @@ jobs:
           echo "=================================================="
           echo "Testing Approach 1: Regime Detection + Filtering"
           echo "=================================================="
-          export MW_ML_LOOKBACK_DAYS=180
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
           export MW_ML_MODEL=hybrid
           export MW_REGIME_ENABLED=1
           export MW_REGIME_FILTER_ENABLED=1
@@ -70,7 +79,8 @@ jobs:
           echo "=================================================="
           echo "Testing Approach 2: Extended Training Data"
           echo "=================================================="
-          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
           export MW_ML_MODEL=hybrid
           export MW_REGIME_ENABLED=0
           export MW_REGIME_FILTER_ENABLED=0
@@ -86,7 +96,8 @@ jobs:
           echo "=================================================="
           echo "Testing Approach 3: Simplified LR-only Model"
           echo "=================================================="
-          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
           export MW_ML_MODEL=logreg
           export MW_FEATURE_SELECTION=top5
           export MW_REGIME_ENABLED=0
@@ -103,7 +114,8 @@ jobs:
           echo "=================================================="
           echo "Testing Approach 4: Per-Regime Models"
           echo "=================================================="
-          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
           export MW_ML_MODEL=hybrid
           export MW_REGIME_ENABLED=1
           export MW_PER_REGIME_MODELS=1

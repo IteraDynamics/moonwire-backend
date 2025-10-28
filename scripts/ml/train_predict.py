@@ -199,6 +199,7 @@ def main():
     train_days = env_int("MW_TRAIN_DAYS", 60)
     test_days = env_int("MW_TEST_DAYS", 30)
     horizon_h = env_int("MW_HORIZON_H", 1)
+    n_splits = env_int("MW_N_SPLITS", 3)  # Number of walk-forward folds
 
     # Load + build features
     prices = load_prices(symbols, lookback_days=lookback_days)
@@ -240,7 +241,7 @@ def main():
         # walk-forward; keep last fold predictions
         preds = np.zeros(len(df))
         fold_ix = 0
-        for tr_ix, te_ix in walk_forward_splits(df, n_splits=3, train_days=train_days, test_days=test_days):
+        for tr_ix, te_ix in walk_forward_splits(df, n_splits=n_splits, train_days=train_days, test_days=test_days):
             if len(tr_ix) < 10 or len(te_ix) < 5:
                 continue
 
