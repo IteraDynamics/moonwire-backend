@@ -5,5 +5,7 @@
   "fees_bps": 1,
   "slippage_bps": 2,
   "capital": 100000,
-  "force_demo": false
+  "force_demo": false,
+  "position_size_pct": 1.0,        // 1.0 = 100% of capital per trade, 0.02 = 2%
+  "stop_loss_pct": null            // null = no stop loss, 0.02 = 2% stop
 }

@@ -39,6 +39,14 @@ on:
         description: "Override lookback_h for paper trading replay window (blank = use config file default: 720)"
         required: false
         default: ""
+      position_size_pct:
+        description: "Position size as percentage of capital per trade (blank = use config file default: 1.0 = 100%)"
+        required: false
+        default: ""
+      stop_loss_pct:
+        description: "Stop loss percentage (blank = use config file default: null = no stop loss)"
+        required: false
+        default: ""
 
 jobs:
   walkforward:
@@ -53,6 +61,8 @@ jobs:
       DEADBAND_OVERRIDE: ${{ inputs.deadband_override }}
       MIN_FLIP_MIN_OVERRIDE: ${{ inputs.min_flip_min_override }}
       LOOKBACK_H_OVERRIDE: ${{ inputs.lookback_h_override }}
+      POSITION_SIZE_PCT: ${{ inputs.position_size_pct }}
+      STOP_LOSS_PCT: ${{ inputs.stop_loss_pct }}
 
     steps:
       - name: Checkout
@@ -130,6 +140,8 @@ jobs:
           deadband_override = os.getenv("DEADBAND_OVERRIDE","").strip()
           min_flip_min_override = os.getenv("MIN_FLIP_MIN_OVERRIDE","").strip()
           lookback_h_override = os.getenv("LOOKBACK_H_OVERRIDE","").strip()
+          position_size_pct = os.getenv("POSITION_SIZE_PCT","").strip()
+          stop_loss_pct = os.getenv("STOP_LOSS_PCT","").strip()
 
           src = Path(os.getenv("SHADOW_SRC","logs/signal_inference_shadow_backfill.jsonl"))
           dst = Path("logs") / "signal_inference_shadow.jsonl"  # canonical that paper_trader reads
@@ -189,6 +201,7 @@ jobs:
               except: return 0.6
 
           all_agg = {"trades":0,"by_symbol":{}}
+          fold_metrics_list = []  # Store metrics from each fold for aggregation
 
           for fi in range(k):
               f_start = fold_edges[fi]
@@ -221,6 +234,10 @@ jobs:
                   replay_env["MW_PERF_MIN_FLIP_MIN"] = min_flip_min_override
               if lookback_h_override:
                   replay_env["MW_PERF_LOOKBACK_H"] = lookback_h_override
+              if position_size_pct:
+                  replay_env["MW_PERF_POSITION_SIZE_PCT"] = position_size_pct
+              if stop_loss_pct:
+                  replay_env["MW_PERF_STOP_LOSS_PCT"] = stop_loss_pct
 
               subprocess.run([sys.executable, "-m", "scripts.perf.replay_shadow_to_paper"], check=True, env=replay_env)
 
@@ -234,11 +251,47 @@ jobs:
               met["range"] = {"start": f_start.isoformat(), "end": f_end.isoformat()}
               summary["folds"].append(met)
 
+              # Store for aggregation
+              fold_metrics_list.append(met)
+
               # accumulate rough aggregates
               all_agg["trades"] += int(met.get("aggregate",{}).get("trades",0))
               for s, sv in (met.get("by_symbol") or {}).items():
                   d = all_agg["by_symbol"].setdefault(s, {"trades":0})
                   d["trades"] += int(sv.get("trades",0))
+
+          # Calculate comprehensive aggregate metrics across all folds
+          if fold_metrics_list:
+              def safe_float(x, default=0.0):
+                  try: return float(x) if x is not None else default
+                  except: return default
+
+              # Aggregate overall metrics
+              total_trades = sum(safe_float(m.get("aggregate",{}).get("trades",0)) for m in fold_metrics_list)
+
+              # Average metrics
+              sharpe_vals = [safe_float(m.get("aggregate",{}).get("sharpe")) for m in fold_metrics_list if m.get("aggregate",{}).get("sharpe") is not None]
+              sortino_vals = [safe_float(m.get("aggregate",{}).get("sortino")) for m in fold_metrics_list if m.get("aggregate",{}).get("sortino") is not None]
+              cagr_vals = [safe_float(m.get("aggregate",{}).get("cagr")) for m in fold_metrics_list if m.get("aggregate",{}).get("cagr") is not None]
+              signals_per_day_vals = [safe_float(m.get("aggregate",{}).get("signals_per_day")) for m in fold_metrics_list if m.get("aggregate",{}).get("signals_per_day") is not None]
+
+              # Weighted averages (by trade count)
+              win_rate_num = sum(safe_float(m.get("aggregate",{}).get("win_rate",0)) * safe_float(m.get("aggregate",{}).get("trades",0)) for m in fold_metrics_list)
+              profit_factor_num = sum(safe_float(m.get("aggregate",{}).get("profit_factor",0)) * safe_float(m.get("aggregate",{}).get("trades",0)) for m in fold_metrics_list)
+
+              # Max drawdown - take worst (most negative)
+              dd_vals = [safe_float(m.get("aggregate",{}).get("max_drawdown")) for m in fold_metrics_list if m.get("aggregate",{}).get("max_drawdown") is not None]
+
+              all_agg.update({
+                  "trades": int(total_trades),
+                  "signals_per_day": round(sum(signals_per_day_vals) / len(signals_per_day_vals), 2) if signals_per_day_vals else None,
+                  "sharpe": round(sum(sharpe_vals) / len(sharpe_vals), 3) if sharpe_vals else None,
+                  "sortino": round(sum(sortino_vals) / len(sortino_vals), 3) if sortino_vals else None,
+                  "max_drawdown": round(min(dd_vals), 4) if dd_vals else None,
+                  "win_rate": round(win_rate_num / total_trades, 3) if total_trades > 0 else None,
+                  "profit_factor": round(profit_factor_num / total_trades, 3) if total_trades > 0 else None,
+                  "cagr": round(sum(cagr_vals) / len(cagr_vals), 4) if cagr_vals else None,
+              })
 
           summary["aggregate"] = all_agg
           Path("models/walkforward_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
