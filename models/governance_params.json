@@ -1,14 +1,14 @@
 {
   "BTC": {
-    "conf_min": 0.66,
-    "deadband": 0.07,
-    "min_flip_min": 540,
-    "debounce_min": 60
+    "conf_min": 0.68,
+    "deadband": 0.08,
+    "min_flip_min": 720,
+    "debounce_min": 75
   },
   "ETH": {
     "conf_min": 0.64,
     "deadband": 0.06,
-    "min_flip_min": 300,
+    "min_flip_min": 420,
     "debounce_min": 60
   }
 }
