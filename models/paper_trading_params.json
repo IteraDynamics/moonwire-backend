@@ -1,9 +1,4 @@
 {
-  "deadband": 0.08,
-  "min_flip_min": 360,
-  "horizon_min": 60,
-  "slippage_bps": 2,
-  "fees_bps": 1,
-  "capital": 100000,
-  "lookback_h": 720
+  "BTC": { "conf_min": 0.66, "deadband": 0.06, "min_flip_min": 360, "debounce_min": 45 },
+  "ETH": { "conf_min": 0.62, "deadband": 0.05, "min_flip_min": 240, "debounce_min": 45 }
 }
