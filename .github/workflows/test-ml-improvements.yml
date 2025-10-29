@@ -21,6 +21,46 @@ on:
         description: "Symbols to test (comma-separated)"
         required: false
         default: "BTC,ETH"
+      lookback_days:
+        description: "Days of training data (180, 365, etc.)"
+        required: false
+        default: "180"
+      n_splits:
+        description: "Number of walk-forward folds (3, 5, 7, etc.)"
+        required: false
+        default: "3"
+      enable_social:
+        description: "Enable social features (Reddit sentiment)"
+        required: false
+        type: boolean
+        default: false
+      horizon_h:
+        description: "Prediction horizon (hours ahead to predict)"
+        required: false
+        type: choice
+        options:
+          - "1"
+          - "3"
+          - "6"
+        default: "1"
+      social_smoothing:
+        description: "Social feature smoothing window (hours) - lower = more sensitive"
+        required: false
+        type: choice
+        options:
+          - "1"
+          - "3"
+          - "6"
+        default: "3"
+      burst_threshold:
+        description: "Burst detection sensitivity (Z-score) - lower = more sensitive"
+        required: false
+        type: choice
+        options:
+          - "1.5"
+          - "2.0"
+          - "2.5"
+        default: "2.0"
 
 jobs:
   test-ml-approach:
@@ -45,19 +85,50 @@ jobs:
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
           python -m pip install matplotlib scikit-learn pandas numpy joblib
 
+      - name: Backfill Reddit Social Data
+        if: ${{ inputs.enable_social }}
+        env:
+          MW_REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          MW_REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          MW_REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
+        run: |
+          echo "=================================================="
+          echo "Backfilling Reddit Social Data"
+          echo "=================================================="
+          export MW_BACKFILL_DAYS=${{ inputs.lookback_days }}
+          export MW_OFFLINE_DEMO=0
+          export MW_REDDIT_SUBS="CryptoCurrency,Bitcoin,ethtrader,Solana"
+          echo "Fetching $MW_BACKFILL_DAYS days of Reddit data..."
+          python -m scripts.social.backfill_social
+          echo ""
+          echo "Social data backfill complete!"
+          if [ -f logs/social_reddit.jsonl ]; then
+            echo "✓ logs/social_reddit.jsonl created"
+            echo "  Lines: $(wc -l < logs/social_reddit.jsonl)"
+            echo "  Size: $(du -h logs/social_reddit.jsonl | cut -f1)"
+          else
+            echo "⚠ Warning: social_reddit.jsonl not created"
+          fi
+          echo "=================================================="
+
       - name: Test Approach 1 - Regime Filtering
         if: ${{ inputs.approach == '1_regime_filter' || inputs.approach == 'all_approaches' }}
         run: |
           echo "=================================================="
           echo "Testing Approach 1: Regime Detection + Filtering"
           echo "=================================================="
-          export MW_ML_LOOKBACK_DAYS=180
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
           export MW_ML_MODEL=hybrid
           export MW_REGIME_ENABLED=1
           export MW_REGIME_FILTER_ENABLED=1
           export MW_REGIME_VOLATILITY_THRESHOLD=0.06
           export MW_REGIME_TREND_THRESHOLD=0.08
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
+          export MW_HORIZON_H=${{ inputs.horizon_h }}
+          export MW_SOC_SMOOTH=${{ inputs.social_smoothing }}
+          export BURST_Z=${{ inputs.burst_threshold }}
           python -m scripts.ml.train_predict
           # Save results with approach name
           if [ -f models/ml_model_manifest.json ]; then
@@ -70,11 +141,16 @@ jobs:
           echo "=================================================="
           echo "Testing Approach 2: Extended Training Data"
           echo "=================================================="
-          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
           export MW_ML_MODEL=hybrid
           export MW_REGIME_ENABLED=0
           export MW_REGIME_FILTER_ENABLED=0
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
+          export MW_HORIZON_H=${{ inputs.horizon_h }}
+          export MW_SOC_SMOOTH=${{ inputs.social_smoothing }}
+          export BURST_Z=${{ inputs.burst_threshold }}
           python -m scripts.ml.train_predict
           if [ -f models/ml_model_manifest.json ]; then
             cp models/ml_model_manifest.json artifacts/approach_2_manifest.json
@@ -86,12 +162,17 @@ jobs:
           echo "=================================================="
           echo "Testing Approach 3: Simplified LR-only Model"
           echo "=================================================="
-          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
           export MW_ML_MODEL=logreg
           export MW_FEATURE_SELECTION=top5
           export MW_REGIME_ENABLED=0
           export MW_REGIME_FILTER_ENABLED=0
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
+          export MW_HORIZON_H=${{ inputs.horizon_h }}
+          export MW_SOC_SMOOTH=${{ inputs.social_smoothing }}
+          export BURST_Z=${{ inputs.burst_threshold }}
           python -m scripts.ml.train_predict
           if [ -f models/ml_model_manifest.json ]; then
             cp models/ml_model_manifest.json artifacts/approach_3_manifest.json
@@ -103,13 +184,18 @@ jobs:
           echo "=================================================="
           echo "Testing Approach 4: Per-Regime Models"
           echo "=================================================="
-          export MW_ML_LOOKBACK_DAYS=365
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
           export MW_ML_MODEL=hybrid
           export MW_REGIME_ENABLED=1
           export MW_PER_REGIME_MODELS=1
           export MW_REGIME_VOLATILITY_THRESHOLD=0.06
           export MW_REGIME_TREND_THRESHOLD=0.08
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
+          export MW_HORIZON_H=${{ inputs.horizon_h }}
+          export MW_SOC_SMOOTH=${{ inputs.social_smoothing }}
+          export BURST_Z=${{ inputs.burst_threshold }}
           python -m scripts.ml.train_predict
           if [ -f models/ml_model_manifest.json ]; then
             cp models/ml_model_manifest.json artifacts/approach_4_manifest.json
