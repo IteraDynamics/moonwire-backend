@@ -61,6 +61,26 @@ on:
           - "2.0"
           - "2.5"
         default: "2.0"
+      btc_model:
+        description: "ML model for BTC"
+        required: false
+        type: choice
+        options:
+          - "hybrid"
+          - "logreg"
+          - "gb"
+          - "hgb"
+        default: "hybrid"
+      eth_model:
+        description: "ML model for ETH"
+        required: false
+        type: choice
+        options:
+          - "hybrid"
+          - "logreg"
+          - "gb"
+          - "hgb"
+        default: "hybrid"
 
 jobs:
   test-ml-approach:
@@ -119,7 +139,7 @@ jobs:
           echo "=================================================="
           export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
           export MW_N_SPLITS=${{ inputs.n_splits }}
-          export MW_ML_MODEL=hybrid
+          export MW_ML_MODEL_MAP="BTC:${{ inputs.btc_model }},ETH:${{ inputs.eth_model }}"
           export MW_REGIME_ENABLED=1
           export MW_REGIME_FILTER_ENABLED=1
           export MW_REGIME_VOLATILITY_THRESHOLD=0.06
@@ -143,7 +163,7 @@ jobs:
           echo "=================================================="
           export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
           export MW_N_SPLITS=${{ inputs.n_splits }}
-          export MW_ML_MODEL=hybrid
+          export MW_ML_MODEL_MAP="BTC:${{ inputs.btc_model }},ETH:${{ inputs.eth_model }}"
           export MW_REGIME_ENABLED=0
           export MW_REGIME_FILTER_ENABLED=0
           export MW_ML_SYMBOLS="${{ inputs.symbols }}"
@@ -164,7 +184,7 @@ jobs:
           echo "=================================================="
           export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
           export MW_N_SPLITS=${{ inputs.n_splits }}
-          export MW_ML_MODEL=logreg
+          export MW_ML_MODEL_MAP="BTC:${{ inputs.btc_model }},ETH:${{ inputs.eth_model }}"
           export MW_FEATURE_SELECTION=top5
           export MW_REGIME_ENABLED=0
           export MW_REGIME_FILTER_ENABLED=0
@@ -186,7 +206,7 @@ jobs:
           echo "=================================================="
           export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
           export MW_N_SPLITS=${{ inputs.n_splits }}
-          export MW_ML_MODEL=hybrid
+          export MW_ML_MODEL_MAP="BTC:${{ inputs.btc_model }},ETH:${{ inputs.eth_model }}"
           export MW_REGIME_ENABLED=1
           export MW_PER_REGIME_MODELS=1
           export MW_REGIME_VOLATILITY_THRESHOLD=0.06
