@@ -1,34 +1,255 @@
+'use client'
+
 export default function Home() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
-      <div className="container mx-auto px-4 py-20">
-        <h1 className="text-6xl font-bold text-center mb-6">MoonWire</h1>
-        <p className="text-xl text-center text-slate-300 mb-12">
-          Premium crypto signals launching soon
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900">
+      {/* Hero Section */}
+      <header className="container mx-auto px-4 py-20 text-center">
+        <h1 className="text-5xl md:text-7xl font-bold text-white mb-6 tracking-tight">
+          MoonWire
+        </h1>
+        <p className="text-xl md:text-2xl text-slate-300 mb-4 max-w-3xl mx-auto">
+          Premium crypto signals with institutional-grade validation
+        </p>
+        <p className="text-lg text-slate-400 mb-12 max-w-2xl mx-auto">
+          54-60% win rate validated across 7 time periods. Not for everyone. For traders who want an edge.
         </p>
         
-        <div className="max-w-4xl mx-auto text-center">
-          <div className="grid md:grid-cols-3 gap-6 mb-12">
-            <div className="bg-slate-800 p-6 rounded-lg">
-              <div className="text-3xl font-bold text-emerald-400">54-60%</div>
-              <div className="text-slate-400">Win Rate</div>
-            </div>
-            <div className="bg-slate-800 p-6 rounded-lg">
-              <div className="text-3xl font-bold text-blue-400">1.41-1.44</div>
-              <div className="text-slate-400">Profit Factor</div>
-            </div>
-            <div className="bg-slate-800 p-6 rounded-lg">
-              <div className="text-3xl font-bold text-purple-400">7-Fold</div>
-              <div className="text-slate-400">Validated</div>
-            </div>
+        {/* Stats Bar */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-6 max-w-4xl mx-auto mb-16">
+          <div className="bg-slate-800/50 backdrop-blur-sm rounded-lg p-6 border border-slate-700">
+            <div className="text-3xl font-bold text-emerald-400 mb-2">54-60%</div>
+            <div className="text-sm text-slate-400">Win Rate</div>
           </div>
-          
-          <h2 className="text-3xl font-bold mb-8">Coming Soon</h2>
-          <p className="text-slate-300 text-lg">
-            Join the waitlist for early access
+          <div className="bg-slate-800/50 backdrop-blur-sm rounded-lg p-6 border border-slate-700">
+            <div className="text-3xl font-bold text-blue-400 mb-2">1.41-1.44</div>
+            <div className="text-sm text-slate-400">Profit Factor</div>
+          </div>
+          <div className="bg-slate-800/50 backdrop-blur-sm rounded-lg p-6 border border-slate-700">
+            <div className="text-3xl font-bold text-purple-400 mb-2">-13%</div>
+            <div className="text-sm text-slate-400">Max Drawdown</div>
+          </div>
+          <div className="bg-slate-800/50 backdrop-blur-sm rounded-lg p-6 border border-slate-700">
+            <div className="text-3xl font-bold text-amber-400 mb-2">7-Fold</div>
+            <div className="text-sm text-slate-400">Validated</div>
+          </div>
+        </div>
+      </header>
+
+      {/* Pricing Section */}
+      <section className="container mx-auto px-4 py-16">
+        <div className="text-center mb-12">
+          <h2 className="text-3xl md:text-4xl font-bold text-white mb-4">
+            Choose Your Edge
+          </h2>
+          <p className="text-slate-400 text-lg">
+            Two tiers. One goal: Profitable trading.
           </p>
         </div>
-      </div>
+
+        <div className="grid md:grid-cols-3 gap-8 max-w-6xl mx-auto">
+          {/* Standard Tier */}
+          <div className="bg-slate-800/70 backdrop-blur-sm rounded-2xl p-8 border border-slate-700 hover:border-emerald-500 transition-all hover:scale-105">
+            <div className="mb-6">
+              <h3 className="text-2xl font-bold text-white mb-2">Standard</h3>
+              <p className="text-slate-400">Balanced activity & quality</p>
+            </div>
+            
+            <div className="mb-6">
+              <div className="flex items-baseline">
+                <span className="text-5xl font-bold text-white">$79</span>
+                <span className="text-slate-400 ml-2">/month</span>
+              </div>
+            </div>
+
+            <div className="space-y-4 mb-8">
+              <div className="flex items-start">
+                <span className="text-emerald-400 mr-3">✓</span>
+                <span className="text-slate-300">54.7% win rate</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-emerald-400 mr-3">✓</span>
+                <span className="text-slate-300">1.41 profit factor</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-emerald-400 mr-3">✓</span>
+                <span className="text-slate-300">~15 signals per month</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-emerald-400 mr-3">✓</span>
+                <span className="text-slate-300">-13% max drawdown</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-emerald-400 mr-3">✓</span>
+                <span className="text-slate-300">BTC + ETH coverage</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-emerald-400 mr-3">✓</span>
+                <span className="text-slate-300">Discord + Email alerts</span>
+              </div>
+            </div>
+
+            
+              href="https://buy.stripe.com/test_fZu8wRccR6B7fa073EbEA04"
+              className="block w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 px-6 rounded-lg text-center transition-colors"
+            >
+              Get Started
+            </a>
+          </div>
+
+          {/* Elite Tier */}
+          <div className="bg-gradient-to-br from-blue-600/20 to-purple-600/20 backdrop-blur-sm rounded-2xl p-8 border-2 border-blue-500 relative hover:scale-105 transition-all">
+            <div className="absolute -top-4 left-1/2 transform -translate-x-1/2 bg-blue-600 text-white px-4 py-1 rounded-full text-sm font-semibold">
+              MOST SELECTIVE
+            </div>
+            
+            <div className="mb-6">
+              <h3 className="text-2xl font-bold text-white mb-2">Elite</h3>
+              <p className="text-slate-300">Ultra-selective, highest win rate</p>
+            </div>
+            
+            <div className="mb-6">
+              <div className="flex items-baseline">
+                <span className="text-5xl font-bold text-white">$129</span>
+                <span className="text-slate-300 ml-2">/month</span>
+              </div>
+            </div>
+
+            <div className="space-y-4 mb-8">
+              <div className="flex items-start">
+                <span className="text-blue-400 mr-3">✓</span>
+                <span className="text-slate-200">59.5% win rate</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-blue-400 mr-3">✓</span>
+                <span className="text-slate-200">1.44 profit factor</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-blue-400 mr-3">✓</span>
+                <span className="text-slate-200">~11 signals per month</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-blue-400 mr-3">✓</span>
+                <span className="text-slate-200">BTC: 75% win rate</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-blue-400 mr-3">✓</span>
+                <span className="text-slate-200">Only highest conviction</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-blue-400 mr-3">✓</span>
+                <span className="text-slate-200">Priority support</span>
+              </div>
+            </div>
+
+            
+              href="https://buy.stripe.com/test_eVq7sN1ydaRnaTKfAabEA03"
+              className="block w-full bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 px-6 rounded-lg text-center transition-colors"
+            >
+              Go Elite
+            </a>
+          </div>
+
+          {/* Bundle Tier */}
+          <div className="bg-slate-800/70 backdrop-blur-sm rounded-2xl p-8 border border-slate-700 hover:border-purple-500 transition-all hover:scale-105">
+            <div className="mb-6">
+              <h3 className="text-2xl font-bold text-white mb-2">Bundle</h3>
+              <p className="text-slate-400">Maximum coverage</p>
+            </div>
+            
+            <div className="mb-6">
+              <div className="flex items-baseline">
+                <span className="text-5xl font-bold text-white">$179</span>
+                <span className="text-slate-400 ml-2">/month</span>
+              </div>
+              <div className="text-emerald-400 text-sm font-semibold mt-2">
+                Save $29/month
+              </div>
+            </div>
+
+            <div className="space-y-4 mb-8">
+              <div className="flex items-start">
+                <span className="text-purple-400 mr-3">✓</span>
+                <span className="text-slate-300">All Standard features</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-purple-400 mr-3">✓</span>
+                <span className="text-slate-300">All Elite features</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-purple-400 mr-3">✓</span>
+                <span className="text-slate-300">~26 total signals/month</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-purple-400 mr-3">✓</span>
+                <span className="text-slate-300">Both signal tiers</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-purple-400 mr-3">✓</span>
+                <span className="text-slate-300">Maximum edge</span>
+              </div>
+              <div className="flex items-start">
+                <span className="text-purple-400 mr-3">✓</span>
+                <span className="text-slate-300">Best value</span>
+              </div>
+            </div>
+
+            
+              href="https://buy.stripe.com/test_cNifZj0u92kRfa09bMbEA02"
+              className="block w-full bg-purple-600 hover:bg-purple-500 text-white font-semibold py-3 px-6 rounded-lg text-center transition-colors"
+            >
+              Get Bundle
+            </a>
+          </div>
+        </div>
+      </section>
+
+      {/* How It Works */}
+      <section className="container mx-auto px-4 py-16">
+        <h2 className="text-3xl md:text-4xl font-bold text-white text-center mb-12">
+          How It Works
+        </h2>
+        
+        <div className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+          <div className="text-center">
+            <div className="bg-emerald-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl font-bold text-white">
+              1
+            </div>
+            <h3 className="text-xl font-semibold text-white mb-3">Subscribe</h3>
+            <p className="text-slate-400">
+              Choose your tier. Get instant Discord access. No setup required.
+            </p>
+          </div>
+          
+          <div className="text-center">
+            <div className="bg-blue-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl font-bold text-white">
+              2
+            </div>
+            <h3 className="text-xl font-semibold text-white mb-3">Receive Signals</h3>
+            <p className="text-slate-400">
+              Get real-time alerts via Discord. Entry, exit, confidence included.
+            </p>
+          </div>
+          
+          <div className="text-center">
+            <div className="bg-purple-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl font-bold text-white">
+              3
+            </div>
+            <h3 className="text-xl font-semibold text-white mb-3">Trade & Profit</h3>
+            <p className="text-slate-400">
+              Execute signals on your exchange. Track performance. Adjust risk as needed.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-slate-800 py-12">
+        <div className="container mx-auto px-4 text-center text-slate-500 text-sm">
+          <p className="mb-2">© 2025 MoonWire. All rights reserved.</p>
+          <p>Trading involves risk. Past performance does not guarantee future results.</p>
+        </div>
+      </footer>
     </div>
   )
 }
