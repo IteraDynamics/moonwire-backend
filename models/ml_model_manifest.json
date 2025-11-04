@@ -1,0 +1,87 @@
+{
+  "feature_list": [
+    "r_1h",
+    "r_3h",
+    "r_6h",
+    "vol_6h",
+    "atr_14h",
+    "sma_gap",
+    "high_vol",
+    "social_score"
+  ],
+  "fold_metrics": [
+    {
+      "fold": 0,
+      "pred_mean": 0.562835564707614,
+      "symbol": "BTC",
+      "test_len": 720,
+      "train_len": 1440
+    },
+    {
+      "fold": 1,
+      "pred_mean": 0.5278777028033819,
+      "symbol": "BTC",
+      "test_len": 720,
+      "train_len": 1440
+    },
+    {
+      "fold": 2,
+      "pred_mean": 0.49714498986530203,
+      "symbol": "BTC",
+      "test_len": 720,
+      "train_len": 1440
+    },
+    {
+      "fold": 0,
+      "pred_mean": 0.4808869073183363,
+      "symbol": "ETH",
+      "test_len": 720,
+      "train_len": 1440
+    },
+    {
+      "fold": 1,
+      "pred_mean": 0.49298124706910185,
+      "symbol": "ETH",
+      "test_len": 720,
+      "train_len": 1440
+    },
+    {
+      "fold": 2,
+      "pred_mean": 0.4670892219352439,
+      "symbol": "ETH",
+      "test_len": 720,
+      "train_len": 1440
+    },
+    {
+      "fold": 0,
+      "pred_mean": 0.5108018282949249,
+      "symbol": "SOL",
+      "test_len": 720,
+      "train_len": 1440
+    },
+    {
+      "fold": 1,
+      "pred_mean": 0.5148207499068685,
+      "symbol": "SOL",
+      "test_len": 720,
+      "train_len": 1440
+    },
+    {
+      "fold": 2,
+      "pred_mean": 0.50188713898707,
+      "symbol": "SOL",
+      "test_len": 720,
+      "train_len": 1440
+    }
+  ],
+  "horizon_h": 1,
+  "lookback_days": 270,
+  "model_type": "hybrid",
+  "symbols": [
+    "BTC",
+    "ETH",
+    "SOL"
+  ],
+  "test_days": 30,
+  "train_days": 60
+}

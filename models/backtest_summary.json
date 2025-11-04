@@ -1,0 +1,32 @@
+{
+  "aggregate": {
+    "max_drawdown": -0.2052,
+    "n_trades": 103,
+    "profit_factor": 2.0223864077669904,
+    "signals_per_day": 0.3829,
+    "win_rate": 0.582531067961165
+  },
+  "per_symbol": {
+    "BTC": {
+      "max_drawdown": -0.2052,
+      "n_trades": 58,
+      "profit_factor": 0.8988,
+      "signals_per_day": 0.2156,
+      "win_rate": 0.5
+    },
+    "ETH": {
+      "max_drawdown": -0.0329,
+      "n_trades": 23,
+      "profit_factor": 3.8408,
+      "signals_per_day": 0.0855,
+      "win_rate": 0.6957
+    },
+    "SOL": {
+      "max_drawdown": -0.0399,
+      "n_trades": 22,
+      "profit_factor": 3.0835,
+      "signals_per_day": 0.0818,
+      "win_rate": 0.6818
+    }
+  }
+}

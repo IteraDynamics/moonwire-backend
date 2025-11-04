@@ -1,0 +1,44 @@
+{
+  "env": {
+    "DEMO_MODE": null,
+    "MW_BRANCH": null,
+    "MW_DEMO": null,
+    "MW_OFFLINE_DEMO": null
+  },
+  "lookback_days": null,
+  "series": {
+    "BTC": {
+      "close_max": 33740.321045043755,
+      "close_min": 7683.010027157921,
+      "close_var": 24288227.46405841,
+      "rows": 6480,
+      "ts_max": "2025-10-31T12:00:00+00:00",
+      "ts_min": "2025-02-03T13:00:00+00:00",
+      "ts_monotonic": true
+    },
+    "ETH": {
+      "close_max": 3899.761420495219,
+      "close_min": 682.7118777247944,
+      "close_var": 683413.9585476011,
+      "rows": 6480,
+      "ts_max": "2025-10-31T12:00:00+00:00",
+      "ts_min": "2025-02-03T13:00:00+00:00",
+      "ts_monotonic": true
+    },
+    "SOL": {
+      "close_max": 65.93557275491101,
+      "close_min": 10.943278908505546,
+      "close_var": 112.84278288569519,
+      "rows": 6480,
+      "ts_max": "2025-10-31T12:00:00+00:00",
+      "ts_min": "2025-02-03T13:00:00+00:00",
+      "ts_monotonic": true
+    }
+  },
+  "source": "real",
+  "symbols": [
+    "BTC",
+    "ETH",
+    "SOL"
+  ]
+}
