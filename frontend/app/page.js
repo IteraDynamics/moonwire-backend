@@ -53,7 +53,7 @@ export default function Home() {
               "BTC + ETH coverage",
               "Discord + Email alerts"
             ]}
-            href="https://buy.stripe.com/test_fZu8wRccR6B7fa073EbEA04"
+            href="https://buy.stripe.com/test_28EdR96aM95fdktcD40gw02"
             buttonText="Get Started"
             color="emerald"
           />
@@ -71,7 +71,7 @@ export default function Home() {
               "Only highest conviction",
               "Priority support"
             ]}
-            href="https://buy.stripe.com/test_eVq7sN1ydaRnaTKfAabEA03"
+            href="https://buy.stripe.com/test_7sYbJ1fLmgxHcgp6eG0gw01"
             buttonText="Go Elite"
             color="blue"
             featured={true}
@@ -90,7 +90,7 @@ export default function Home() {
               "Maximum edge",
               "Best value"
             ]}
-            href="https://buy.stripe.com/test_cNifZj0u92kRfa09bMbEA02"
+            href="https://buy.stripe.com/test_7sYbJ1eHi3KV5S1dH80gw00"
             buttonText="Get Bundle"
             color="purple"
           />
