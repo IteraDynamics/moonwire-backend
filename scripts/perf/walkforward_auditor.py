@@ -452,3 +452,72 @@ class WalkForwardAuditor:
             "sharpe": sharpe,
             "max_drawdown": max_dd,
         }
+
+if __name__ == "__main__":
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Purged Walk-Forward Validation Auditor"
+    )
+
+    parser.add_argument(
+        "--log-path",
+        type=Path,
+        required=True,
+        help="Path to shadow inference JSONL log",
+    )
+    parser.add_argument(
+        "--symbols",
+        type=str,
+        default="BTC,ETH",
+        help="Comma-separated list of symbols to include",
+    )
+    parser.add_argument(
+        "--k-folds",
+        type=int,
+        default=5,
+        help="Number of walk-forward folds",
+    )
+    parser.add_argument(
+        "--window-hours",
+        type=int,
+        default=720,
+        help="Trailing window size (hours)",
+    )
+    parser.add_argument(
+        "--embargo-hours",
+        type=int,
+        default=6,
+        help="Embargo gap between train and test windows (hours)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional output JSON file; if omitted prints to stdout",
+    )
+
+    args = parser.parse_args()
+
+    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+
+    auditor = WalkForwardAuditor(
+        shadow_log_path=args.log_path,
+        k_folds=args.k_folds,
+        window_hours=args.window_hours,
+        embargo_hours=args.embargo_hours,
+    )
+
+    auditor.load_data(symbols=symbols)
+    folds = auditor.generate_folds()
+    results = auditor.audit_performance(folds)
+
+    if args.output:
+        with args.output.open("w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+        print(f"Saved results to {args.output}")
+    else:
+        json.dump(results, sys.stdout, indent=2)
+        print()
