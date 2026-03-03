@@ -15,7 +15,7 @@ def is_signal_valid(signal):
     MIN_VOLUME = 10_000_000
     COOLDOWN_MINUTES = 30
 
-    if movement < MIN_MOVEMENT:
+    if abs(movement) < MIN_MOVEMENT:  # Use absolute value to catch both positive and negative movements
         return False
 
     if volume < MIN_VOLUME:
