@@ -53,13 +53,18 @@ def generate_signals():
                 "timestamp": datetime.utcnow()
             }
 
-            if is_signal_valid(signal):
+            is_valid = is_signal_valid(signal)
+            print(f"[DEBUG] {asset} signal valid: {is_valid} | movement: {price_change}% | confidence: {confidence}")
+            
+            if is_valid:
                 dispatch_alerts(asset, signal, cache)
                 valid_signals.append(signal)
+                print(f"[SIGNAL GENERATED] {asset}: {signal}")
 
     except Exception as e:
         print(f"[ERROR] Failed to generate signals: {e}")
 
+    print(f"[SIGNAL GENERATION COMPLETE] Generated {len(valid_signals)} valid signals")
     return valid_signals
 
 def label_confidence(score):
