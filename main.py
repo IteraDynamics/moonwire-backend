@@ -148,6 +148,19 @@ def get_signal_stats():
         "latest_signal": signals[-1]
     }
 
+@app.post("/api/signal/generate")
+def trigger_signal_generation():
+    """Manually trigger signal generation (testing only)"""
+    try:
+        from src.signal_generator import generate_signals
+        generate_signals()
+        return {
+            "status": "success",
+            "message": "Signal generation triggered. Check Discord in 1-2 minutes."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     from threading import Thread
