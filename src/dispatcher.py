@@ -14,6 +14,10 @@ ELITE_SIGNALS_FILE = Path('models/elite/signals.jsonl')
 
 def dispatch_alerts(asset: str, signal: dict, cache: SignalCache):
     print(f"[Dispatch] Alert triggered for {asset}: {signal}")
+    
+    # Get current price from cache (stored by ingest_discovery)
+    asset_data = cache.get_signal(asset)
+    current_price = asset_data.get("current_price", 0) if isinstance(asset_data, dict) else 0
 
     # Save signal to cache
     cache.set_signal(asset, signal)
@@ -34,14 +38,18 @@ def dispatch_alerts(asset: str, signal: dict, cache: SignalCache):
     # Write to JSONL files for Discord bot
     # Determine tier based on confidence (can adjust thresholds later)
     confidence = signal.get("confidence_score", 0)
-    direction = "LONG" if signal["price_change"] > 0 else "SHORT"
+    direction = "long" if signal["price_change"] > 0 else "short"
+    
+    # Generate unique ID from timestamp + asset
+    signal_id = f"{asset}_{int(datetime.utcnow().timestamp() * 1000)}"
     
     signal_entry = {
-        "asset": asset,
+        "id": signal_id,
+        "symbol": asset,
         "direction": direction,
         "confidence": abs(confidence),
-        "entry_price": signal.get("entry_price", 0),  # Can add real price later
-        "timestamp": datetime.utcnow().isoformat()
+        "price": current_price,
+        "ts": datetime.utcnow().isoformat() + 'Z'
     }
     
     # Write to standard tier (for now, write all signals to both)

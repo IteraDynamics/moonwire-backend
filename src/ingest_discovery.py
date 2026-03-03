@@ -18,7 +18,8 @@ def fetch_from_coinpaprika(asset_id):
             data = response.json()
             return {
                 'price_change_24h': data['quotes']['USD']['percent_change_24h'],
-                'volume_now': data['quotes']['USD']['volume_24h']
+                'volume_now': data['quotes']['USD']['volume_24h'],
+                'current_price': data['quotes']['USD']['price']
             }
     except Exception as e:
         print(f"CoinPaprika failed for {asset_id}: {e}")
@@ -32,7 +33,8 @@ def fetch_from_coingecko(asset_slug):
             data = response.json()
             return {
                 'price_change_24h': data['market_data']['price_change_percentage_24h'],
-                'volume_now': data['market_data']['total_volume']['usd']
+                'volume_now': data['market_data']['total_volume']['usd'],
+                'current_price': data['market_data']['current_price']['usd']
             }
     except Exception as e:
         print(f"CoinGecko failed for {asset_slug}: {e}")
