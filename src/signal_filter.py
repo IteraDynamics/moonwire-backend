@@ -11,7 +11,7 @@ def is_signal_valid(signal):
     volume = signal['volume']
     now = signal['timestamp']
 
-    MIN_MOVEMENT = 7.0
+    MIN_MOVEMENT = 2.0  # Temporarily lowered for testing (normal: 7.0)
     MIN_VOLUME = 10_000_000
     COOLDOWN_MINUTES = 30
 
