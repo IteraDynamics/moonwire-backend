@@ -22,8 +22,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the project
 COPY . .
 
+# Copy and set permissions for start script
+COPY start.sh .
+RUN chmod +x start.sh
+
 # Expose port
 EXPOSE 8000
 
-# Start the app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start both backend and Discord bot
+CMD ["./start.sh"]
