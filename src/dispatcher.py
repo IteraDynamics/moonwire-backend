@@ -20,6 +20,9 @@ def dispatch_alerts(asset: str, signal: dict, cache: SignalCache):
     print(f"[DEBUG] Asset data from cache for {asset}: {asset_data}")
     current_price = asset_data.get("current_price", 0) if isinstance(asset_data, dict) else 0
     print(f"[DEBUG] Extracted current_price: {current_price}")
+    
+    # Add current_price to signal before saving to cache
+    signal['current_price'] = current_price
 
     # Save signal to cache
     cache.set_signal(asset, signal)

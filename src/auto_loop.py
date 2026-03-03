@@ -15,14 +15,8 @@ def auto_loop(interval=600):
             print("🧠 Generating signals...")
             signals = generate_signals()
             
-            print("📣 Dispatching alerts and logging...")
-            for signal in signals:
-                dispatch_alerts(
-                    asset=signal['asset'],
-                    signal=signal,
-                    cache=cache
-                )
-                # Dispatcher already writes to JSONL files
+            # generate_signals() already calls dispatch_alerts internally
+            # No need to dispatch again here
                 
             print(f"✅ Cycle complete. Sleeping for {interval} seconds...\n")
             
