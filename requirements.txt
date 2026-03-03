@@ -15,3 +15,4 @@ scikit-learn
 requests
 numpy
 joblib
+discord.py
