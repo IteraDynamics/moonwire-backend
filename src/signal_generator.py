@@ -15,6 +15,8 @@ def generate_signals():
     try:
         sentiment_scores = blend_sentiment_scores()
         assets = [k for k in cache.keys() if not k.endswith('_signals') and not k.endswith('_sentiment')]
+        
+        print(f"[DEBUG] Found assets in cache: {assets}")
 
         for asset in assets:
             if asset in stablecoins:
@@ -24,11 +26,14 @@ def generate_signals():
             if not isinstance(data, dict):
                 print(f"[ERROR] Expected dict for signal data, got {type(data)} — asset: {asset}")
                 continue
+            
+            print(f"[DEBUG] {asset} data: {data}")
 
             price_change = data.get("price_change_24h")
             volume = data.get("volume_now")
 
             if price_change is None or volume is None:
+                print(f"[DEBUG] {asset} missing required fields - price_change_24h: {price_change}, volume_now: {volume}")
                 continue
 
             sentiment = sentiment_scores.get(asset, 0.0)
