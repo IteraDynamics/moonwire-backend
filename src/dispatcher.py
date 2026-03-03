@@ -1,13 +1,19 @@
 # src/dispatcher.py
 
 import logging
+import json
+from pathlib import Path
+from datetime import datetime
 from src.cache import SignalCache
 from src.emailer import send_email_alert
 
 logger = logging.getLogger(__name__)
 
+STANDARD_SIGNALS_FILE = Path('models/standard/signals.jsonl')
+ELITE_SIGNALS_FILE = Path('models/elite/signals.jsonl')
+
 def dispatch_alerts(asset: str, signal: dict, cache: SignalCache):
-    logger.info(f"[Dispatch] Alert triggered for {asset}: {signal}")
+    print(f"[Dispatch] Alert triggered for {asset}: {signal}")
 
     # Save signal to cache
     cache.set_signal(asset, signal)
@@ -23,18 +29,33 @@ def dispatch_alerts(asset: str, signal: dict, cache: SignalCache):
         "timestamp": signal["timestamp"]
     }
     cache.set_signal(history_key, history_entry)
-    logger.info(f"[History Write] Key: {history_key} -> {cache.get_signal(history_key)}")
+    print(f"[Dispatch] Saved to history: {history_key}")
 
-    # Format and send email alert
-    label = signal.get("confidence_label", "Unknown Confidence")
-    subject = f"MoonWire Alert: {asset} ({label})"
-    body = (
-        f"TEST ALERT:\n\n"
-        f"Price moved {signal['price_change']}%\n"
-        f"Volume: {signal['volume']}\n"
-        f"Sentiment Score: {signal['sentiment']:.2f}\n"
-        f"Confidence Score: {signal['confidence_score']:.2f} ({label})\n"
-        f"Time: {signal['timestamp']} UTC\n"
-    )
+    # Write to JSONL files for Discord bot
+    # Determine tier based on confidence (can adjust thresholds later)
+    confidence = signal.get("confidence_score", 0)
+    direction = "LONG" if signal["price_change"] > 0 else "SHORT"
+    
+    signal_entry = {
+        "asset": asset,
+        "direction": direction,
+        "confidence": abs(confidence),
+        "entry_price": signal.get("entry_price", 0),  # Can add real price later
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    # Write to standard tier (for now, write all signals to both)
+    STANDARD_SIGNALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(STANDARD_SIGNALS_FILE, 'a') as f:
+        f.write(json.dumps(signal_entry) + '\n')
+    print(f"[Dispatch] Written to {STANDARD_SIGNALS_FILE}")
+    
+    # Write to elite tier as well
+    ELITE_SIGNALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(ELITE_SIGNALS_FILE, 'a') as f:
+        f.write(json.dumps(signal_entry) + '\n')
+    print(f"[Dispatch] Written to {ELITE_SIGNALS_FILE}")
 
-    send_email_alert(subject, body)
+    # Email disabled for testing - was causing hangs
+    # send_email_alert(subject, body)
+    print(f"[Dispatch] Complete for {asset}")
