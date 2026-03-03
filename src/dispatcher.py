@@ -17,7 +17,9 @@ def dispatch_alerts(asset: str, signal: dict, cache: SignalCache):
     
     # Get current price from cache (stored by ingest_discovery)
     asset_data = cache.get_signal(asset)
+    print(f"[DEBUG] Asset data from cache for {asset}: {asset_data}")
     current_price = asset_data.get("current_price", 0) if isinstance(asset_data, dict) else 0
+    print(f"[DEBUG] Extracted current_price: {current_price}")
 
     # Save signal to cache
     cache.set_signal(asset, signal)
