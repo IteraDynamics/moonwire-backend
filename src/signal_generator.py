@@ -5,9 +5,13 @@ from src.signal_filter import is_signal_valid
 from src.cache_instance import cache
 from src.sentiment_blended import blend_sentiment_scores
 from src.dispatcher import dispatch_alerts
+from src.ingest_discovery import ingest_market_data
 
 def generate_signals():
     print(f"[{datetime.utcnow()}] Running signal generation...")
+    
+    # Ensure fresh market data is available
+    ingest_market_data(cache)
 
     stablecoins = {"USDC", "USDT", "DAI", "TUSD", "BUSD"}
     valid_signals = []

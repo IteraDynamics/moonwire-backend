@@ -3,12 +3,21 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 from pathlib import Path
 from typing import List, Optional
+from threading import Thread
 
 app = FastAPI(
     title="MoonWire API",
     version="1.0.0",
     description="Crypto signal intelligence API"
 )
+
+# Start auto-loop on startup
+@app.on_event("startup")
+def startup_event():
+    from src.auto_loop import auto_loop
+    loop_thread = Thread(target=auto_loop, args=(600,), daemon=True)
+    loop_thread.start()
+    print("🔄 Signal generation auto-loop started (every 10 minutes)")
 
 app.add_middleware(
     CORSMiddleware,
