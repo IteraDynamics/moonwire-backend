@@ -4,7 +4,6 @@ from src.ingest_discovery import ingest_market_data
 from src.signal_generator import generate_signals
 from src.dispatcher import dispatch_alerts
 from src.cache_instance import cache
-from src.signal_log import log_signal  # ADD THIS
 
 def auto_loop(interval=600):
     print("✅ MoonWire Auto-Loop Started...")
@@ -23,7 +22,7 @@ def auto_loop(interval=600):
                     signal=signal,
                     cache=cache
                 )
-                log_signal(signal)  # ADD THIS LINE - writes to signal_history.jsonl
+                # Dispatcher already writes to JSONL files
                 
             print(f"✅ Cycle complete. Sleeping for {interval} seconds...\n")
             
