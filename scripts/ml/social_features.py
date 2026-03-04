@@ -17,7 +17,7 @@ def _load_jsonl(path: Path) -> pd.DataFrame:
 
 def _hour_floor(ts: pd.Series) -> pd.Series:
     # expects ISO strings with Z
-    return pd.to_datetime(ts.str.replace("Z", "+00:00"), utc=True).dt.floor("H")
+    return pd.to_datetime(ts.str.replace("Z", "+00:00"), utc=True).dt.floor("h")
 
 def _series_from_logs(df: pd.DataFrame, kind: str) -> pd.Series:
     """
