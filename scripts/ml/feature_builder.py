@@ -33,7 +33,7 @@ def _atr(df: pd.DataFrame, n=14) -> pd.Series:
     tr = pd.concat([(h - l).abs(),
                     (h - prev_c).abs(),
                     (l - prev_c).abs()], axis=1).max(axis=1)
-    return tr.rolling(n, min_periods=n).mean().fillna(method="bfill").fillna(0.0)
+    return tr.rolling(n, min_periods=n).mean().bfill().fillna(0.0)
 
 def _sma_gap(df: pd.DataFrame, col="close", win=24) -> pd.Series:
     sma = df[col].rolling(win, min_periods=max(2, win//2)).mean()
