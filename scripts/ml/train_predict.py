@@ -174,7 +174,7 @@ def main():
 
     # --- tune thresholds (unchanged) ---
     best = tune_thresholds(pred_dfs, prices)
-    save_json("models/backtest_summary.json", {"aggregate": best["agg"], "per_symbol": best["per_symbol"]})
+    save_json("models/backtest_summary.json", {"params": best.get("params", {}), "aggregate": best["agg"], "per_symbol": best["per_symbol"]})
     save_json("models/ml_model_manifest.json", manifest)
 
     # --- placeholder plots (unchanged) ---
