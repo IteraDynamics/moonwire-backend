@@ -329,7 +329,7 @@ def main():
     try:
         from .tuner import tune_thresholds
         best = tune_thresholds(pred_dfs, prices)
-        save_json("models/backtest_summary.json", {"aggregate": best.get("agg", {}), "per_symbol": best.get("per_symbol", {})})
+        save_json("models/backtest_summary.json", {"params": best.get("params", {}), "aggregate": best.get("agg", {}), "per_symbol": best.get("per_symbol", {})})
     except Exception as e:
         print(f"[tuner] WARN: tune_thresholds failed: {e}")
         save_json("models/backtest_summary.json", {"aggregate": {}, "per_symbol": {}})
