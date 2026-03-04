@@ -372,7 +372,7 @@ def tune_thresholds(
 # Allow running by itself for quick smoke test
 if __name__ == "__main__":
     # Minimal synthetic input to prove it runs without the rest of the pipeline.
-    rng = pd.date_range("2024-01-01", periods=200, freq="H", tz="UTC")
+    rng = pd.date_range("2024-01-01", periods=200, freq="h", tz="UTC")
     demo_px = pd.DataFrame({"ts": rng, "close": np.cumsum(np.random.randn(len(rng))) + 100})
     demo_pred = pd.DataFrame({"ts": rng, "p_long": np.clip(np.random.rand(len(rng)) * 0.2 + 0.4, 0, 1)})
 

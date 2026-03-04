@@ -176,7 +176,7 @@ def _fetch_from_coingecko(symbol: str, lookback_days: int) -> pd.DataFrame | Non
     # Resample to exact 1h and reconstruct OHLC from close as a proxy
     df = df.set_index("ts").sort_index()
     # Fill any gaps before OHLC construction
-    df = df.asfreq("1H", method="pad")
+    df = df.asfreq("1h", method="pad")
 
     o = df["close"].shift(1)  # prev close as open
     h = df["close"].rolling(2).max()
@@ -205,9 +205,9 @@ def _make_demo_prices(symbol: str, lookback_days: int) -> pd.DataFrame:
     seed = (sum(ord(ch) for ch in symbol.upper()) + lookback_days) % (2**32 - 1)
     rng = np.random.default_rng(seed)
 
-    end = pd.Timestamp.now(tz="UTC").floor("H")
+    end = pd.Timestamp.now(tz="UTC").floor("h")
     start = end - pd.Timedelta(days=max(lookback_days, 2))  # ensure a bit of warmup
-    idx = pd.date_range(start=start, end=end, freq="1H", tz="UTC")
+    idx = pd.date_range(start=start, end=end, freq="1h", tz="UTC")
 
     # random walk on log-returns
     mu = 0.0
@@ -273,7 +273,7 @@ def _finalize_schema(df: pd.DataFrame) -> pd.DataFrame:
     # coerce to 1H frequency (pad missing, then rebuild OHLC from close if needed)
     # If the input is already 1H uniform, this will be a no-op.
     df = df.set_index("ts").sort_index()
-    df = df.asfreq("1H", method="pad")
+    df = df.asfreq("1h", method="pad")
 
     # If any of OHLC are missing (due to pad), rebuild minimally from close
     if df[["open", "high", "low"]].isna().any().any():

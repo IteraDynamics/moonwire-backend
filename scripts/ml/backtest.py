@@ -32,7 +32,7 @@ def _to_utc_hourly(df: pd.DataFrame, ts_col: str = "ts") -> pd.DataFrame:
     out = df.copy()
     out[ts_col] = pd.to_datetime(out[ts_col], utc=True)
     # normalize to exact hour (no minutes/seconds) so joins are clean
-    out[ts_col] = out[ts_col].dt.floor("H")
+    out[ts_col] = out[ts_col].dt.floor("h")
     out = out.drop_duplicates(subset=[ts_col]).sort_values(ts_col).reset_index(drop=True)
     return out
 

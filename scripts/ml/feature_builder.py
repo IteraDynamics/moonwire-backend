@@ -73,7 +73,7 @@ def _load_social_hourly(root: Path) -> pd.DataFrame:
             s = str(ts)
             if s.endswith("Z"):
                 s = s[:-1] + "+00:00"
-            t = pd.to_datetime(s, utc=True).floor("H")
+            t = pd.to_datetime(s, utc=True).floor("h")
             rows.append(t)
         except Exception:
             continue
@@ -87,7 +87,7 @@ def _social_score_series(root: Path, smooth_h: int = 6) -> pd.DataFrame:
     df = _load_social_hourly(root)
     if df.empty:
         return pd.DataFrame(columns=["social_score"])
-    rate = df["n"].asfreq("H").fillna(0.0)
+    rate = df["n"].asfreq("h").fillna(0.0)
     sm = rate.rolling(smooth_h, min_periods=1).mean()
     z = _zscore(sm).clip(-5, 5)
     score = 1.0 / (1.0 + np.exp(-z))
@@ -99,7 +99,7 @@ def _social_burst_series(root: Path, z_thresh=2.0, smooth_h=3) -> pd.DataFrame:
     df = _load_social_hourly(root)
     if df.empty:
         return pd.DataFrame(columns=["social_burst"])
-    rate = df["n"].asfreq("H").fillna(0.0)
+    rate = df["n"].asfreq("h").fillna(0.0)
     sm = rate.rolling(smooth_h, min_periods=1).mean()
     z  = _zscore(sm).fillna(0.0)
     out = pd.DataFrame({"social_burst": (z > z_thresh).astype(float)})
