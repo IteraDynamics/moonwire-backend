@@ -1,0 +1,52 @@
+{
+  "generated_at_utc": "2026-03-07T00:44:20.156591+00:00",
+  "symbol": "BTC",
+  "product_id": "BTC-USD",
+  "model_path": "../../quick_test_results/models/BTC_model.joblib",
+  "start_date": "2024-01-01",
+  "end_date": "2024-12-31",
+  "total_bars": 8737,
+  "first_bar": "2024-01-01T23:00:00Z",
+  "last_bar": "2024-12-30T23:00:00Z",
+  "horizon_hours": 1,
+  "git_sha": "017c931b0172",
+  "data_source": "itera_full_history",
+  "mode": "price_only",
+  "features": [
+    "r_1h",
+    "r_3h",
+    "r_6h",
+    "vol_6h",
+    "atr_14h",
+    "sma_gap",
+    "high_vol",
+    "social_score"
+  ],
+  "statistics": {
+    "p_long_min": 0.3289901945815739,
+    "p_long_max": 0.7001624400731211,
+    "p_long_mean": 0.5084935645663728,
+    "p_long_std": 0.04656155581103686,
+    "bars_p_long_gt_0.6": 198,
+    "bars_p_long_lt_0.4": 114
+  },
+  "schema": {
+    "ts_utc": "ISO8601 timestamp (bar close time, UTC)",
+    "product_id": "Asset identifier (e.g., BTC-USD)",
+    "p_long": "Probability of upward move over next horizon_hours (0.0-1.0)",
+    "horizon_hours": "Prediction horizon in hours",
+    "close": "Close price at bar (for reference)"
+  },
+  "notes": [
+    "Closed-bar semantics: decision at bar t applies to bar t+1",
+    "All timestamps are bar close times (end of hourly period)",
+    "p_short = 1 - p_long (not included to save space)",
+    "Timestamps are monotonically increasing and deduplicated",
+    "NO LOOKAHEAD: Features at bar t only use data up to and including bar t"
+  ],
+  "alignment": {
+    "prediction_timing": "t \u2192 t+1",
+    "bar_alignment": "close",
+    "warmup_trimmed": "Yes (initial bars with insufficient history for features)"
+  }
+}

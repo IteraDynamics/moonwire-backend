@@ -1,0 +1,26 @@
+{
+  "symbol": "BTC",
+  "date_range": "2024-01-01 to 2024-12-31",
+  "total_samples": 8737,
+  "train_samples": 6989,
+  "test_samples": 1748,
+  "features": [
+    "r_1h",
+    "r_3h",
+    "r_6h",
+    "vol_6h",
+    "atr_14h",
+    "sma_gap",
+    "high_vol",
+    "social_score"
+  ],
+  "metrics": {
+    "accuracy": 0.5291762013729977,
+    "precision": 0.5493230174081238,
+    "recall": 0.614054054054054,
+    "f1": 0.5798876978050026,
+    "mean_p_long": 0.5081994451224636
+  },
+  "model_path": "../../quick_test_results/models/BTC_model.joblib",
+  "generated_at": "2026-03-06T19:44:09.890926"
+}
