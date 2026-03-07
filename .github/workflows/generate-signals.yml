@@ -45,7 +45,7 @@ jobs:
           SYMBOLS=$(echo "${{ github.event.inputs.symbols }}" | tr ',' ' ')
           python train_itera_validation.py \
             --symbols $SYMBOLS \
-            --output ../../models
+            --output ../..
       
       - name: Generate BTC signals
         if: contains(github.event.inputs.symbols, 'BTC')
