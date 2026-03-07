@@ -1,0 +1,97 @@
+name: Generate Full Signal Feeds
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'Symbols to generate (comma-separated, e.g., BTC,ETH)'
+        required: true
+        default: 'BTC,ETH'
+
+jobs:
+  generate-signals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Download Itera data
+        run: |
+          mkdir -p data
+          # Download BTC data
+          curl -L "https://github.com/IteraDynamics/itera-dynamics/raw/refs/heads/main/data/btcusd_3600s_2019-01-01_to_2025-12-30.csv" \
+            -o data/btcusd_3600s_2019-01-01_to_2025-12-30.csv
+          # Download ETH data
+          curl -L "https://github.com/IteraDynamics/itera-dynamics/raw/refs/heads/main/data/ethusd_3600s_2019-01-01_to_2025-12-30.csv" \
+            -o data/ethusd_3600s_2019-01-01_to_2025-12-30.csv
+      
+      - name: Train models
+        run: |
+          cd scripts/ml
+          python train_itera_validation.py \
+            --symbols ${{ github.event.inputs.symbols }} \
+            --output ../../models
+      
+      - name: Generate BTC signals
+        if: contains(github.event.inputs.symbols, 'BTC')
+        run: |
+          cd scripts/ml
+          python export_signal_feed_itera.py \
+            --symbol BTC \
+            --model ../../models/BTC_model.joblib \
+            --start 2019-01-01 \
+            --end 2025-12-30 \
+            --output ../../feeds/btc_full_signals \
+            --format jsonl
+      
+      - name: Generate ETH signals
+        if: contains(github.event.inputs.symbols, 'ETH')
+        run: |
+          cd scripts/ml
+          python export_signal_feed_itera.py \
+            --symbol ETH \
+            --model ../../models/ETH_model.joblib \
+            --start 2019-01-01 \
+            --end 2025-12-30 \
+            --output ../../feeds/eth_full_signals \
+            --format jsonl
+      
+      - name: List generated files
+        run: |
+          echo "=== Generated Signal Files ==="
+          ls -lh feeds/
+          echo ""
+          echo "=== File Sizes ==="
+          du -h feeds/*.jsonl
+          echo ""
+          echo "=== Signal Counts ==="
+          wc -l feeds/*.jsonl
+      
+      - name: Upload signal feeds
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-feeds-${{ github.run_number }}
+          path: |
+            feeds/*.jsonl
+            feeds/*.manifest.json
+          retention-days: 90
+      
+      - name: Upload models
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-models-${{ github.run_number }}
+          path: models/*.joblib
+          retention-days: 30
