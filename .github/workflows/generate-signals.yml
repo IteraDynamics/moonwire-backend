@@ -31,11 +31,11 @@ jobs:
       - name: Download Itera data
         run: |
           mkdir -p data
-          # Download BTC data
-          curl -L "https://github.com/IteraDynamics/itera-dynamics/raw/refs/heads/main/data/btcusd_3600s_2019-01-01_to_2025-12-30.csv" \
+          # Download BTC data from release
+          curl -L "https://github.com/IteraDynamics/IteraDynamics/releases/download/data-v1.0/btcusd_3600s_2019-01-01_to_2025-12-30.csv" \
             -o data/btcusd_3600s_2019-01-01_to_2025-12-30.csv
-          # Download ETH data
-          curl -L "https://github.com/IteraDynamics/itera-dynamics/raw/refs/heads/main/data/ethusd_3600s_2019-01-01_to_2025-12-30.csv" \
+          # Download ETH data from release
+          curl -L "https://github.com/IteraDynamics/IteraDynamics/releases/download/data-v1.0/ethusd_3600s_2019-01-01_to_2025-12-30.csv" \
             -o data/ethusd_3600s_2019-01-01_to_2025-12-30.csv
       
       - name: Train models
