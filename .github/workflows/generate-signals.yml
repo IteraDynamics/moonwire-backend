@@ -41,8 +41,10 @@ jobs:
       - name: Train models
         run: |
           cd scripts/ml
+          # Convert comma-separated symbols to space-separated
+          SYMBOLS=$(echo "${{ github.event.inputs.symbols }}" | tr ',' ' ')
           python train_itera_validation.py \
-            --symbols ${{ github.event.inputs.symbols }} \
+            --symbols $SYMBOLS \
             --output ../../models
       
       - name: Generate BTC signals
