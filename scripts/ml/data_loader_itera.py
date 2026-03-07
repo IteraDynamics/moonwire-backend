@@ -19,7 +19,16 @@ import numpy as np
 
 # ---- Paths -----------------------------------------------------------------
 
-ITERA_DATA_DIR = Path("/home/clawd/clawd/iteradynamics/data")
+import os
+
+# Check environment variable first, fall back to local dev path, then relative path
+if os.getenv("ITERA_DATA_DIR"):
+    ITERA_DATA_DIR = Path(os.getenv("ITERA_DATA_DIR"))
+elif Path("/home/clawd/clawd/iteradynamics/data").exists():
+    ITERA_DATA_DIR = Path("/home/clawd/clawd/iteradynamics/data")
+else:
+    # Relative to repo root (for CI/GitHub Actions)
+    ITERA_DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 # Symbol to file mapping
 SYMBOL_FILES = {
