@@ -432,13 +432,16 @@ jobs:
               end_date="2025-12-30"
             fi
             
+            mkdir -p "feeds/${symbol,,}"
+            
             python scripts/ml/export_signal_feed_itera.py \
               --symbol "$symbol" \
               --model "$model_file" \
               --start "$start_date" \
               --end "$end_date" \
-              --output-dir "feeds/${symbol,,}" \
-              --model-version "v1.0-itera-full-history"
+              --output "feeds/${symbol,,}/signals" \
+              --format jsonl \
+              --horizon-hours ${{ inputs.horizon_h }}
             
             if [ -f "feeds/${symbol,,}/signals.jsonl" ]; then
               echo "✓ Signal feed exported: feeds/${symbol,,}/signals.jsonl"
