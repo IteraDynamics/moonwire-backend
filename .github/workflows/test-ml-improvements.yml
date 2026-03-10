@@ -335,15 +335,8 @@ jobs:
       MW_SOCIAL_ENABLED: 0  # Force price-only mode
 
     steps:
-      - name: Checkout MoonWire
+      - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Checkout Itera Dynamics (for historical data)
-        uses: actions/checkout@v4
-        with:
-          repository: IteraDynamics/IteraDynamics
-          path: ../iteradynamics
-          ref: feature/moonwire-signal-integration
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -363,16 +356,15 @@ jobs:
           echo "Verifying Itera Historical Data (2019-2025)"
           echo "=================================================="
           
-          # Verify data files exist
-          if [ -f ../iteradynamics/data/btcusd_3600s_2019-01-01_to_2025-12-30.csv ]; then
+          # Verify data files exist in repo data/ directory
+          if [ -f data/btcusd_3600s_2019-01-01_to_2025-12-30.csv ]; then
             echo "✓ BTC data found"
           else
-            echo "⚠ BTC data not found - workflow will fail"
-            echo "Expected: ../iteradynamics/data/btcusd_3600s_2019-01-01_to_2025-12-30.csv"
+            echo "❌ BTC data not found in data/ directory"
             exit 1
           fi
           
-          if [ -f ../iteradynamics/data/ethusd_3600s_2019-01-01_to_2025-12-30.csv ]; then
+          if [ -f data/ethusd_3600s_2019-01-01_to_2025-12-30.csv ]; then
             echo "✓ ETH data found"
           else
             echo "⚠ ETH data not found"
@@ -380,7 +372,7 @@ jobs:
           
           echo ""
           echo "Data files available:"
-          ls -lh ../iteradynamics/data/*.csv 2>/dev/null || echo "No CSV files found"
+          ls -lh data/*.csv 2>/dev/null || echo "No CSV files found"
           echo "=================================================="
 
       - name: Run Full-History Walk-Forward Validation
