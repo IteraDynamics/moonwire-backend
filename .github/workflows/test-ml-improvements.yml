@@ -485,7 +485,11 @@ jobs:
                       signals.append(json.loads(line))
               
               pred_df = pd.DataFrame(signals)
-              pred_df = pred_df.rename(columns={"timestamp": "ts"})
+              # Signal export uses 'ts_utc' column name
+              if "ts_utc" in pred_df.columns:
+                  pred_df = pred_df.rename(columns={"ts_utc": "ts"})
+              elif "timestamp" in pred_df.columns:
+                  pred_df = pred_df.rename(columns={"timestamp": "ts"})
               pred_df["ts"] = pd.to_datetime(pred_df["ts"])
               
               # Load prices
