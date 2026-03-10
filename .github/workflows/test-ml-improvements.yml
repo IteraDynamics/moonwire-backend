@@ -1,0 +1,642 @@
+name: ML Improvement Testing
+
+permissions:
+  contents: read
+  actions: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      approach:
+        description: "Which ML improvement approach to test"
+        required: true
+        type: choice
+        options:
+          - "1_regime_filter"
+          - "2_extended_data"
+          - "3_simple_lr"
+          - "4_per_regime"
+          - "all_approaches"
+          - "itera_full_history"
+      symbols:
+        description: "Symbols to test (comma-separated)"
+        required: false
+        default: "BTC,ETH"
+      lookback_days:
+        description: "Days of training data (180, 365, etc.) - ignored for itera_full_history"
+        required: false
+        default: "180"
+      n_splits:
+        description: "Number of walk-forward folds (3, 5, 7, etc.) - ignored for itera_full_history"
+        required: false
+        default: "3"
+      enable_social:
+        description: "Enable social features (Reddit sentiment)"
+        required: false
+        type: boolean
+        default: false
+      horizon_h:
+        description: "Prediction horizon (hours ahead to predict)"
+        required: false
+        type: choice
+        options:
+          - "1"
+          - "3"
+          - "6"
+        default: "1"
+      social_smoothing:
+        description: "Social feature smoothing window (hours) - lower = more sensitive"
+        required: false
+        type: choice
+        options:
+          - "1"
+          - "3"
+          - "6"
+        default: "3"
+      burst_threshold:
+        description: "Burst detection sensitivity (Z-score) - lower = more sensitive"
+        required: false
+        type: choice
+        options:
+          - "1.5"
+          - "2.0"
+          - "2.5"
+        default: "2.0"
+      btc_model:
+        description: "ML model for BTC"
+        required: false
+        type: choice
+        options:
+          - "hybrid"
+          - "logreg"
+          - "gb"
+          - "hgb"
+        default: "hybrid"
+      eth_model:
+        description: "ML model for ETH"
+        required: false
+        type: choice
+        options:
+          - "hybrid"
+          - "logreg"
+          - "gb"
+          - "hgb"
+        default: "hybrid"
+      # Backtesting params for itera_full_history
+      backtest_long_thresh:
+        description: "LONG entry threshold (p_long >= this) - for itera backtest"
+        required: false
+        default: "0.65"
+      backtest_short_thresh:
+        description: "SHORT entry threshold (p_long <= this) - for itera backtest"
+        required: false
+        default: "0.35"
+      backtest_debounce_hours:
+        description: "Debounce period between trades (hours) - for itera backtest"
+        required: false
+        default: "10"
+
+jobs:
+  test-ml-approach:
+    runs-on: ubuntu-latest
+    if: ${{ inputs.approach != 'itera_full_history' }}
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      MPLBACKEND: Agg
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+          python -m pip install matplotlib scikit-learn pandas numpy joblib
+
+      - name: Backfill Reddit Social Data
+        if: ${{ inputs.enable_social }}
+        env:
+          MW_REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          MW_REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          MW_REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
+        run: |
+          echo "=================================================="
+          echo "Backfilling Reddit Social Data"
+          echo "=================================================="
+          export MW_BACKFILL_DAYS=${{ inputs.lookback_days }}
+          export MW_OFFLINE_DEMO=0
+          export MW_REDDIT_SUBS="CryptoCurrency,Bitcoin,ethtrader,Solana"
+          echo "Fetching $MW_BACKFILL_DAYS days of Reddit data..."
+          python -m scripts.social.backfill_social
+          echo ""
+          echo "Social data backfill complete!"
+          if [ -f logs/social_reddit.jsonl ]; then
+            echo "✓ logs/social_reddit.jsonl created"
+            echo "  Lines: $(wc -l < logs/social_reddit.jsonl)"
+            echo "  Size: $(du -h logs/social_reddit.jsonl | cut -f1)"
+          else
+            echo "⚠ Warning: social_reddit.jsonl not created"
+          fi
+          echo "=================================================="
+
+      - name: Test Approach 1 - Regime Filtering
+        if: ${{ inputs.approach == '1_regime_filter' || inputs.approach == 'all_approaches' }}
+        run: |
+          echo "=================================================="
+          echo "Testing Approach 1: Regime Detection + Filtering"
+          echo "=================================================="
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
+          export MW_ML_MODEL_MAP="BTC:${{ inputs.btc_model }},ETH:${{ inputs.eth_model }}"
+          export MW_REGIME_ENABLED=1
+          export MW_REGIME_FILTER_ENABLED=1
+          export MW_REGIME_VOLATILITY_THRESHOLD=0.06
+          export MW_REGIME_TREND_THRESHOLD=0.08
+          export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
+          export MW_HORIZON_H=${{ inputs.horizon_h }}
+          export MW_SOC_SMOOTH=${{ inputs.social_smoothing }}
+          export BURST_Z=${{ inputs.burst_threshold }}
+          python -m scripts.ml.train_predict
+          # Save results with approach name
+          if [ -f models/ml_model_manifest.json ]; then
+            cp models/ml_model_manifest.json artifacts/approach_1_manifest.json
+          fi
+
+      - name: Test Approach 2 - Extended Data
+        if: ${{ inputs.approach == '2_extended_data' || inputs.approach == 'all_approaches' }}
+        run: |
+          echo "=================================================="
+          echo "Testing Approach 2: Extended Training Data"
+          echo "=================================================="
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
+          export MW_ML_MODEL_MAP="BTC:${{ inputs.btc_model }},ETH:${{ inputs.eth_model }}"
+          export MW_REGIME_ENABLED=0
+          export MW_REGIME_FILTER_ENABLED=0
+          export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
+          export MW_HORIZON_H=${{ inputs.horizon_h }}
+          export MW_SOC_SMOOTH=${{ inputs.social_smoothing }}
+          export BURST_Z=${{ inputs.burst_threshold }}
+          python -m scripts.ml.train_predict
+          if [ -f models/ml_model_manifest.json ]; then
+            cp models/ml_model_manifest.json artifacts/approach_2_manifest.json
+          fi
+
+      - name: Test Approach 3 - Simple LR
+        if: ${{ inputs.approach == '3_simple_lr' || inputs.approach == 'all_approaches' }}
+        run: |
+          echo "=================================================="
+          echo "Testing Approach 3: Simplified LR-only Model"
+          echo "=================================================="
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
+          export MW_ML_MODEL_MAP="BTC:${{ inputs.btc_model }},ETH:${{ inputs.eth_model }}"
+          export MW_FEATURE_SELECTION=top5
+          export MW_REGIME_ENABLED=0
+          export MW_REGIME_FILTER_ENABLED=0
+          export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
+          export MW_HORIZON_H=${{ inputs.horizon_h }}
+          export MW_SOC_SMOOTH=${{ inputs.social_smoothing }}
+          export BURST_Z=${{ inputs.burst_threshold }}
+          python -m scripts.ml.train_predict
+          if [ -f models/ml_model_manifest.json ]; then
+            cp models/ml_model_manifest.json artifacts/approach_3_manifest.json
+          fi
+
+      - name: Test Approach 4 - Per-Regime Models
+        if: ${{ inputs.approach == '4_per_regime' || inputs.approach == 'all_approaches' }}
+        run: |
+          echo "=================================================="
+          echo "Testing Approach 4: Per-Regime Models"
+          echo "=================================================="
+          export MW_ML_LOOKBACK_DAYS=${{ inputs.lookback_days }}
+          export MW_N_SPLITS=${{ inputs.n_splits }}
+          export MW_ML_MODEL_MAP="BTC:${{ inputs.btc_model }},ETH:${{ inputs.eth_model }}"
+          export MW_REGIME_ENABLED=1
+          export MW_PER_REGIME_MODELS=1
+          export MW_REGIME_VOLATILITY_THRESHOLD=0.06
+          export MW_REGIME_TREND_THRESHOLD=0.08
+          export MW_ML_SYMBOLS="${{ inputs.symbols }}"
+          export MW_SOCIAL_ENABLED=${{ inputs.enable_social && '1' || '0' }}
+          export MW_HORIZON_H=${{ inputs.horizon_h }}
+          export MW_SOC_SMOOTH=${{ inputs.social_smoothing }}
+          export BURST_Z=${{ inputs.burst_threshold }}
+          python -m scripts.ml.train_predict
+          if [ -f models/ml_model_manifest.json ]; then
+            cp models/ml_model_manifest.json artifacts/approach_4_manifest.json
+          fi
+
+      - name: Generate comparison report
+        if: ${{ inputs.approach == 'all_approaches' }}
+        run: |
+          python3 << 'PYTHON_SCRIPT'
+          import json
+          from pathlib import Path
+
+          approaches = {
+              "Approach 1: Regime Filtering": "artifacts/approach_1_manifest.json",
+              "Approach 2: Extended Data": "artifacts/approach_2_manifest.json",
+              "Approach 3: Simple LR": "artifacts/approach_3_manifest.json",
+              "Approach 4: Per-Regime Models": "artifacts/approach_4_manifest.json",
+          }
+
+          print("\n" + "="*70)
+          print("ML IMPROVEMENT APPROACHES - COMPARISON")
+          print("="*70 + "\n")
+
+          for name, path in approaches.items():
+              p = Path(path)
+              if not p.exists():
+                  print(f"❌ {name}: No results found")
+                  continue
+
+              try:
+                  data = json.loads(p.read_text())
+                  fold_metrics = data.get("fold_metrics", [])
+
+                  if not fold_metrics:
+                      print(f"⚠️  {name}: No fold metrics")
+                      continue
+
+                  print(f"✅ {name}")
+                  print(f"   Lookback: {data.get('lookback_days', 'N/A')} days")
+                  print(f"   Model: {data.get('model_type', 'N/A')}")
+                  print(f"   Features: {len(data.get('features', []))}")
+                  print(f"   Total folds: {len(fold_metrics)}")
+
+                  # Calculate average pred_mean across folds
+                  pred_means = [f.get('pred_mean', 0) for f in fold_metrics]
+                  if pred_means:
+                      avg_pred = sum(pred_means) / len(pred_means)
+                      print(f"   Avg prediction: {avg_pred:.4f}")
+
+                  print()
+
+              except Exception as e:
+                  print(f"❌ {name}: Error parsing results - {e}\n")
+
+          print("="*70)
+          print("Next step: Check artifacts for detailed results")
+          print("="*70)
+          PYTHON_SCRIPT
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml-improvement-results-${{ inputs.approach }}
+          path: |
+            artifacts/
+            models/ml_model_manifest.json
+            models/backtest_summary.json
+            models/current/
+          retention-days: 30
+
+      - name: Display results summary
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "Results Summary"
+          echo "=========================================="
+          if [ -f models/ml_model_manifest.json ]; then
+            echo "✅ Training completed successfully"
+            echo ""
+            echo "Key files generated:"
+            echo "  - models/ml_model_manifest.json"
+            echo "  - artifacts/ml_*.png"
+            echo "  - models/current/*.joblib"
+            echo ""
+            echo "Download artifacts to view detailed results:"
+            echo "  Actions → This workflow run → Artifacts"
+          else
+            echo "❌ Training may have failed"
+            echo "Check logs above for errors"
+          fi
+          echo "=========================================="
+
+  # ============================================================================
+  # NEW JOB: Full-History Itera Data Testing
+  # ============================================================================
+  test-itera-full-history:
+    runs-on: ubuntu-latest
+    if: ${{ inputs.approach == 'itera_full_history' }}
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      MPLBACKEND: Agg
+      MW_SOCIAL_ENABLED: 0  # Force price-only mode
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+          python -m pip install matplotlib scikit-learn pandas numpy joblib
+
+      - name: Download Itera Historical Data
+        run: |
+          echo "=================================================="
+          echo "Downloading Itera Historical Data (2019-2025)"
+          echo "=================================================="
+          mkdir -p ../iteradynamics/data
+          
+          # Check if data files already exist in the repo
+          if [ -f ../iteradynamics/data/btcusd_3600s_2019-01-01_to_2025-12-30.csv ]; then
+            echo "✓ BTC data found in repo"
+          else
+            echo "⚠ BTC data not found - workflow will fail"
+            echo "Please ensure Itera data is committed to ../iteradynamics/data/"
+            exit 1
+          fi
+          
+          if [ -f ../iteradynamics/data/ethusd_3600s_2019-01-01_to_2025-12-30.csv ]; then
+            echo "✓ ETH data found in repo"
+          else
+            echo "⚠ ETH data not found"
+          fi
+          
+          echo ""
+          echo "Data files available:"
+          ls -lh ../iteradynamics/data/*.csv 2>/dev/null || echo "No CSV files found"
+          echo "=================================================="
+
+      - name: Run Full-History Walk-Forward Validation
+        run: |
+          echo "=================================================="
+          echo "MoonWire Full-History Validation (Itera Data)"
+          echo "=================================================="
+          echo "Symbols: ${{ inputs.symbols }}"
+          echo "Horizon: ${{ inputs.horizon_h }} hours"
+          echo "Mode: PRICE-ONLY (no social features)"
+          echo "=================================================="
+          
+          # Split symbols into array
+          IFS=',' read -ra SYMBOLS <<< "${{ inputs.symbols }}"
+          
+          # Run training with walk-forward validation
+          python scripts/ml/train_itera_validation.py \
+            --symbols "${SYMBOLS[@]}" \
+            --output validation_results
+          
+          echo ""
+          echo "✓ Walk-forward validation complete!"
+          echo ""
+          if [ -f validation_results/validation_results.json ]; then
+            echo "Validation results:"
+            cat validation_results/validation_results.json | python -m json.tool | head -50
+          fi
+
+      - name: Export Signal Feeds
+        run: |
+          echo "=================================================="
+          echo "Exporting Signal Feeds (Full History)"
+          echo "=================================================="
+          
+          IFS=',' read -ra SYMBOLS <<< "${{ inputs.symbols }}"
+          
+          for symbol in "${SYMBOLS[@]}"; do
+            echo ""
+            echo "Exporting signals for $symbol..."
+            
+            model_file="validation_results/models/${symbol}_model.joblib"
+            
+            if [ ! -f "$model_file" ]; then
+              echo "⚠ Model not found: $model_file"
+              continue
+            fi
+            
+            # Determine date range based on symbol
+            if [ "$symbol" == "BTC" ]; then
+              start_date="2019-01-01"
+              end_date="2025-12-30"
+            elif [ "$symbol" == "ETH" ]; then
+              start_date="2019-03-08"
+              end_date="2026-03-07"
+            else
+              start_date="2019-01-01"
+              end_date="2025-12-30"
+            fi
+            
+            python scripts/ml/export_signal_feed_itera.py \
+              --symbol "$symbol" \
+              --model "$model_file" \
+              --start "$start_date" \
+              --end "$end_date" \
+              --output-dir "feeds/${symbol,,}" \
+              --model-version "v1.0-itera-full-history"
+            
+            if [ -f "feeds/${symbol,,}/signals.jsonl" ]; then
+              echo "✓ Signal feed exported: feeds/${symbol,,}/signals.jsonl"
+              echo "  Signals: $(wc -l < feeds/${symbol,,}/signals.jsonl)"
+            fi
+          done
+          
+          echo ""
+          echo "=================================================="
+          echo "Signal export complete!"
+          echo "=================================================="
+
+      - name: Run Backtests on Signal Feeds
+        run: |
+          echo "=================================================="
+          echo "Running Backtests (Full History)"
+          echo "=================================================="
+          
+          # Create backtest script
+          cat > run_backtest.py << 'BACKTEST_SCRIPT'
+          import sys
+          import json
+          import pandas as pd
+          from pathlib import Path
+          
+          sys.path.insert(0, str(Path.cwd()))
+          from scripts.ml.backtest_bidirectional import run_backtest_bidirectional
+          from scripts.ml.data_loader_itera import load_prices_itera
+          
+          def run_full_backtest(symbol, long_thresh, short_thresh, debounce_hours, horizon_hours):
+              # Load signal feed
+              feed_path = Path(f"feeds/{symbol.lower()}/signals.jsonl")
+              if not feed_path.exists():
+                  print(f"⚠ No signal feed for {symbol}")
+                  return None
+              
+              # Load signals
+              signals = []
+              with open(feed_path) as f:
+                  for line in f:
+                      signals.append(json.loads(line))
+              
+              pred_df = pd.DataFrame(signals)
+              pred_df = pred_df.rename(columns={"timestamp": "ts"})
+              pred_df["ts"] = pd.to_datetime(pred_df["ts"])
+              
+              # Load prices
+              prices_dict = load_prices_itera([symbol])
+              if symbol not in prices_dict:
+                  print(f"⚠ No price data for {symbol}")
+                  return None
+              
+              prices_df = prices_dict[symbol][["ts", "close"]]
+              
+              # Run backtest
+              result = run_backtest_bidirectional(
+                  pred_df=pred_df,
+                  prices_df=prices_df,
+                  mode="combined",
+                  long_thresh=long_thresh,
+                  short_thresh=short_thresh,
+                  debounce_hours=debounce_hours,
+                  horizon_hours=horizon_hours,
+                  fee_bps=10.0,  # 10 bps fee
+                  slippage_bps=5.0,  # 5 bps slippage
+                  symbol=symbol,
+              )
+              
+              return result
+          
+          if __name__ == "__main__":
+              symbol = sys.argv[1]
+              long_thresh = float(sys.argv[2])
+              short_thresh = float(sys.argv[3])
+              debounce_hours = int(sys.argv[4])
+              horizon_hours = int(sys.argv[5])
+              
+              result = run_full_backtest(
+                  symbol, long_thresh, short_thresh, debounce_hours, horizon_hours
+              )
+              
+              if result:
+                  # Save to file
+                  output_path = Path(f"validation_results/backtest_{symbol}.json")
+                  with open(output_path, "w") as f:
+                      json.dump(result, f, indent=2, default=str)
+                  
+                  print(f"\n✓ Backtest complete: {output_path}")
+                  
+                  # Print summary
+                  agg = result.get("aggregate", {})
+                  print(f"\n{symbol} Backtest Summary:")
+                  print(f"  CAGR: {agg.get('cagr', 0):.2%}")
+                  print(f"  Max Drawdown: {agg.get('max_drawdown', 0):.2%}")
+                  print(f"  Win Rate: {agg.get('win_rate', 0):.2%}")
+                  print(f"  Total Trades: {agg.get('n_trades', 0)}")
+                  print(f"  Signals/Day: {agg.get('signals_per_day', 0):.2f}")
+                  print(f"  Profit Factor: {agg.get('profit_factor', 0):.2f}")
+              else:
+                  print(f"⚠ Backtest failed for {symbol}")
+                  sys.exit(1)
+          BACKTEST_SCRIPT
+          
+          # Run backtest for each symbol
+          IFS=',' read -ra SYMBOLS <<< "${{ inputs.symbols }}"
+          
+          for symbol in "${SYMBOLS[@]}"; do
+            echo ""
+            echo "Running backtest for $symbol..."
+            python run_backtest.py \
+              "$symbol" \
+              "${{ inputs.backtest_long_thresh }}" \
+              "${{ inputs.backtest_short_thresh }}" \
+              "${{ inputs.backtest_debounce_hours }}" \
+              "${{ inputs.horizon_h }}"
+          done
+          
+          echo ""
+          echo "=================================================="
+          echo "All backtests complete!"
+          echo "=================================================="
+
+      - name: Generate Full Summary Report
+        run: |
+          python3 << 'SUMMARY_SCRIPT'
+          import json
+          from pathlib import Path
+          
+          print("\n" + "="*70)
+          print("MOONWIRE ITERA FULL-HISTORY VALIDATION SUMMARY")
+          print("="*70 + "\n")
+          
+          # Load validation results
+          val_path = Path("validation_results/validation_results.json")
+          if val_path.exists():
+              val_data = json.loads(val_path.read_text())
+              
+              print("Walk-Forward Validation Results:")
+              print("-" * 70)
+              
+              for symbol, results in val_data.items():
+                  agg = results.get("aggregate", {})
+                  print(f"\n{symbol}:")
+                  print(f"  Validation Folds: {agg.get('num_folds', 0)}")
+                  print(f"  Mean Accuracy: {agg.get('mean_accuracy', 0):.4f}")
+                  print(f"  Mean Precision: {agg.get('mean_precision', 0):.4f}")
+                  print(f"  Mean Recall: {agg.get('mean_recall', 0):.4f}")
+                  print(f"  Mean F1: {agg.get('mean_f1', 0):.4f}")
+          
+          print("\n" + "-" * 70)
+          print("Backtest Results (Full History):")
+          print("-" * 70)
+          
+          # Load backtest results
+          for bt_file in Path("validation_results").glob("backtest_*.json"):
+              bt_data = json.loads(bt_file.read_text())
+              symbol = bt_file.stem.replace("backtest_", "")
+              agg = bt_data.get("aggregate", {})
+              
+              print(f"\n{symbol}:")
+              print(f"  CAGR: {agg.get('cagr', 0):.2%}")
+              print(f"  Max Drawdown: {agg.get('max_drawdown', 0):.2%}")
+              print(f"  Win Rate: {agg.get('win_rate', 0):.2%}")
+              print(f"  Total Trades: {agg.get('n_trades', 0)}")
+              print(f"  Signals/Day: {agg.get('signals_per_day', 0):.2f}")
+              print(f"  Profit Factor: {agg.get('profit_factor', 0):.2f}")
+          
+          print("\n" + "="*70)
+          print("Full results available in artifacts!")
+          print("="*70 + "\n")
+          SUMMARY_SCRIPT
+
+      - name: Upload Full-History Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: itera-full-history-results
+          path: |
+            validation_results/
+            feeds/
+          retention-days: 30
+
+      - name: Display Final Summary
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✅ Full-History Validation Complete!"
+          echo "=========================================="
+          echo ""
+          echo "Artifacts generated:"
+          echo "  - validation_results/validation_results.json (walk-forward metrics)"
+          echo "  - validation_results/backtest_*.json (trading performance)"
+          echo "  - validation_results/models/*.joblib (trained models)"
+          echo "  - feeds/*/signals.jsonl (full signal history)"
+          echo "  - feeds/*/manifest.json (signal metadata)"
+          echo ""
+          echo "Download artifacts to view complete results:"
+          echo "  Actions → This workflow run → Artifacts → itera-full-history-results"
+          echo ""
+          echo "=========================================="
