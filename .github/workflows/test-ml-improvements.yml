@@ -335,8 +335,15 @@ jobs:
       MW_SOCIAL_ENABLED: 0  # Force price-only mode
 
     steps:
-      - name: Checkout
+      - name: Checkout MoonWire
         uses: actions/checkout@v4
+
+      - name: Checkout Itera Dynamics (for historical data)
+        uses: actions/checkout@v4
+        with:
+          repository: IteraDynamics/IteraDynamics
+          path: ../iteradynamics
+          ref: feature/moonwire-signal-integration
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -350,24 +357,23 @@ jobs:
           if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
           python -m pip install matplotlib scikit-learn pandas numpy joblib
 
-      - name: Download Itera Historical Data
+      - name: Verify Itera Historical Data
         run: |
           echo "=================================================="
-          echo "Downloading Itera Historical Data (2019-2025)"
+          echo "Verifying Itera Historical Data (2019-2025)"
           echo "=================================================="
-          mkdir -p ../iteradynamics/data
           
-          # Check if data files already exist in the repo
+          # Verify data files exist
           if [ -f ../iteradynamics/data/btcusd_3600s_2019-01-01_to_2025-12-30.csv ]; then
-            echo "✓ BTC data found in repo"
+            echo "✓ BTC data found"
           else
             echo "⚠ BTC data not found - workflow will fail"
-            echo "Please ensure Itera data is committed to ../iteradynamics/data/"
+            echo "Expected: ../iteradynamics/data/btcusd_3600s_2019-01-01_to_2025-12-30.csv"
             exit 1
           fi
           
           if [ -f ../iteradynamics/data/ethusd_3600s_2019-01-01_to_2025-12-30.csv ]; then
-            echo "✓ ETH data found in repo"
+            echo "✓ ETH data found"
           else
             echo "⚠ ETH data not found"
           fi
